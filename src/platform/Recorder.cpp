@@ -88,7 +88,8 @@ bool usable_folder(const std::filesystem::path& dir) {
 // §5.2: created if it does not exist; when that fails, clips go to the Videos folder. A relative
 // path is taken from the exe's folder, never from wherever Backtrack happened to be started (§8:
 // no working directory assumption), and an unknown %VARIABLE% is not taken literally.
-std::filesystem::path prepare_output_dir(const std::string& setting, const std::filesystem::path& app_dir) {
+std::filesystem::path prepare_output_dir(const std::string& setting, const std::filesystem::path& app_dir,
+                                         bool& fell_back) {
     std::filesystem::path dir = expand_environment(setting);
     // A %NAME% that is still there after expansion is a variable that does not exist. A single %
     // in a real folder name ("Clips 100%") is fine.
@@ -100,6 +101,7 @@ std::filesystem::path prepare_output_dir(const std::string& setting, const std::
         log::warn("output_dir '{}' uses an environment variable that does not exist, saving clips in {} instead",
                   setting, to_utf8(fallback.wstring()));
         usable_folder(fallback);
+        fell_back = true;
         return fallback;
     }
     if (dir.is_relative()) {
@@ -111,6 +113,7 @@ std::filesystem::path prepare_output_dir(const std::string& setting, const std::
     const std::filesystem::path fallback = videos_folder();
     log::warn("Cannot create output_dir '{}', saving clips in {} instead", setting, to_utf8(fallback.wstring()));
     usable_folder(fallback);
+    fell_back = true;
     return fallback;
 }
 
@@ -151,7 +154,7 @@ double megabytes(std::uint64_t bytes) {
 Recorder::Recorder(const Settings& settings, const std::filesystem::path& app_dir, SavedCallback on_saved)
     : settings_(settings),
       on_saved_(std::move(on_saved)),
-      output_dir_(prepare_output_dir(settings.output_dir, app_dir)),
+      output_dir_(prepare_output_dir(settings.output_dir, app_dir, output_dir_fallback_)),
       encoder_preference_(settings.encoder),
       video_buffer_(seconds_to_100ns(settings.clip_seconds), byte_cap(settings.clip_seconds, settings.video_bitrate_kbps)),
       audio_buffer_(seconds_to_100ns(settings.clip_seconds + kAudioExtraSeconds),
@@ -252,7 +255,6 @@ void Recorder::pause() {
     if (!started_ || paused_) {
         return;
     }
-    pause_started_ = qpc_now();
     paused_ = true;
     if (capture_) {
         capture_->stop();
@@ -260,6 +262,8 @@ void Recorder::pause() {
     if (audio_) {
         audio_->stop();
     }
+    // Taken once both have stopped: no frame or sound from before the pause is stamped later.
+    pause_started_ = qpc_now();
     log::info("Recording paused");
 }
 
@@ -269,7 +273,12 @@ void Recorder::resume() {
         if (!started_ || !paused_) {
             return;
         }
-        paused_total_ += qpc_now() - pause_started_;
+        // The recording clock resumes one frame after where it stopped, not exactly there: otherwise
+        // the first frame after the pause can land within a frame of the last one before it, which
+        // a player at the clip's frame rate sees as two frames at the same time. Sound and picture
+        // both move by that frame, so they stay in step; the clock never goes backwards.
+        const Time100ns frame_interval = kTicksPerSecond / settings_.fps;
+        paused_total_ += qpc_now() - pause_started_ - frame_interval;
         paused_ = false;
         if (capture_) {
             try {

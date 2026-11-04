@@ -29,28 +29,39 @@ add_library(backtrack_core STATIC
     src/core/H264.cpp
     src/core/ClipPlan.cpp
     src/core/Mp4.cpp
+    src/core/Json.cpp
+    src/core/Library.cpp
 )
 target_include_directories(backtrack_core PUBLIC src)
 target_link_libraries(backtrack_core PUBLIC bt_options)
 
-add_executable(backtrack
+# WIN32: a window app, no console window. The manifest turns on modern common controls and
+# per-monitor DPI awareness.
+add_executable(backtrack WIN32
     src/main.cpp
+    src/backtrack.manifest
     src/platform/Log.cpp
     src/platform/ScreenCapture.cpp
     src/platform/VideoEncoder.cpp
     src/platform/AudioCapture.cpp
     src/platform/ClipWriter.cpp
     src/platform/Recorder.cpp
+    src/platform/MediaProbe.cpp
+    src/platform/Shell.cpp
+    src/ui/App.cpp
+    src/ui/Graphics.cpp
+    src/ui/Icon.cpp
 )
 target_include_directories(backtrack PRIVATE src)
-target_link_libraries(backtrack PRIVATE backtrack_core d3d11 dxgi mfplat mfuuid mfreadwrite winmm avrt wmcodecdspuuid shell32 ole32)
+target_link_libraries(backtrack PRIVATE backtrack_core d3d11 dxgi mfplat mfuuid mfreadwrite winmm avrt wmcodecdspuuid
+                      shell32 ole32 d2d1 dwrite dwmapi comctl32 windowscodecs propsys)
 
 # Development tool for the audio/video sync check (tools/check_sync.ps1). Not shipped.
 add_executable(sync_beacon tools/sync_beacon.cpp)
 target_link_libraries(sync_beacon PRIVATE bt_options winmm ole32)
 
 enable_testing()
-foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests)
+foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests)
     add_executable(${test_name} tests/${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE backtrack_core)
     target_compile_definitions(${test_name} PRIVATE BT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

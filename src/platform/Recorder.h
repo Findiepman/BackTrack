@@ -81,6 +81,8 @@ public:
     std::string status_text() const;
     bool saving() const { return saves_pending_ > 0; }
     const std::filesystem::path& output_dir() const { return output_dir_; }
+    // The configured clips folder could not be used and clips go to the Videos folder this run.
+    bool output_dir_is_fallback() const { return output_dir_fallback_; }
 
     // Test hook: behave as if Windows took the screen away (UAC prompt).
     void simulate_capture_loss();
@@ -116,6 +118,7 @@ private:
 
     const Settings settings_;
     SavedCallback on_saved_;
+    bool output_dir_fallback_ = false;  // before output_dir_: set while that is initialised
     std::filesystem::path output_dir_;
 
     // Pipeline. Changed under pipeline_mutex_. capture_ is also read without it by the capture

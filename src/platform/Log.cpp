@@ -39,7 +39,9 @@ struct State {
 };
 
 State& state() {
-    static State s;
+    // Never destroyed on purpose: a detached thread (opening Explorer) may still log while the
+    // process exits, after static destructors would have run.
+    static State& s = *new State;
     return s;
 }
 

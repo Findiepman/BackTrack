@@ -8,27 +8,44 @@ Built from scratch on what Windows ships with: Desktop Duplication and Direct3D 
 screen, the graphics card's own H.264 encoder through Media Foundation (AMD, NVIDIA or Intel, with
 Windows' software encoder as fallback), WASAPI for sound. No FFmpeg, no OBS, no runtime to install.
 
-> **Status:** the recording engine is complete. The real user interface is being designed;
-> until it exists, Backtrack runs in a small console window (see below).
+> **Status:** the recording engine and the clip library window are done. Still to come: the clip
+> page (player, trim), the Record and Settings screens. Until the Settings screen exists, settings
+> are in `backtrack.ini`.
 
 ## Using it
 
-1. Run `backtrack.exe`. A console window opens and shows what Backtrack is doing; its title bar
-   shows the state, for example `Backtrack - Recording 30 s, 60 fps, hardware`.
+1. Run `backtrack.exe`. The Backtrack window opens with your clip library; Instant Replay starts
+   at once (the pill at the top right says `Replay on, 30 s`).
 2. Play. Press **F8** (anywhere, also in a game) to save the last 30 seconds. You hear the Windows
-   "asterisk" sound and the file appears in `Videos\Backtrack`.
-3. Keys in the console window:
+   "asterisk" sound, the clip appears at the top of the library with a "Saved" bar, and the file is
+   in `Videos\Backtrack`. When the window is not in front, Windows shows a small "Saved" message.
+3. In the library:
+   - Click a clip to play it (in your default player for now). Right-click it to show it in its
+     folder, favorite it, rename it, add it to a collection or move it to the Trash.
+   - The star on a clip makes it a favorite. Favorites and clips in a collection are never removed
+     automatically.
+   - **+** next to Collections makes a new collection; right-click a collection to rename or delete
+     it (deleting a collection keeps its clips).
+   - The search box at the top (Ctrl+K) searches titles, file names, tags and notes.
+   - Trash: clips you delete wait there for 30 days, then go to the Windows Recycle Bin. The file
+     stays in the clips folder until then. Backtrack never deletes anything for good: on a drive
+     without a Recycle Bin (USB stick, network share) the clip simply stays where it is.
+4. Clicking the window's **X** hides Backtrack to the tray (the icon next to the clock); Instant
+   Replay keeps running. Click the tray icon to open the window again; right-click it to save a
+   clip, pause, open the clips folder, edit the settings, open the log or **Quit**. Quitting waits
+   for a clip that is still being saved.
 
-   | Key | Does |
-   |---|---|
-   | S | save a clip (same as the hotkey) |
-   | P | pause / resume recording |
-   | O | open the clips folder |
-   | E | open the settings file |
-   | L | open the log |
-   | Q | quit (waits for a clip that is still being saved) |
+Only one Backtrack runs at a time. Starting it again brings the running window to the front.
 
-Only one Backtrack runs at a time. Starting it again makes the running window flash in the taskbar and the new copy closes.
+Next to `backtrack.exe` Backtrack keeps `library.json` (favorites, titles, collections, trash) and a
+`cache` folder with thumbnails (safe to delete; they are made again). If that folder is read-only
+(for example under `C:\Program Files`), they and `backtrack.log` go to `%LOCALAPPDATA%\Backtrack` instead. If
+`library.json` is ever damaged, a copy is kept as `library.damaged-<date-time>.json` and the
+library is rebuilt from the clips folder; a file written by a newer Backtrack is kept as
+`library.newer-<date-time>.json` before it is saved again. When the clips folder cannot be reached
+(an unplugged drive), the library is left exactly as it was. If `library.json` cannot be read at
+all (locked by another program), the window says so and changes are not saved that run, so the
+file is never overwritten.
 
 ### Things to know
 
@@ -80,7 +97,8 @@ modifier (they would stop working in every other program), F12 on its own (reser
 Ctrl+Pause (the keyboard sends Break instead), Shift+Numpad keys (NumLock turns them into arrow
 keys). PrintScreen on its own is allowed, but Windows 11 gives it to the Snipping Tool unless that
 is turned off in Settings > Accessibility > Keyboard. If another program already uses the hotkey,
-the log says so and the S key still works.
+the sidebar says the key is taken, the log says why, and the "Save last 30 s" button in the window
+and the tray menu still work.
 
 ### `[video]`
 
@@ -103,7 +121,7 @@ the log says so and the S key still works.
 | Key | Default | Meaning |
 |---|---|---|
 | `sound` | `true` | Play the Windows "asterisk" sound when a clip is saved. |
-| `notification` | `true` | Reserved for the user interface; the console version shows saves in the window and the log. |
+| `notification` | `true` | Show a Windows message when a clip is saved while the Backtrack window is not in front. |
 
 ### `[logging]`
 
@@ -136,7 +154,7 @@ tests\run-tests.bat
 
 `backtrack.exe` also takes options for automated testing: `--save-after <s>` (repeatable),
 `--pause-after <s>`, `--resume-after <s>`, `--lose-capture-every <s>` (pretends Windows took the
-screen away, as a UAC prompt does) and `--exit-after <s>`.
+screen away, as a UAC prompt does), `--exit-after <s>` and `--hidden` (start in the tray).
 
 ### Checking sound/picture sync
 
@@ -156,5 +174,6 @@ thread without re-encoding, under a `.tmp` name that is renamed when complete. E
 comes from one clock, so sound and picture stay in sync however long Backtrack runs.
 
 Code layout: `src/core` is plain C++ with unit tests (settings, hotkeys, ring buffer, clip
-planning); `src/platform` is everything that talks to Windows; `src/platform/Recorder.h` is the
-engine the user interface drives.
+planning, the clip library and its JSON file); `src/platform` is everything that talks to Windows;
+`src/platform/Recorder.h` is the engine the window drives; `src/ui` is the window, drawn with
+Direct2D and DirectWrite (part of Windows, nothing to install).
