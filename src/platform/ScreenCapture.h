@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -64,7 +65,8 @@ struct CaptureStats {
 };
 
 enum class CaptureEvent {
-    FormatChanged,  // first frame, or the output size changed: frames after this have the new size
+    FormatChanged,  // the first frame: from now on frame_size() is known. The size never changes
+                    // afterwards; a later resolution change is scaled into it.
     Lost,  // duplication lost; the last good frame keeps being delivered
     Recovered,  // duplication re-created
     Failed,  // the capture thread hit a fatal error and stopped
@@ -96,13 +98,10 @@ public:
     CaptureStats stats() const;
 
     // Capture thread only (inside FrameCallback). Copies a frame to system memory: tightly
-    // packed NV12 (Y plane then interleaved UV). Used for the M1 frame dump and the software
-    // encoder fallback, which needs system memory input (§3.4).
+    // packed NV12 (Y plane then interleaved UV), for the software encoder, which needs system
+    // memory input (§3.4).
     std::vector<std::uint8_t> read_nv12(IMFSample* nv12_sample);
 
-    // Capture thread only. The BGRA desktop image the last frame was converted from, cropped the
-    // same way, tightly packed. Empty when the monitor is rotated (it is stored unrotated).
-    std::vector<std::uint8_t> read_last_bgra();
 
     // Test hook: makes the next tick behave as if DXGI returned DXGI_ERROR_ACCESS_LOST.
     void simulate_access_lost() { simulate_lost_ = true; }
@@ -143,11 +142,15 @@ private:
     HRESULT output_view_for(ID3D11Texture2D* texture, UINT subresource, ID3D11VideoProcessorOutputView** view);
     void notify(CaptureEvent event);
     void log_counters();
+    void check_monitor_assignment();
 
     const int fps_;
     FrameCallback on_frame_;
     EventCallback on_event_;
     MonitorInfo monitor_;
+    int requested_index_ = 0;  // the monitor setting, kept to re-resolve it
+    bool fell_back_ = false;  // recording monitor 0 because the configured one was missing at startup
+    std::set<std::wstring> known_names_;  // monitors that existed when recording started
 
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;
@@ -168,6 +171,9 @@ private:
     bool have_frame_ = false;
     bool lost_ = false;
     bool open_failure_logged_ = false;
+    bool allocator_ready_ = false;  // set up once, for the size that never changes
+    Time100ns monitor_missing_since_ = 0;  // 0 = the monitor is there
+    Time100ns next_monitor_check_ = 0;
     Time100ns next_retry_ = 0;
     Time100ns retry_delay_ = 0;
     Time100ns next_counter_log_ = 0;
@@ -178,7 +184,6 @@ private:
     std::vector<OutputView> output_views_;
     log::RateLimit convert_error_log_{std::chrono::seconds(10)};
     ComPtr<ID3D11Texture2D> nv12_staging_;
-    ComPtr<ID3D11Texture2D> bgra_staging_;
 
     mutable std::mutex size_mutex_;
     VideoSize output_size_;

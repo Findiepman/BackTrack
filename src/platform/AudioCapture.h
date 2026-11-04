@@ -67,6 +67,10 @@ public:
     // True when the audio thread could not reach the Windows audio system at all and ended.
     bool failed() const { return failed_; }
 
+    // True while sound is actually being captured (a device is open); false while there is no
+    // device, while one is being reopened and after failed().
+    bool recording() const { return open_ && !failed_; }
+
 private:
     class DeviceNotifier;
 
@@ -75,6 +79,8 @@ private:
     void open_device(IMMDeviceEnumerator* enumerator);
     void close_device();
     void keep_render_alive();
+    void drop_render_stream();
+    void add_latency_sample(Time100ns at, Time100ns value);
     void read_packets();
     void handle_packet(const BYTE* data, UINT32 frames, DWORD flags, UINT64 qpc_position, Time100ns arrival);
     void encode_pcm(const BYTE* data, UINT32 frames);  // data null: silence
@@ -100,7 +106,8 @@ private:
     UINT32 device_rate_ = 0;
     UINT32 block_align_ = 0;
     std::wstring device_id_;
-    bool open_ = false;
+    std::atomic<bool> open_{false};  // written by the audio thread, read by recording()
+    ULONGLONG opened_at_ms_ = 0;
     bool anchored_ = false;
     Time100ns anchor_ = 0;  // recording-clock time of the first sample ever
     Time100ns segment_base_ = 0;  // timeline offset where the current device format began
@@ -108,9 +115,17 @@ private:
     Time100ns clock_offset_ = 0;
     // Two seconds of packets: long enough that at least one was read right after it was mixed.
     WindowedMinimum device_latency_{2 * kTicksPerSecond};
+
+    struct BatchPacket {
+        std::vector<BYTE> bytes;  // reused between polls; empty for a silent packet
+        UINT32 frames = 0;
+        DWORD flags = 0;
+        UINT64 qpc_position = 0;
+        std::uint64_t frames_after = 0;
+    };
+    std::vector<BatchPacket> batch_;  // grows to the most packets one poll has found, then stays
     log::RateLimit error_log_{std::chrono::seconds(30)};
     log::RateLimit reopen_log_{std::chrono::seconds(30)};
-    std::vector<BYTE> packet_copy_;
     Time100ns aac_offset_ = 0;  // correction applied to AAC stamps (stays 0 unless a flush needed it)
     Time100ns aac_expected_after_flush_ = 0;
     bool check_aac_after_flush_ = false;

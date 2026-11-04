@@ -8,6 +8,17 @@ namespace {
 // Longer than any path Windows accepts without the \\?\ prefix; strftime returns 0 beyond it.
 constexpr std::size_t kMaxExpandedName = 260;
 
+// A sample lasts until the next one starts. A frame the encoder dropped (or a tick the capture
+// skipped) leaves a gap in the timestamps; if the durations still said 1/fps, an MP4 writer that
+// builds its timing from durations would close every gap and the picture would run ahead of the
+// sound. The last sample keeps its own duration.
+Time100ns span_until_next(const std::vector<Packet>& packets, std::size_t i) {
+    // A repeated or backwards stamp would give 0 or less, which the MP4 writer refuses; the
+    // packet's own duration stands in then.
+    const Time100ns span = i + 1 < packets.size() ? packets[i + 1].pts - packets[i].pts : 0;
+    return span > 0 ? span : packets[i].duration;
+}
+
 }  // namespace
 
 ClipPlan plan_clip(const std::vector<Packet>& video, const std::vector<Packet>& audio) {
@@ -30,13 +41,14 @@ ClipPlan plan_clip(const std::vector<Packet>& video, const std::vector<Packet>& 
         const bool take_video = a >= audio.size() || (v < video.size() && video[v].pts <= audio[a].pts);
         if (take_video) {
             const Packet& p = video[v];
-            plan.samples.push_back(ClipSample{false, v, p.pts - base, p.duration, p.keyframe});
-            plan.video_duration = p.pts - base + p.duration;
+            const Time100ns duration = span_until_next(video, v);
+            plan.samples.push_back(ClipSample{false, v, p.pts - base, duration, p.keyframe});
+            plan.video_duration = p.pts - base + duration;
             ++plan.video_samples;
             ++v;
         } else {
             const Packet& p = audio[a];
-            plan.samples.push_back(ClipSample{true, a, p.pts - base, p.duration, true});
+            plan.samples.push_back(ClipSample{true, a, p.pts - base, span_until_next(audio, a), true});
             ++plan.audio_samples;
             ++a;
         }

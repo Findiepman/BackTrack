@@ -32,6 +32,12 @@ struct AccessUnitInfo {
 
 AccessUnitInfo inspect(std::span<const std::uint8_t> access_unit);
 
+// The lowest H.264 level (level_idc: 31 = 3.1, 52 = 5.2, 60 = 6.0) whose limits (ITU-T H.264
+// table A-1, High profile bitrate factor 1.25) cover this resolution, frame rate and bitrate.
+// Encoders left to choose signal too low a level (AMD: 5.1 for 1080p144, which needs 5.2), and
+// phone hardware decoders then refuse or stutter. 0 when even level 6.2 is not enough.
+int required_level(int width, int height, int fps, int bitrate_kbps);
+
 // The SPS and PPS NAL units of a keyframe, each behind a 00 00 00 01 start code: the form
 // Media Foundation expects in MF_MT_MPEG_SEQUENCE_HEADER. Empty when either is missing.
 std::vector<std::uint8_t> parameter_sets(std::span<const std::uint8_t> keyframe);

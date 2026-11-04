@@ -7,6 +7,7 @@
 #include <shlobj.h>
 
 #include <ctime>
+#include <cwctype>
 
 namespace bt {
 namespace {
@@ -27,6 +28,10 @@ constexpr Time100ns kMinimumClip = kTicksPerSecond;
 // Rebuilding the video pipeline after a fatal error: quick first retry, then at most every 10 s.
 constexpr Time100ns kPipelineRetryInitial = kTicksPerSecond;
 constexpr Time100ns kPipelineRetryMax = 10 * kTicksPerSecond;
+// Two graphics device resets within a minute: the hardware encoder may be causing them, so the
+// rebuilt pipeline keeps the software encoder instead of looping reset -> hardware -> reset.
+constexpr Time100ns kDeviceResetWindow = 60 * kTicksPerSecond;
+constexpr std::size_t kMaxDeviceResetsBeforeSoftware = 2;
 // A software encoder that cannot start is retried this often, not on every supervisor tick.
 constexpr Time100ns kEncoderRetryDelay = 5 * kTicksPerSecond;
 
@@ -36,11 +41,19 @@ constexpr auto kSupervisorTick = std::chrono::milliseconds(500);
 
 constexpr int kMaxNameAttempts = 999;
 constexpr const char* kFallbackFileName = "clip_%Y-%m-%d_%H-%M-%S.mp4";
+// Temporary files of a save: <clip>.mp4.tmp while writing, <clip>.mp4.fast.tmp while moving the index.
 constexpr std::wstring_view kTempSuffix = L".mp4.tmp";
+constexpr std::wstring_view kFastTempSuffix = L".mp4.fast.tmp";
+
+// The cap is a ceiling against a runaway encoder, not a budget. At very low settings (1 Mbit/s at
+// 144 fps) an encoder cannot stay near its target and twice the bitrate cut a 30 s clip to 12 s
+// (measured), so the cap never goes below what 50 Mbit/s would need.
+constexpr std::size_t kCapFloorKbps = 50000;
 
 std::size_t byte_cap(int seconds, int kbps) {
-    return (static_cast<std::size_t>(seconds) + kCapSlackSeconds) * static_cast<std::size_t>(kbps) * kBitsPerKilobit /
-           kBitsPerByte * kCapBitrateFactor;
+    const std::size_t ceiling_kbps =
+        std::max(static_cast<std::size_t>(kbps) * kCapBitrateFactor, kCapFloorKbps);
+    return (static_cast<std::size_t>(seconds) + kCapSlackSeconds) * ceiling_kbps * kBitsPerKilobit / kBitsPerByte;
 }
 
 std::filesystem::path expand_environment(const std::string& text) {
@@ -72,9 +85,26 @@ bool usable_folder(const std::filesystem::path& dir) {
     return std::filesystem::is_directory(dir, ec);
 }
 
-// §5.2: created if it does not exist; when that fails, clips go to the Videos folder.
-std::filesystem::path prepare_output_dir(const std::string& setting) {
-    const std::filesystem::path dir = expand_environment(setting);
+// §5.2: created if it does not exist; when that fails, clips go to the Videos folder. A relative
+// path is taken from the exe's folder, never from wherever Backtrack happened to be started (§8:
+// no working directory assumption), and an unknown %VARIABLE% is not taken literally.
+std::filesystem::path prepare_output_dir(const std::string& setting, const std::filesystem::path& app_dir) {
+    std::filesystem::path dir = expand_environment(setting);
+    // A %NAME% that is still there after expansion is a variable that does not exist. A single %
+    // in a real folder name ("Clips 100%") is fine.
+    const std::wstring expanded = dir.wstring();
+    const std::size_t open = expanded.find(L'%');
+    const std::size_t close = open == std::wstring::npos ? std::wstring::npos : expanded.find(L'%', open + 1);
+    if (close != std::wstring::npos && close > open + 1) {
+        const std::filesystem::path fallback = videos_folder();
+        log::warn("output_dir '{}' uses an environment variable that does not exist, saving clips in {} instead",
+                  setting, to_utf8(fallback.wstring()));
+        usable_folder(fallback);
+        return fallback;
+    }
+    if (dir.is_relative()) {
+        dir = app_dir / dir;
+    }
     if (usable_folder(dir)) {
         return dir;
     }
@@ -84,13 +114,24 @@ std::filesystem::path prepare_output_dir(const std::string& setting) {
     return fallback;
 }
 
+std::wstring lower(std::wstring text) {
+    for (wchar_t& c : text) {
+        c = static_cast<wchar_t>(std::towlower(c));
+    }
+    return text;
+}
+
 // A clip that was being written when the process was killed (console closed during a long save)
-// leaves a .mp4.tmp behind. Only one Backtrack runs at a time, so any found at startup are dead.
-void remove_stale_temp_files(const std::filesystem::path& dir) {
+// leaves <clip>.mp4.tmp or <clip>.mp4.fast.tmp behind. Only one Backtrack runs at a time, so any
+// found at startup are dead. Case-insensitive: the filename setting may say CLIP.MP4. `prefix`
+// limits it further in a shared folder (Videos), where other programs keep their own .tmp files.
+void remove_stale_temp_files(const std::filesystem::path& dir, const std::wstring& prefix) {
     std::error_code ec;
     for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
         const std::wstring name = entry.path().filename().wstring();
-        if (entry.is_regular_file(ec) && name.size() > kTempSuffix.size() && name.ends_with(kTempSuffix)) {
+        const std::wstring lower_name = lower(name);
+        const bool ours = lower_name.ends_with(kTempSuffix) || lower_name.ends_with(kFastTempSuffix);
+        if (entry.is_regular_file(ec) && ours && lower_name.starts_with(lower(prefix))) {
             std::error_code remove_error;
             if (std::filesystem::remove(entry.path(), remove_error)) {
                 log::info("Removed {} left over from a save that was interrupted", to_utf8(name));
@@ -99,22 +140,30 @@ void remove_stale_temp_files(const std::filesystem::path& dir) {
     }
 }
 
+constexpr double kBytesPerMegabyte = 1024.0 * 1024.0;
+
 double megabytes(std::uint64_t bytes) {
-    return static_cast<double>(bytes) / (1024.0 * 1024.0);
+    return static_cast<double>(bytes) / kBytesPerMegabyte;
 }
 
 }  // namespace
 
-Recorder::Recorder(const Settings& settings, SavedCallback on_saved)
+Recorder::Recorder(const Settings& settings, const std::filesystem::path& app_dir, SavedCallback on_saved)
     : settings_(settings),
       on_saved_(std::move(on_saved)),
-      output_dir_(prepare_output_dir(settings.output_dir)),
+      output_dir_(prepare_output_dir(settings.output_dir, app_dir)),
       encoder_preference_(settings.encoder),
       video_buffer_(seconds_to_100ns(settings.clip_seconds), byte_cap(settings.clip_seconds, settings.video_bitrate_kbps)),
       audio_buffer_(seconds_to_100ns(settings.clip_seconds + kAudioExtraSeconds),
                     byte_cap(settings.clip_seconds + kAudioExtraSeconds, settings.audio_bitrate_kbps)) {
     log::info("Clips are saved to {}", to_utf8(output_dir_.wstring()));
-    remove_stale_temp_files(output_dir_);
+    remove_stale_temp_files(output_dir_, L"");
+    // The Videos folder is where a clip goes when the clips folder was gone. Other programs use it
+    // too, so only files starting like Backtrack's own names are touched there.
+    const std::wstring name_prefix = to_wide(settings_.filename.substr(0, settings_.filename.find('%')));
+    if (videos_folder() != output_dir_ && !name_prefix.empty()) {
+        remove_stale_temp_files(videos_folder(), name_prefix);
+    }
     if (!settings_.audio_enabled) {
         log::info("Sound recording is off ([audio] enabled = false)");
         return;
@@ -163,6 +212,7 @@ void Recorder::stop() {
         }
         wake_.notify_all();
         supervisor_.join();
+        log_counters();  // the last minute's counters (supervisor gone: capture_ cannot change now)
     }
     {
         std::lock_guard lock(pipeline_mutex_);
@@ -297,7 +347,8 @@ std::string Recorder::status_text() const {
     if (paused_) {
         return "Paused";
     }
-    if (!pipeline_up_) {
+    if (!pipeline_up_ || !have_frames_) {
+        // Also at the lock screen or with the monitor asleep at startup: no frame has come yet.
         return "Waiting for the screen, retrying";
     }
     if (capture_lost_) {
@@ -314,7 +365,7 @@ std::string Recorder::status_text() const {
         }
         encoder = encoder_->hardware() ? "hardware" : "software";
     }
-    const bool sound = audio_ && !audio_->failed();
+    const bool sound = audio_ && audio_->recording();
     return std::format("Recording {} s, {} fps, {}{}", settings_.clip_seconds, settings_.fps, encoder,
                        sound ? "" : ", no sound");
 }
@@ -387,6 +438,11 @@ void Recorder::rebuild_pipeline() {
     }
     // Torn down and built without pipeline_mutex_: an encoder can take seconds to drain and a
     // capture a moment to start, and the owner thread (status, pause, save) must not wait for it.
+    // Every graphics device reset is counted here, whichever thread noticed it first (the capture
+    // reports Failed, the encoder fails, or ensure_encoder sees the removed device).
+    if (old_capture && FAILED(old_capture->device()->GetDeviceRemovedReason())) {
+        device_resets_.push_back(now);
+    }
     old_encoder.reset();  // before its capture: the encoder's input textures come from it
     old_capture.reset();
     {
@@ -414,6 +470,19 @@ void Recorder::rebuild_pipeline() {
     std::lock_guard lock(pipeline_mutex_);
     capture_ = std::move(capture);
     capture_lost_ = false;
+    have_frames_ = false;
+    // A new graphics device gets the configured encoder again: a hardware encoder that broke on
+    // the old device (driver reset) is not to blame for the next one. Unless the resets keep
+    // coming: then the hardware encoder may be the cause, and the software one stays.
+    const Time100ns since_reset_window = qpc_now() - kDeviceResetWindow;
+    std::erase_if(device_resets_, [since_reset_window](Time100ns at) { return at < since_reset_window; });
+    if (device_resets_.size() < kMaxDeviceResetsBeforeSoftware) {
+        encoder_preference_ = settings_.encoder;
+    } else if (encoder_preference_ != EncoderPreference::Software) {
+        log::warn("The graphics device was reset {} times within a minute; staying on the software encoder",
+                  device_resets_.size());
+        encoder_preference_ = EncoderPreference::Software;
+    }
     // The flags are set before the thread starts: it may report Failed on its very first tick,
     // and that report must win over "the pipeline is up".
     rebuild_pipeline_ = false;
@@ -437,6 +506,7 @@ void Recorder::ensure_encoder() {
     VideoSize size;
     IMFDXGIDeviceManager* manager = nullptr;
     LUID adapter{};
+    HRESULT device_state = S_OK;
     {
         std::lock_guard lock(pipeline_mutex_);
         if (!capture_ || paused_ || !pipeline_up_) {
@@ -445,6 +515,14 @@ void Recorder::ensure_encoder() {
         size = capture_->frame_size();
         manager = capture_->device_manager();
         adapter = capture_->monitor().adapter_luid;
+        device_state = capture_->device()->GetDeviceRemovedReason();
+    }
+    if (FAILED(device_state)) {
+        // The graphics device is gone (driver reset or update). The encoder usually notices
+        // before the capture does; the cure is a new device, not a downgrade to software.
+        log::info("The graphics device was reset ({}), rebuilding the video pipeline", hresult_text(device_state));
+        rebuild_pipeline_ = true;  // counted in rebuild_pipeline
+        return;
     }
     rebuild_encoder_ = false;
     if (size.width == 0 || qpc_now() < next_encoder_attempt_) {
@@ -529,6 +607,7 @@ void Recorder::on_frame(IMFSample* sample, Time100ns pts) {
 void Recorder::on_capture_event(CaptureEvent event) {
     switch (event) {
         case CaptureEvent::FormatChanged:
+            have_frames_ = true;
             rebuild_encoder_ = true;
             wake_supervisor();
             break;

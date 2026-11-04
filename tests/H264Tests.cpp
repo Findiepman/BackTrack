@@ -71,9 +71,25 @@ void emulation_prevention_and_trailing_zeros() {
     CHECK_EQ(units[1].payload.size(), std::size_t{2});
 }
 
+void levels() {
+    // Values checked against table A-1 by hand.
+    CHECK_EQ(h264::required_level(1920, 1080, 30, 8000), 40);
+    CHECK_EQ(h264::required_level(1920, 1080, 60, 20000), 42);
+    CHECK_EQ(h264::required_level(1920, 1080, 60, 70000), 50);    // 62.5 Mbit/s is the 4.2 High limit
+    CHECK_EQ(h264::required_level(1920, 1080, 120, 20000), 51);   // 979,200 MB/s fits 5.1
+    CHECK_EQ(h264::required_level(1920, 1080, 144, 20000), 52);   // AMD signalled 5.1 here (measured)
+    CHECK_EQ(h264::required_level(2560, 1440, 144, 40000), 52);
+    CHECK_EQ(h264::required_level(3440, 1440, 144, 50000), 60);
+    CHECK_EQ(h264::required_level(3840, 2160, 60, 50000), 52);
+    CHECK_EQ(h264::required_level(3840, 2160, 144, 100000), 61);
+    CHECK_EQ(h264::required_level(1024, 600, 60, 20000), 32);
+    CHECK_EQ(h264::required_level(7680, 4320, 144, 100000), 0);    // beyond 6.2
+}
+
 }  // namespace
 
 int main() {
+    levels();
     splits_three_and_four_byte_start_codes();
     p_frame_and_noise();
     emulation_prevention_and_trailing_zeros();

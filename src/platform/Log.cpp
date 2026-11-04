@@ -19,11 +19,19 @@ constexpr int kKeptFiles = 3;
 // Lines logged before init() are held in memory; a runaway early loop must not eat RAM.
 constexpr std::size_t kMaxEarlyLines = 1000;
 
+// No single line may be large enough to push the whole history out of the rolled files.
+constexpr std::size_t kMaxLineBytes = 64 * 1024;
+
+// When rolling fails (another program holds the file without delete sharing), try again only
+// after this much more has been written instead of on every line.
+constexpr std::uint64_t kRollRetryBytes = 1024 * 1024;
+
 struct State {
     std::mutex mutex;
     UniqueHandle file;
     std::filesystem::path path;
     std::uint64_t size = 0;
+    std::uint64_t next_roll_at = 0;  // do not try to roll below this size (after a failed roll)
     bool initialised = false;
     bool echo_console = false;
     std::vector<std::string> early_lines;
@@ -63,11 +71,14 @@ void append(State& s, const std::string& line) {
     if (!s.file) {
         return;
     }
-    if (s.size + line.size() > kMaxFileBytes) {
+    if (s.size > 0 && s.size + line.size() > kMaxFileBytes && s.size >= s.next_roll_at) {
         roll(s);
         if (!s.file) {
             return;
         }
+        // A failed rename leaves the big file in place: retry later, not on every line. A
+        // successful roll starts the new file with the normal cap again.
+        s.next_roll_at = s.size > 0 ? s.size + kRollRetryBytes : 0;
     }
     DWORD written = 0;
     if (WriteFile(s.file.get(), line.data(), static_cast<DWORD>(line.size()), &written, nullptr)) {
@@ -122,26 +133,35 @@ void shutdown() {
 }
 
 bool enabled(LogLevel level) {
-    return level <= state().level.load(std::memory_order_relaxed);
+    // "error" still shows warnings: they are what tells the player why a hotkey or a save did not work.
+    const LogLevel threshold = state().level.load(std::memory_order_relaxed);
+    return level <= (threshold == LogLevel::Error ? LogLevel::Warning : threshold);
 }
 
 void write(LogLevel level, std::string_view message) {
     SYSTEMTIME t{};
     GetLocalTime(&t);
+    const std::string_view text = message.size() > kMaxLineBytes ? message.substr(0, kMaxLineBytes) : message;
     const std::string line =
         std::format("{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03} {} [{}] {}\r\n", t.wYear, t.wMonth, t.wDay, t.wHour,
-                    t.wMinute, t.wSecond, t.wMilliseconds, level_name(level), GetCurrentThreadId(), message);
+                    t.wMinute, t.wSecond, t.wMilliseconds, level_name(level), GetCurrentThreadId(), text);
 
     State& s = state();
-    std::lock_guard lock(s.mutex);
-    if (s.echo_console) {
+    bool echo = false;
+    {
+        std::lock_guard lock(s.mutex);
+        echo = s.echo_console;
+        if (s.initialised) {
+            append(s, line);
+        } else if (s.early_lines.size() < kMaxEarlyLines) {
+            s.early_lines.push_back(line);
+        }
+    }
+    // Outside the lock: a console paused by the user (selecting text, Scroll Lock) blocks this
+    // write, and that must not block every other thread that logs.
+    if (echo) {
         std::fwrite(line.data(), 1, line.size(), stdout);
         std::fflush(stdout);
-    }
-    if (s.initialised) {
-        append(s, line);
-    } else if (s.early_lines.size() < kMaxEarlyLines) {
-        s.early_lines.push_back(line);
     }
 }
 

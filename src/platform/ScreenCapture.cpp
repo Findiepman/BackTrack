@@ -8,6 +8,7 @@
 #include <timeapi.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 
@@ -29,6 +30,11 @@ constexpr DWORD kAllocatorMaxSamples = 16;
 constexpr std::size_t kMaxCachedOutputViews = kAllocatorMaxSamples * 2;
 
 constexpr UINT kTimerResolutionMs = 1;
+
+// How long the recorded monitor may be missing before checking whether it came back under another
+// name, and how often a fallback to monitor 0 checks whether the configured monitor appeared.
+constexpr Time100ns kMonitorRenameDelay = 5 * kTicksPerSecond;
+
 
 // §9: counters go to the log once a minute at debug level.
 constexpr Time100ns kCounterLogInterval = 60 * kTicksPerSecond;
@@ -204,9 +210,14 @@ ScreenCapture::ScreenCapture(int monitor_index, int fps, FrameCallback on_frame,
         log::info("Monitor {}: {} {}x{}{} on {}", i, to_utf8(m.device_name), m.desktop_size.width,
                   m.desktop_size.height, m.primary ? " (primary)" : "", m.adapter_name);
     }
+    requested_index_ = monitor_index;
+    for (const MonitorInfo& m : monitors) {
+        known_names_.insert(m.device_name);
+    }
     if (monitor_index < 0 || static_cast<std::size_t>(monitor_index) >= monitors.size()) {
         log::warn("monitor = {} but only {} monitor(s) found, recording monitor 0", monitor_index, monitors.size());
         monitor_index = 0;
+        fell_back_ = true;  // switched to the configured monitor once it appears (asleep at startup)
     }
     monitor_ = monitors[static_cast<std::size_t>(monitor_index)];
     log::info("Recording monitor {} ({}) at {} fps", monitor_index, to_utf8(monitor_.device_name), fps_);
@@ -383,9 +394,31 @@ void ScreenCapture::capture_loop() {
             log_counters();
             next_counter_log_ = now + kCounterLogInterval;
         }
+        if (fell_back_ && now >= next_monitor_check_) {
+            next_monitor_check_ = now + kMonitorRenameDelay;
+            check_monitor_assignment();
+        }
         ++index;
     }
     log_counters();
+}
+
+void ScreenCapture::check_monitor_assignment() {
+    // Throws (capture ends as Failed, the owner rebuilds by index) when the configured monitor
+    // index now means a different monitor than the one being recorded.
+    const std::vector<MonitorInfo> monitors = list_monitors();
+    if (requested_index_ < 0 || static_cast<std::size_t>(requested_index_) >= monitors.size()) {
+        return;
+    }
+    const MonitorInfo& wanted = monitors[static_cast<std::size_t>(requested_index_)];
+    // Only a name that did not exist when recording started can be the recorded monitor coming
+    // back renamed. A monitor that was already there (index 0 sliding onto the second monitor
+    // while the first one sleeps) is a different screen: switching to it would record the wrong
+    // monitor and throw away the replay buffer.
+    if (wanted.device_name != monitor_.device_name && !known_names_.contains(wanted.device_name)) {
+        throw std::runtime_error(std::format("monitor = {} is now {}; switching to it", requested_index_,
+                                             to_utf8(wanted.device_name)));
+    }
 }
 
 bool ScreenCapture::try_open_duplication() {
@@ -424,8 +457,17 @@ bool ScreenCapture::try_open_duplication() {
     const ComPtr<IDXGIOutput> output = lookup.output;
     if (!output) {
         persistent_failure_since_ = 0;
+        const Time100ns now = qpc_now();
+        if (monitor_missing_since_ == 0) {
+            monitor_missing_since_ = now;
+        } else if (now - monitor_missing_since_ > kMonitorRenameDelay) {
+            // After DisplayPort deep sleep or a replug Windows can bring the monitor back under a
+            // new \\.\DISPLAYn name; waiting for the old name would record the last frame forever.
+            check_monitor_assignment();
+        }
         return retry_later("the monitor is asleep or disconnected");
     }
+    monitor_missing_since_ = 0;
 
     ComPtr<IDXGIOutputDuplication> duplication;
     HRESULT hr = E_NOINTERFACE;
@@ -561,7 +603,10 @@ void ScreenCapture::acquire_frame() {
             copied = true;
         }
     } catch (...) {
-        duplication_->ReleaseFrame();
+        const HRESULT released = duplication_->ReleaseFrame();
+        if (FAILED(released)) {
+            log::debug("ReleaseFrame after a failed copy: {}", hresult_text(released));
+        }
         throw;
     }
     const HRESULT release_hr = duplication_->ReleaseFrame();
@@ -602,8 +647,36 @@ void ScreenCapture::rebuild_pipeline(const SourceFormat& format) {
         throw std::runtime_error(std::format("Desktop size {}x{} is too small to record", format.width, format.height));
     }
     const bool sideways = is_sideways(format.rotation);
-    const VideoSize out{static_cast<int>(sideways ? crop_height : crop_width),
-                        static_cast<int>(sideways ? crop_width : crop_height)};
+    const VideoSize natural{static_cast<int>(sideways ? crop_height : crop_width),
+                            static_cast<int>(sideways ? crop_width : crop_height)};
+
+    // The recording size is fixed by the first desktop seen. A later resolution change is scaled
+    // into it (black bars when the shape differs): an MP4 cannot change size halfway, and
+    // re-creating the encoder at the new size would throw away the replay buffer, which §3.7
+    // forbids. The new size is used the next time Backtrack starts.
+    VideoSize out;
+    {
+        std::lock_guard lock(size_mutex_);
+        // Fixed only once frames have gone to the encoder: until then a correction (ModeDesc and
+        // the first real texture disagreeing, as on a rotated monitor) still sets the size.
+        const bool size_locked = output_size_.width != 0 && counters_.delivered > 0;
+        out = size_locked ? output_size_ : natural;
+    }
+    RECT target_rect{0, 0, out.width, out.height};
+    if (!(out == natural)) {
+        const double scale = std::min(static_cast<double>(out.width) / natural.width,
+                                      static_cast<double>(out.height) / natural.height);
+        // Even sizes and offsets: NV12 has one chroma sample per 2x2 pixels.
+        // Rounded, not truncated: 1366x768 into 1920x1080 must fill the full width, not 1918.
+        const LONG width = std::min<LONG>(std::lround(natural.width * scale), out.width) & ~1L;
+        const LONG height = std::min<LONG>(std::lround(natural.height * scale), out.height) & ~1L;
+        const LONG left = ((out.width - width) / 2) & ~1L;
+        const LONG top = ((out.height - height) / 2) & ~1L;
+        target_rect = RECT{left, top, left + width, top + height};
+        log::info("Desktop is now {}x{}; recording continues at {}x{} (scaled) so the replay buffer is kept. "
+                  "Restart Backtrack to record at the new size",
+                  natural.width, natural.height, out.width, out.height);
+    }
 
     output_views_.clear();
     input_view_.Reset();
@@ -611,7 +684,6 @@ void ScreenCapture::rebuild_pipeline(const SourceFormat& format) {
     processor_enum_.Reset();
     bgra_frame_.Reset();
     nv12_staging_.Reset();
-    bgra_staging_.Reset();
     have_frame_ = false;
     pipeline_built_ = false;
 
@@ -656,11 +728,16 @@ void ScreenCapture::rebuild_pipeline(const SourceFormat& format) {
     ID3D11VideoContext* vc = video_context_.Get();
     ID3D11VideoProcessor* vp = processor_.Get();
     const RECT source_rect{0, 0, static_cast<LONG>(crop_width), static_cast<LONG>(crop_height)};
-    const RECT target_rect{0, 0, out.width, out.height};
+    const RECT output_rect{0, 0, out.width, out.height};
     vc->VideoProcessorSetStreamFrameFormat(vp, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
     vc->VideoProcessorSetStreamSourceRect(vp, 0, TRUE, &source_rect);
     vc->VideoProcessorSetStreamDestRect(vp, 0, TRUE, &target_rect);
-    vc->VideoProcessorSetOutputTargetRect(vp, TRUE, &target_rect);
+    vc->VideoProcessorSetOutputTargetRect(vp, TRUE, &output_rect);
+    // Black bars around a scaled desktop, given as RGB so the processor converts it with the
+    // output colour space set below. (Given as YCbCr, AMD's driver drew the bars teal: measured.)
+    D3D11_VIDEO_COLOR black{};
+    black.RGBA = D3D11_VIDEO_COLOR_RGBA{0.0f, 0.0f, 0.0f, 1.0f};
+    vc->VideoProcessorSetOutputBackgroundColor(vp, FALSE, &black);
     // Drivers may apply their own "enhancements" (AMD: colour vibrance, sharpening) when auto
     // processing is on. A recording must look exactly like the screen.
     vc->VideoProcessorSetStreamAutoProcessingMode(vp, 0, FALSE);
@@ -683,9 +760,20 @@ void ScreenCapture::rebuild_pipeline(const SourceFormat& format) {
         video_context1_->VideoProcessorSetOutputColorSpace1(vp, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709);
     }
 
+    source_ = format;
+    pipeline_built_ = true;
+    if (allocator_ready_ && out == frame_size()) {
+        // Same output size as before: the allocator and the encoder holding its samples carry on.
+        return;
+    }
+
     // §3.5: the encoder's input textures come from Media Foundation's allocator, which only hands
-    // out a texture once the encoder has released it.
-    BT_CHECK_HR(allocator_->UninitializeSampleAllocator());
+    // out a texture once the encoder has released it. Set up once the size is settled; re-done
+    // only while no frame has gone out (the size may still be corrected by the first texture).
+    if (allocator_ready_) {
+        BT_CHECK_HR(allocator_->UninitializeSampleAllocator());
+        allocator_ready_ = false;
+    }
     ComPtr<IMFAttributes> attributes;
     BT_CHECK_HR(MFCreateAttributes(&attributes, 2));
     BT_CHECK_HR(attributes->SetUINT32(MF_SA_D3D11_BINDFLAGS, D3D11_BIND_RENDER_TARGET));  // video processor output
@@ -701,20 +789,14 @@ void ScreenCapture::rebuild_pipeline(const SourceFormat& format) {
     BT_CHECK_HR(type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive));
     BT_CHECK_HR(allocator_->InitializeSampleAllocatorEx(kAllocatorInitialSamples, kAllocatorMaxSamples,
                                                         attributes.Get(), type.Get()));
-
-    source_ = format;
-    pipeline_built_ = true;
-    bool size_changed = false;
+    allocator_ready_ = true;
     {
         std::lock_guard lock(size_mutex_);
-        size_changed = !(output_size_ == out);
         output_size_ = out;
     }
     log::info("Capture format: desktop {}x{}, rotation {}, NV12 frames {}x{}", format.width, format.height,
               static_cast<int>(format.rotation), out.width, out.height);
-    if (size_changed) {
-        notify(CaptureEvent::FormatChanged);
-    }
+    notify(CaptureEvent::FormatChanged);
 }
 
 void ScreenCapture::deliver(Time100ns pts, Time100ns duration) {
@@ -828,32 +910,6 @@ std::vector<std::uint8_t> ScreenCapture::read_nv12(IMFSample* nv12_sample) {
     return out;
 }
 
-std::vector<std::uint8_t> ScreenCapture::read_last_bgra() {
-    if (source_.rotation != DXGI_MODE_ROTATION_IDENTITY || !bgra_frame_) {
-        return {};
-    }
-    if (!bgra_staging_) {
-        D3D11_TEXTURE2D_DESC desc{};
-        bgra_frame_->GetDesc(&desc);
-        desc.Usage = D3D11_USAGE_STAGING;
-        desc.BindFlags = 0;
-        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        BT_CHECK_HR(device_->CreateTexture2D(&desc, nullptr, &bgra_staging_));
-    }
-    const VideoSize size = frame_size();
-    const std::size_t row_bytes = static_cast<std::size_t>(size.width) * 4;
-    std::vector<std::uint8_t> out(row_bytes * static_cast<std::size_t>(size.height));
-    context_->CopyResource(bgra_staging_.Get(), bgra_frame_.Get());
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    BT_CHECK_HR(context_->Map(bgra_staging_.Get(), 0, D3D11_MAP_READ, 0, &mapped));
-    const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
-    for (int y = 0; y < size.height; ++y) {
-        std::memcpy(out.data() + static_cast<std::size_t>(y) * row_bytes, src + static_cast<std::size_t>(y) * mapped.RowPitch,
-                    row_bytes);
-    }
-    context_->Unmap(bgra_staging_.Get(), 0);
-    return out;
-}
 
 void ScreenCapture::notify(CaptureEvent event) {
     if (!on_event_) {

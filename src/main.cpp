@@ -16,6 +16,8 @@
 #include <mmsystem.h>
 #include <shellapi.h>
 
+#include <conio.h>
+
 #include <atomic>
 #include <cstdio>
 #include <cwctype>
@@ -51,6 +53,11 @@ constexpr DWORD kCloseWaitMs = 4500;
 // §8: a second copy exits instead of recording twice. Per session, so two users can each run one.
 constexpr wchar_t kInstanceMutexName[] = L"Local\\Backtrack.SingleInstance";
 
+// Hidden top-level window: receives the shutdown/logoff messages (a console handler does not get
+// them once user32 is loaded) and the "someone started me again" message from a second copy.
+constexpr wchar_t kWindowClass[] = L"Backtrack.Host";
+constexpr wchar_t kAnotherInstanceMessage[] = L"Backtrack.AnotherInstance";
+
 enum class Command : WPARAM {
     Save = 's',
     Pause = 'p',
@@ -64,6 +71,8 @@ enum class Command : WPARAM {
 
 DWORD g_main_thread = 0;
 HANDLE g_finished = nullptr;  // set when run() has cleaned up
+bt::Recorder* g_recorder = nullptr;  // for the window procedure; set while the recorder exists
+UINT g_another_instance = 0;
 
 BOOL WINAPI on_console_ctrl(DWORD event) {
     if (!PostThreadMessageW(g_main_thread, WM_QUIT, 0, 0)) {
@@ -184,15 +193,67 @@ std::vector<ScheduledCommand> parse_options(int argc, wchar_t** argv) {
     return schedule;
 }
 
-void disable_quick_edit() {
-    // With QuickEdit on, clicking the console pauses all output; every thread that logs would
-    // then block on its next line.
-    const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
-    DWORD mode = 0;
-    if (input != INVALID_HANDLE_VALUE && GetConsoleMode(input, &mode)) {
-        SetConsoleMode(input, (mode & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS);
+LRESULT CALLBACK host_window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == WM_QUERYENDSESSION) {
+        if (g_recorder != nullptr && g_recorder->saving()) {
+            // Shown by Windows on the shutdown screen while the clip is finished.
+            ShutdownBlockReasonCreate(window, L"Saving a clip");
+        } else {
+            ShutdownBlockReasonDestroy(window);
+        }
+        return TRUE;
     }
+    if (message == WM_ENDSESSION) {
+        if (wparam != FALSE && g_recorder != nullptr) {
+            bt::log::info("Windows is shutting down or logging off");
+            g_recorder->stop();  // §6: the clip being written is finished, never left half written
+        }
+        // Also when the shutdown was cancelled: a stale reason would show at the next one.
+        ShutdownBlockReasonDestroy(window);
+        return 0;
+    }
+    if (message == g_another_instance && g_another_instance != 0) {
+        bt::log::info("Backtrack was started again; it is already running here");
+        FLASHWINFO flash{sizeof(flash), GetConsoleWindow(), FLASHW_ALL | FLASHW_TIMERNOFG, 0, 0};
+        FlashWindowEx(&flash);
+        return 0;
+    }
+    return DefWindowProcW(window, message, wparam, lparam);
 }
+
+// Restores the console's input mode and output code page on exit: they belong to the cmd window
+// Backtrack may have been started from.
+class ConsoleState {
+public:
+    ConsoleState()
+        : input_(CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                             OPEN_EXISTING, 0, nullptr)),
+          output_code_page_(GetConsoleOutputCP()) {
+        have_mode_ = input_ && GetConsoleMode(input_.get(), &mode_);
+        if (have_mode_) {
+            // With QuickEdit on, clicking the console pauses its output. CONIN$ is the console even
+            // when stdin is redirected.
+            SetConsoleMode(input_.get(), (mode_ & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS);
+        }
+        SetConsoleOutputCP(CP_UTF8);
+    }
+    ~ConsoleState() {
+        if (have_mode_) {
+            SetConsoleMode(input_.get(), mode_);
+        }
+        if (output_code_page_ != 0) {
+            SetConsoleOutputCP(output_code_page_);
+        }
+    }
+    ConsoleState(const ConsoleState&) = delete;
+    ConsoleState& operator=(const ConsoleState&) = delete;
+
+private:
+    bt::UniqueHandle input_;
+    UINT output_code_page_ = 0;
+    DWORD mode_ = 0;
+    bool have_mode_ = false;
+};
 
 // Reads single key presses from the console and posts them to the main thread as commands.
 class ConsoleKeys {
@@ -207,22 +268,44 @@ public:
 
 private:
     void run() {
+        // §9: no thread dies with an exception escaping it.
+        try {
+            read_keys();
+        } catch (const std::exception& e) {
+            bt::log::error("Reading keys stopped: {}", e.what());
+        } catch (...) {
+            bt::log::error("Reading keys stopped: unknown exception");
+        }
+    }
+
+    void read_keys() {
         const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
         DWORD mode = 0;
         if (input == INVALID_HANDLE_VALUE || !GetConsoleMode(input, &mode)) {
             return;  // input is redirected: no keys, only the hotkey and test options
         }
+        WORD held = 0;  // the key currently held down: auto-repeat must not save 30 clips a second
         while (!stop_) {
             if (WaitForSingleObject(input, kKeyPollMs) != WAIT_OBJECT_0) {
                 continue;
             }
             INPUT_RECORD record{};
             DWORD read = 0;
-            if (!ReadConsoleInputW(input, &record, 1, &read) || read == 0 || record.EventType != KEY_EVENT ||
-                !record.Event.KeyEvent.bKeyDown) {
+            if (!ReadConsoleInputW(input, &record, 1, &read) || read == 0 || record.EventType != KEY_EVENT) {
                 continue;
             }
-            const auto key = static_cast<wchar_t>(std::towlower(record.Event.KeyEvent.uChar.UnicodeChar));
+            const KEY_EVENT_RECORD& key_event = record.Event.KeyEvent;
+            if (!key_event.bKeyDown) {
+                if (key_event.wVirtualKeyCode == held) {
+                    held = 0;
+                }
+                continue;
+            }
+            if (key_event.wVirtualKeyCode == held) {
+                continue;
+            }
+            held = key_event.wVirtualKeyCode;
+            const auto key = static_cast<wchar_t>(std::towlower(key_event.uChar.UnicodeChar));
             if (key == L's' || key == L'p' || key == L'o' || key == L'e' || key == L'l' || key == L'q') {
                 PostThreadMessageW(g_main_thread, kMsgCommand, static_cast<WPARAM>(key), 0);
             }
@@ -233,20 +316,41 @@ private:
     std::thread thread_;  // last: starts in the constructor and uses stop_
 };
 
-// ShellExecute wants a single-threaded apartment; the main thread is multithreaded.
+// Opens a file or folder in Explorer or its default program. On its own thread (ShellExecute wants
+// a single-threaded apartment, and can take a moment) so a hotkey pressed meanwhile is not held up;
+// SEE_MASK_FLAG_NO_UI so a failure is a log line, never a dialog (§8).
+std::atomic<int> g_shell_threads{0};  // run() waits for these before the log goes away
+
 void open_in_shell(const fs::path& target) {
-    std::thread([target] {
-        const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-        const auto result = reinterpret_cast<INT_PTR>(
-            ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
-        constexpr INT_PTR kShellExecuteSuccess = 32;  // ShellExecute returns > 32 on success
-        if (result <= kShellExecuteSuccess) {
-            bt::log::warn("Could not open {} (error {})", path_text(target), result);
+    ++g_shell_threads;
+    try {
+        std::thread([target] {
+        struct Done {
+            ~Done() { --g_shell_threads; }
+        } done;
+        try {
+            const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+            SHELLEXECUTEINFOW info{};
+            info.cbSize = sizeof(info);
+            info.fMask = SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC;
+            info.lpVerb = L"open";
+            info.lpFile = target.c_str();
+            info.nShow = SW_SHOWNORMAL;
+            if (!ShellExecuteExW(&info)) {
+                bt::log::warn("Could not open {}: {}", path_text(target),
+                              bt::hresult_text(HRESULT_FROM_WIN32(GetLastError())));
+            }
+            if (SUCCEEDED(com)) {
+                CoUninitialize();
+            }
+        } catch (...) {
+            // §9: nothing escapes a thread; this one only ever logs.
         }
-        if (SUCCEEDED(com)) {
-            CoUninitialize();
-        }
-    }).join();
+        }).detach();
+    } catch (const std::exception& e) {
+        --g_shell_threads;  // the thread never started
+        bt::log::warn("Could not open {}: {}", path_text(target), e.what());
+    }
 }
 
 void show_status(const bt::Recorder& recorder) {
@@ -277,8 +381,7 @@ int run(int argc, wchar_t** argv) {
     if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
         bt::log::warn("SetProcessDpiAwarenessContext failed (error {})", GetLastError());
     }
-    SetConsoleOutputCP(CP_UTF8);
-    disable_quick_edit();
+    const ConsoleState console_state;
     bt::log::set_console_echo(true);
 
     // The message queue must exist before Ctrl+C or a saved clip can post to it.
@@ -287,11 +390,25 @@ int run(int argc, wchar_t** argv) {
     g_main_thread = GetCurrentThreadId();
     SetConsoleCtrlHandler(on_console_ctrl, TRUE);
 
+    g_another_instance = RegisterWindowMessageW(kAnotherInstanceMessage);
     const bt::UniqueHandle instance(CreateMutexW(nullptr, FALSE, kInstanceMutexName));
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        // §8: the running copy is told, so it can show it is there; this one just leaves.
+        if (const HWND running = FindWindowW(kWindowClass, nullptr); running != nullptr && g_another_instance != 0) {
+            PostMessageW(running, g_another_instance, 0, 0);
+        }
         std::printf("Backtrack is already running.\n");
         return 0;
     }
+    WNDCLASSW window_class{};
+    window_class.lpfnWndProc = host_window_proc;
+    window_class.hInstance = GetModuleHandleW(nullptr);
+    window_class.lpszClassName = kWindowClass;
+    BT_CHECK_WIN32(RegisterClassW(&window_class) != 0);
+    // Never shown; a top-level window (not message-only) because only those get WM_QUERYENDSESSION.
+    const HWND host_window = CreateWindowExW(0, kWindowClass, L"Backtrack", WS_OVERLAPPED, 0, 0, 0, 0, nullptr,
+                                             nullptr, window_class.hInstance, nullptr);
+    BT_CHECK_WIN32(host_window != nullptr);
 
     const fs::path exe_dir = exe_directory();
     const fs::path ini_path = exe_dir / L"backtrack.ini";
@@ -304,10 +421,15 @@ int run(int argc, wchar_t** argv) {
     bt::ComApartment com(COINIT_MULTITHREADED);
     BT_CHECK_HR(MFStartup(MF_VERSION, MFSTARTUP_FULL));
     struct MfShutdown {
-        ~MfShutdown() { MFShutdown(); }  // §6: after every pipeline object is gone
+        ~MfShutdown() {  // §6: after every pipeline object is gone
+            const HRESULT hr = MFShutdown();
+            if (FAILED(hr)) {
+                bt::log::warn("MFShutdown failed: {}", bt::hresult_text(hr));
+            }
+        }
     } mf_shutdown;
 
-    bt::Recorder recorder(settings, [&settings](const bt::SaveResult& result) {
+    bt::Recorder recorder(settings, exe_dir, [&settings](const bt::SaveResult& result) {
         // Writer thread. §8: a sound either way and the log line (the writer logs failures itself);
         // the UI will show it.
         if (result.ok) {
@@ -316,6 +438,10 @@ int run(int argc, wchar_t** argv) {
         play_feedback(settings, result.ok);
         PostThreadMessageW(g_main_thread, kMsgSaved, 0, 0);
     });
+    g_recorder = &recorder;
+    struct ClearRecorder {
+        ~ClearRecorder() { g_recorder = nullptr; }
+    } clear_recorder;
     recorder.start();
 
     const bt::Hotkey hotkey = *bt::parse_hotkey(settings.save_hotkey).hotkey;
@@ -369,6 +495,10 @@ int run(int argc, wchar_t** argv) {
     MSG msg{};
     bool running = true;
     while (running && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (msg.hwnd != nullptr) {
+            DispatchMessageW(&msg);  // the hidden host window
+            continue;
+        }
         if (msg.message == WM_HOTKEY && msg.wParam == kHotkeyId) {
             running = execute(Command::Save);
         } else if (msg.message == kMsgCommand) {
@@ -396,8 +526,25 @@ int run(int argc, wchar_t** argv) {
     if (hotkey_ok) {
         UnregisterHotKey(nullptr, kHotkeyId);
     }
+    DestroyWindow(host_window);
+    // An Explorer window still opening must not log into a log that is being torn down.
+    constexpr int kShellWaitSteps = 40;
+    constexpr DWORD kShellWaitStepMs = 50;
+    for (int i = 0; i < kShellWaitSteps && g_shell_threads > 0; ++i) {
+        Sleep(kShellWaitStepMs);
+    }
     bt::log::info("Backtrack stopped");
     return 0;
+}
+
+// A fatal error before the window shows anything: keep the console open when Backtrack was
+// double-clicked (it is the only process in the console), otherwise the reason flashes past.
+void wait_if_own_console() {
+    DWORD processes[2] = {};
+    if (GetConsoleProcessList(processes, 2) == 1) {
+        std::printf("\nBacktrack stopped because of an error (see above). Press a key to close this window.\n");
+        static_cast<void>(_getwch());
+    }
 }
 
 }  // namespace
@@ -408,9 +555,13 @@ int wmain(int argc, wchar_t** argv) {
     try {
         code = run(argc, argv);
     } catch (const std::exception& e) {
+        bt::log::set_console_echo(true);
         bt::log::error("Fatal: {}", e.what());
+        wait_if_own_console();
     } catch (...) {
+        bt::log::set_console_echo(true);
         bt::log::error("Fatal: unknown exception");
+        wait_if_own_console();
     }
     bt::log::shutdown();
     if (g_finished != nullptr) {

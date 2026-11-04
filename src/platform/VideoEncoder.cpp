@@ -31,6 +31,9 @@ constexpr int kMaxConsecutiveInputErrors = 30;
 
 constexpr UINT32 kBitsPerKilobit = 1000;
 
+// Level 5.2 is the highest that nearly every decoder (phones, TVs, browsers) accepts.
+constexpr int kHighestCommonLevel = 52;
+
 VARIANT variant_ui4(ULONG value) {
     VARIANT v;
     VariantInit(&v);
@@ -195,7 +198,10 @@ VideoEncoder::VideoEncoder(const VideoEncoderSettings& settings, IMFDXGIDeviceMa
                 log::warn("Hardware encoder '{}' could not be set up: {}", name, e.what());
             }
             shutdown();
-            candidate->ShutdownObject();
+            const HRESULT released = candidate->ShutdownObject();
+            if (FAILED(released)) {
+                log::debug("ShutdownObject on a failed encoder candidate: {}", hresult_text(released));
+            }
         }
     }
 
@@ -328,7 +334,27 @@ void VideoEncoder::configure(IMFTransform* transform) {
     set_video_basics(output.Get(), MFVideoFormat_H264, settings_);
     BT_CHECK_HR(output->SetUINT32(MF_MT_AVG_BITRATE, static_cast<UINT32>(settings_.bitrate_kbps) * kBitsPerKilobit));
     BT_CHECK_HR(output->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High));
-    BT_CHECK_HR(transform->SetOutputType(output_id_, output.Get(), 0));
+    // The level is stated, not left to the encoder: AMD picks 5.1 for 1080p144, which needs 5.2
+    // (measured), and phone hardware decoders refuse or stutter on a level that is too low.
+    const int level = h264::required_level(settings_.size.width, settings_.size.height, settings_.fps,
+                                           settings_.bitrate_kbps);
+    if (level != 0) {
+        BT_CHECK_HR(output->SetUINT32(MF_MT_MPEG2_LEVEL, static_cast<UINT32>(level)));
+    }
+    if (level > kHighestCommonLevel || level == 0) {
+        log::warn("{}x{} at {} fps and {} kbit/s needs H.264 level {}; some phones and TVs cannot play that",
+                  settings_.size.width, settings_.size.height, settings_.fps, settings_.bitrate_kbps,
+                  level == 0 ? std::string("above 6.2") : std::format("{}.{}", level / 10, level % 10));
+    }
+    HRESULT output_hr = transform->SetOutputType(output_id_, output.Get(), 0);
+    if (FAILED(output_hr) && level != 0) {
+        // An encoder that refuses the stated level still gets to choose its own.
+        log::warn("Video encoder refused H.264 level {}.{} ({}), letting it choose", level / 10, level % 10,
+                  hresult_text(output_hr));
+        BT_CHECK_HR(output->DeleteItem(MF_MT_MPEG2_LEVEL));
+        output_hr = transform->SetOutputType(output_id_, output.Get(), 0);
+    }
+    BT_CHECK_HR(output_hr);
 
     ComPtr<IMFMediaType> input;
     BT_CHECK_HR(MFCreateMediaType(&input));
@@ -424,7 +450,9 @@ void VideoEncoder::on_event(IMFAsyncResult* result) {
     }
     if (SUCCEEDED(hr)) {
         MediaEventType type = MEUnknown;
-        event->GetType(&type);
+        if (FAILED(event->GetType(&type))) {
+            type = MEUnknown;  // not one we handle; keep listening
+        }
         try {
             if (type == METransformDrainComplete) {
                 keep_listening = false;
@@ -446,7 +474,9 @@ void VideoEncoder::on_event(IMFAsyncResult* result) {
                 process_output(true);
             } else if (type == MEError) {
                 HRESULT status = S_OK;
-                event->GetStatus(&status);
+                if (FAILED(event->GetStatus(&status))) {
+                    status = E_FAIL;
+                }
                 log::error("Video encoder reported an error: {}", hresult_text(status));
                 failed_ = true;
                 keep_listening = false;
@@ -747,7 +777,10 @@ void VideoEncoder::shutdown() {
     events_.Reset();
     transform_.Reset();
     if (activate_) {
-        activate_->ShutdownObject();
+        const HRESULT released = activate_->ShutdownObject();
+        if (FAILED(released)) {
+            log::debug("Video encoder ShutdownObject: {}", hresult_text(released));
+        }
         activate_.Reset();
     }
 }

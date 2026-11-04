@@ -64,6 +64,28 @@ void interleaves_and_trims_audio() {
     CHECK_EQ(plan.duration, 8 * kAac);  // the audio runs past the video
 }
 
+void dropped_frames_keep_their_time() {
+    // Frame 2 was dropped by the encoder: frame 1 lasts until frame 3 starts.
+    const std::vector<Packet> v = {video(0, true), video(kFrame, false), video(3 * kFrame, false)};
+    const ClipPlan plan = plan_clip(v, {});
+    CHECK_EQ(plan.samples[0].duration, kFrame);
+    CHECK_EQ(plan.samples[1].duration, 2 * kFrame);
+    CHECK_EQ(plan.samples[2].duration, kFrame);  // the last keeps its own
+    CHECK_EQ(plan.video_duration, 4 * kFrame);
+    // Durations add up to the timeline: the sum equals the end of the last frame.
+    Time100ns sum = 0;
+    for (const ClipSample& s : plan.samples) sum += s.duration;
+    CHECK_EQ(sum, plan.video_duration);
+}
+
+void durations_are_never_zero() {
+    // Two packets with the same stamp (never produced on purpose, but the writer must not fail).
+    const ClipPlan plan = plan_clip({video(0, true), video(0, false), video(kFrame, false)}, {});
+    for (const ClipSample& s : plan.samples) {
+        CHECK(s.duration > 0);
+    }
+}
+
 void audio_exactly_at_the_keyframe_is_kept() {
     const ClipPlan plan = plan_clip({video(500, true)}, {audio(499), audio(500)});
     CHECK_EQ(plan.audio_dropped, std::size_t{1});
@@ -95,6 +117,8 @@ int main() {
     rebases_to_the_first_keyframe();
     interleaves_and_trims_audio();
     audio_exactly_at_the_keyframe_is_kept();
+    dropped_frames_keep_their_time();
+    durations_are_never_zero();
     file_names();
     return bt_test::finish("ClipPlanTests");
 }

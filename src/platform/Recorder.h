@@ -58,7 +58,8 @@ class Recorder {
 public:
     using SavedCallback = std::function<void(const SaveResult& result)>;  // called on the writer thread
 
-    Recorder(const Settings& settings, SavedCallback on_saved);
+    // app_dir: the exe's folder; a relative output_dir is taken from there (§8).
+    Recorder(const Settings& settings, const std::filesystem::path& app_dir, SavedCallback on_saved);
     ~Recorder();
     Recorder(const Recorder&) = delete;
     Recorder& operator=(const Recorder&) = delete;
@@ -135,6 +136,7 @@ private:
     std::unique_ptr<VideoEncoder> encoder_;
     EncoderPreference encoder_preference_;  // supervisor only
     Time100ns next_encoder_attempt_ = 0;  // supervisor only
+    std::vector<Time100ns> device_resets_;  // supervisor only: recent graphics device resets
     std::atomic<bool> encoder_unavailable_{false};
     log::RateLimit frame_error_log_{std::chrono::seconds(10)};  // capture thread only
 
@@ -155,6 +157,7 @@ private:
     std::atomic<bool> rebuild_pipeline_{true};
     std::atomic<bool> rebuild_encoder_{false};
     std::atomic<bool> capture_lost_{false};
+    std::atomic<bool> have_frames_{false};  // the current capture has delivered its first frame
     std::atomic<bool> pipeline_up_{false};
     std::atomic<bool> supervisor_dead_{false};
     Time100ns next_counter_log_ = 0;

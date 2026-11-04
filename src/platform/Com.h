@@ -31,7 +31,7 @@ inline const char* known_hresult_name(HRESULT hr) {
         case DXGI_ERROR_NOT_CURRENTLY_AVAILABLE: return "DXGI_ERROR_NOT_CURRENTLY_AVAILABLE: too many programs are capturing the screen";
         case DXGI_ERROR_SESSION_DISCONNECTED: return "DXGI_ERROR_SESSION_DISCONNECTED";
         case DXGI_ERROR_NOT_FOUND: return "DXGI_ERROR_NOT_FOUND";
-        case E_ACCESSDENIED: return "E_ACCESSDENIED: secure desktop (UAC prompt or lock screen) is showing";
+        case E_ACCESSDENIED: return "E_ACCESSDENIED: access denied (for screen capture: a UAC prompt or the lock screen is showing)";
         default: return nullptr;
     }
 }

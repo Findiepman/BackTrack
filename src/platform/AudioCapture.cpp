@@ -38,6 +38,9 @@ constexpr Time100ns kDriftTolerance = 10 * kTicksPerMillisecond;
 constexpr UINT32 kChunkMilliseconds = 100;
 constexpr UINT32 kMillisecondsPerSecond = 1000;
 constexpr ULONGLONG kReopenDelayMs = 2000;
+// A device that fails again within this time of opening is retried after kReopenDelayMs instead of
+// at once, so a flapping USB DAC or a format change still settling cannot cause a reopen loop.
+constexpr ULONGLONG kSettleMs = 1000;
 
 // After a flush the first AAC packet may start up to two frames (priming) away from the input.
 constexpr Time100ns kAacFlushTolerance = 2 * kTicksPerSecond * kAacFrameSamples / kOutputRate;
@@ -268,7 +271,10 @@ void AudioCapture::run_loop() {
         bool active;
         ~Unregister() {
             if (active) {
-                enumerator->UnregisterEndpointNotificationCallback(client);
+                const HRESULT unregistered = enumerator->UnregisterEndpointNotificationCallback(client);
+                if (FAILED(unregistered)) {
+                    log::debug("UnregisterEndpointNotificationCallback: {}", hresult_text(unregistered));
+                }
             }
         }
     } unregister{enumerator.Get(), notifier.Get(), registered};
@@ -311,17 +317,26 @@ void AudioCapture::run_loop() {
         }
         try {
             keep_render_alive();
+        } catch (const std::exception& e) {
+            // The silent stream only helps; loopback works without it (gaps are filled from the
+            // timestamps), so a failure here never stops the recording.
+            log::info("Stopped the silent keep-alive stream ({}); sound recording continues without it", e.what());
+            drop_render_stream();
+        }
+        try {
             read_packets();
         } catch (const std::exception& e) {
             // AUDCLNT_E_DEVICE_INVALIDATED (unplugged, format changed in Sound settings) reopens
-            // whatever is now the default device at once; anything else after a short wait.
+            // whatever is now the default device at once, unless the device was only just opened:
+            // one that keeps failing right after opening is retried after a pause, not in a loop.
             const auto* hr_error = dynamic_cast<const HresultError*>(&e);
             const bool invalidated = hr_error != nullptr && hr_error->hr() == AUDCLNT_E_DEVICE_INVALIDATED;
+            const bool settled = GetTickCount64() - opened_at_ms_ > kSettleMs;
             if (reopen_log_.allow()) {
                 log::info("Sound recording interrupted ({}), reopening the device", e.what());
             }
             close_device();
-            next_open = invalidated ? 0 : GetTickCount64() + kReopenDelayMs;
+            next_open = invalidated && settled ? 0 : GetTickCount64() + kReopenDelayMs;
         }
     }
 }
@@ -342,13 +357,19 @@ void AudioCapture::open_device(IMMDeviceEnumerator* enumerator) {
 
     // Loopback delivers nothing at all while nothing plays, so a quiet moment would be missing
     // from the recording instead of silent. Playing silence on the same device keeps it flowing.
-    BT_CHECK_HR(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-                                 reinterpret_cast<void**>(render_client_audio_.ReleaseAndGetAddressOf())));
-    BT_CHECK_HR(render_client_audio_->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, kDeviceBufferDuration, 0, format.get(),
-                                                 nullptr));
-    BT_CHECK_HR(render_client_audio_->GetBufferSize(&render_buffer_frames_));
-    BT_CHECK_HR(render_client_audio_->GetService(IID_PPV_ARGS(&render_client_)));
-    keep_render_alive();
+    // Best effort: without it the gaps are filled from the timestamps, slightly less exactly.
+    try {
+        BT_CHECK_HR(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                                     reinterpret_cast<void**>(render_client_audio_.ReleaseAndGetAddressOf())));
+        BT_CHECK_HR(render_client_audio_->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, kDeviceBufferDuration, 0,
+                                                     format.get(), nullptr));
+        BT_CHECK_HR(render_client_audio_->GetBufferSize(&render_buffer_frames_));
+        BT_CHECK_HR(render_client_audio_->GetService(IID_PPV_ARGS(&render_client_)));
+        keep_render_alive();
+    } catch (const std::exception& e) {
+        log::info("No silent keep-alive stream on this device ({}); recording sound without it", e.what());
+        drop_render_stream();
+    }
 
     // §6: the device format (usually 32-bit float, any rate and channel count) becomes 16-bit
     // 48 kHz stereo for the AAC encoder. Rebuilt on every open: a new device can differ in sample
@@ -380,9 +401,16 @@ void AudioCapture::open_device(IMMDeviceEnumerator* enumerator) {
         block_align_ = format->nBlockAlign;
     }
 
-    BT_CHECK_HR(render_client_audio_->Start());
+    if (render_client_audio_) {
+        const HRESULT started = render_client_audio_->Start();
+        if (FAILED(started)) {
+            log::info("The silent keep-alive stream did not start ({})", hresult_text(started));
+            drop_render_stream();
+        }
+    }
     device_latency_.reset();  // a new device has its own latency
     BT_CHECK_HR(capture_client_audio_->Start());
+    opened_at_ms_ = GetTickCount64();
     open_ = true;
     ++counters_.device_opens;
     log::info("Recording sound from {} ({} Hz, {} channels)", name, format->nSamplesPerSec, format->nChannels);
@@ -390,19 +418,43 @@ void AudioCapture::open_device(IMMDeviceEnumerator* enumerator) {
 
 void AudioCapture::close_device() {
     if (capture_client_audio_) {
-        capture_client_audio_->Stop();
+        const HRESULT stopped = capture_client_audio_->Stop();
+        if (FAILED(stopped)) {
+            log::debug("Loopback Stop: {}", hresult_text(stopped));  // the device may already be gone
+        }
     }
-    if (render_client_audio_) {
-        render_client_audio_->Stop();
-    }
+    drop_render_stream();
     capture_client_.Reset();
     capture_client_audio_.Reset();
-    render_client_.Reset();
-    render_client_audio_.Reset();
+    // What the resampler still holds was already counted on the timeline; push it through to the
+    // AAC encoder, otherwise every device switch or pause would lose a few milliseconds of sound
+    // and the stamps would slowly fall behind.
+    if (resampler_ && open_) {
+        try {
+            BT_CHECK_HR(resampler_->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0));
+            drain_resampler();
+        } catch (const std::exception& e) {
+            log::debug("Draining the resampler: {}", e.what());
+        }
+    }
     open_ = false;
 }
 
+void AudioCapture::drop_render_stream() {
+    if (render_client_audio_) {
+        const HRESULT stopped = render_client_audio_->Stop();
+        if (FAILED(stopped)) {
+            log::debug("Keep-alive stream Stop: {}", hresult_text(stopped));
+        }
+    }
+    render_client_.Reset();
+    render_client_audio_.Reset();
+}
+
 void AudioCapture::keep_render_alive() {
+    if (!render_client_audio_) {
+        return;
+    }
     UINT32 padding = 0;
     BT_CHECK_HR(render_client_audio_->GetCurrentPadding(&padding));
     const UINT32 free_frames = render_buffer_frames_ - padding;
@@ -415,11 +467,16 @@ void AudioCapture::keep_render_alive() {
 }
 
 void AudioCapture::read_packets() {
+    // Everything waiting is read first and handed back at once, then handled. Copied out because
+    // filling a long gap with silence can take a while and WASAPI's buffer must not stay locked;
+    // read as a batch because a poll usually finds two or three packets, and the latency estimate
+    // must see the freshest of them before any is stamped (see handle_packet).
+    std::size_t count = 0;
     while (true) {
         UINT32 next = 0;
         BT_CHECK_HR(capture_client_->GetNextPacketSize(&next));
         if (next == 0) {
-            return;
+            break;
         }
         BYTE* data = nullptr;
         UINT32 frames = 0;
@@ -427,20 +484,52 @@ void AudioCapture::read_packets() {
         UINT64 device_position = 0;
         UINT64 qpc_position = 0;
         const HRESULT hr = capture_client_->GetBuffer(&data, &frames, &flags, &device_position, &qpc_position);
-        const Time100ns arrival = qpc_now();
         if (hr == AUDCLNT_S_BUFFER_EMPTY) {
-            return;
+            break;
         }
         BT_CHECK_HR(hr);
-        // Copied out and handed back before any encoding: filling a long gap with silence can take
-        // a while, and WASAPI's buffer must not stay locked meanwhile.
-        const bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
-        if (!silent) {
-            packet_copy_.assign(data, data + static_cast<std::size_t>(frames) * block_align_);
+        if (count == batch_.size()) {
+            batch_.emplace_back();
+        }
+        BatchPacket& packet = batch_[count++];
+        packet.frames = frames;
+        packet.flags = flags;
+        packet.qpc_position = qpc_position;
+        if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) == 0) {
+            packet.bytes.assign(data, data + static_cast<std::size_t>(frames) * block_align_);
         }
         BT_CHECK_HR(capture_client_->ReleaseBuffer(frames));
-        handle_packet(silent ? nullptr : packet_copy_.data(), frames, flags, qpc_position, arrival);
     }
+    if (count == 0) {
+        return;
+    }
+
+    const Time100ns arrival = qpc_now();
+    std::uint64_t frames_after = 0;  // frames in the batch after packet i
+    for (std::size_t i = count; i-- > 0;) {
+        batch_[i].frames_after = frames_after;
+        frames_after += batch_[i].frames;
+        if (batch_[i].qpc_position != 0 && (batch_[i].flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) == 0) {
+            // Packet i was complete (readable) no later than the newer packets' duration before now.
+            const Time100ns available = arrival - frames_to_time(batch_[i].frames_after, device_rate_);
+            add_latency_sample(available, available - static_cast<Time100ns>(batch_[i].qpc_position));
+        }
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+        const BatchPacket& packet = batch_[i];
+        const bool silent = (packet.flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
+        const Time100ns available = arrival - frames_to_time(packet.frames_after, device_rate_);
+        handle_packet(silent ? nullptr : packet.bytes.data(), packet.frames, packet.flags, packet.qpc_position,
+                      available);
+    }
+}
+
+void AudioCapture::add_latency_sample(Time100ns at, Time100ns value) {
+    // Only the two-second minimum. A shorter window to notice a latency drop sooner (a Bluetooth
+    // codec switch) was tried: Bluetooth stamps jitter enough that it fired again and again, and
+    // every firing shifted the stamps and cut the sound (measured: 26 tone onsets for 8 tones).
+    // After a real drop the old minimum lingers for at most the window, then corrects itself.
+    device_latency_.add(at, value);
 }
 
 Time100ns AudioCapture::timeline() const {
@@ -462,12 +551,11 @@ void AudioCapture::handle_packet(const BYTE* data, UINT32 frames, DWORD flags, U
     // as it is mixed, and reads come up to one poll late but never early, so the smallest
     // (arrival - stamp) over the last seconds is the device's latency without the poll jitter.
     // A stamp the driver flags as wrong (or does not give) is not used for the estimate: one bad
-    // value would be the minimum for two seconds and shift every packet in that time.
+    // value would be the minimum for two seconds and shift every packet in that time. The
+    // estimate itself is updated per batch in read_packets. `arrival` is when this packet was
+    // complete at the latest (the batch's read time minus the newer packets after it).
     const Time100ns duration = frames_to_time(frames, device_rate_);
     const bool stamp_valid = qpc_position != 0 && (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) == 0;
-    if (stamp_valid) {
-        device_latency_.add(arrival, arrival - static_cast<Time100ns>(qpc_position));
-    }
     const std::optional<Time100ns> latency = device_latency_.value();
     const Time100ns mixed = stamp_valid && latency ? static_cast<Time100ns>(qpc_position) + *latency - duration
                                                    : arrival - duration;

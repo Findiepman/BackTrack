@@ -55,6 +55,37 @@ AccessUnitInfo inspect(std::span<const std::uint8_t> access_unit) {
     return info;
 }
 
+int required_level(int width, int height, int fps, int bitrate_kbps) {
+    struct Level {
+        int idc;
+        long long max_macroblocks_per_second;
+        long long max_frame_macroblocks;
+        long long max_kbps;  // Baseline/Main; High allows 1.25x
+    };
+    // ITU-T H.264 table A-1. Level 1b is left out: it is never the answer for screen video.
+    constexpr Level kLevels[] = {
+        {10, 1485, 99, 64},           {11, 3000, 396, 192},         {12, 6000, 396, 384},
+        {13, 11880, 396, 768},        {20, 11880, 396, 2000},       {21, 19800, 792, 4000},
+        {22, 20250, 1620, 4000},      {30, 40500, 1620, 10000},     {31, 108000, 3600, 14000},
+        {32, 216000, 5120, 20000},    {40, 245760, 8192, 20000},    {41, 245760, 8192, 50000},
+        {42, 522240, 8704, 50000},    {50, 589824, 22080, 135000},  {51, 983040, 36864, 240000},
+        {52, 2073600, 36864, 240000}, {60, 4177920, 139264, 240000}, {61, 8355840, 139264, 480000},
+        {62, 16711680, 139264, 800000},
+    };
+    constexpr long long kMacroblock = 16;
+    constexpr long long kHighProfileFactorPercent = 125;
+    const long long frame_macroblocks =
+        ((width + kMacroblock - 1) / kMacroblock) * ((height + kMacroblock - 1) / kMacroblock);
+    const long long per_second = frame_macroblocks * fps;
+    for (const Level& level : kLevels) {
+        if (frame_macroblocks <= level.max_frame_macroblocks && per_second <= level.max_macroblocks_per_second &&
+            static_cast<long long>(bitrate_kbps) * 100 <= level.max_kbps * kHighProfileFactorPercent) {
+            return level.idc;
+        }
+    }
+    return 0;
+}
+
 std::vector<std::uint8_t> parameter_sets(std::span<const std::uint8_t> keyframe) {
     constexpr std::uint8_t kStartCode[] = {0, 0, 0, 1};
     std::vector<std::uint8_t> out;

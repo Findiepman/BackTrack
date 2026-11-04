@@ -30,7 +30,9 @@ constexpr std::array<int, 4> kAllowedAudioKbps = {96, 128, 160, 192};
 constexpr long long kMinVideoKbps = 1000;
 constexpr long long kMaxVideoKbps = 100000;
 
-constexpr long long kMaxMonitorIndex = 63;
+// Only the lower bound is checked here; ScreenCapture knows how many monitors exist and falls back
+// to monitor 0 with one warning (§5.2).
+constexpr long long kMaxMonitorIndex = 1000;
 
 constexpr const char* kForbiddenFileNameChars = "<>:\"|?*";
 constexpr const char* kSafeStrftimeSpecifiers = "aAbBdHIjmMpSUwWyY%";

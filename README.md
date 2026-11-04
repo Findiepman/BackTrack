@@ -28,7 +28,7 @@ Windows' software encoder as fallback), WASAPI for sound. No FFmpeg, no OBS, no 
    | L | open the log |
    | Q | quit (waits for a clip that is still being saved) |
 
-Only one Backtrack runs at a time; starting it again just says it is already running.
+Only one Backtrack runs at a time. Starting it again makes the running window flash in the taskbar and the new copy closes.
 
 ### Things to know
 
@@ -36,6 +36,11 @@ Only one Backtrack runs at a time; starting it again just says it is already run
   Set games to **borderless windowed** (often called "windowed fullscreen"); it looks the same.
 - A clip is `seconds` long or up to one second longer: it has to start on a keyframe, and there is
   one every second.
+- Changing the screen resolution (or a game doing it) does not lose your clip: recording carries on
+  at the size it started with, with the new picture scaled in (black bars if the shape differs).
+  Restart Backtrack to record at the new size.
+- The only time the buffer starts over is when the graphics driver restarts (a driver update or
+  crash): the next clip then begins at that moment.
 - Pausing keeps what was recorded before the pause. A clip saved after resuming joins the time
   before and after the pause without a gap.
 - Sound is what you hear on the default playback device. Switching the default device (plugging in
@@ -59,7 +64,7 @@ default is kept. Backtrack never refuses to start because of the settings.
 | Key | Default | Meaning |
 |---|---|---|
 | `seconds` | `30` | How many seconds to keep and save. 5 to 300. At 20 Mbit/s, 30 s is about 75 MB of memory. |
-| `output_dir` | `%USERPROFILE%\Videos\Backtrack` | Where clips go. Environment variables work. Created if missing; if it cannot be created, clips go to your Videos folder. |
+| `output_dir` | `%USERPROFILE%\Videos\Backtrack` | Where clips go. Environment variables work; a relative path is taken from the folder `backtrack.exe` is in. Created if missing; if it cannot be created, clips go to your Videos folder. |
 | `filename` | `clip_%Y-%m-%d_%H-%M-%S.mp4` | File name. Allowed placeholders: `%Y %y %m %d %H %I %M %S %p %j %a %A %b %B %U %W %w %%`. Two clips in the same second get `_2`, `_3`. |
 
 To use `;` or `#` in a path, put the whole value in double quotes: `output_dir = "D:\Clips #2"`.
@@ -104,7 +109,7 @@ the log says so and the S key still works.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `level` | `info` | `error`, `info` or `debug`. `debug` adds counters once a minute: frames, drops, sound corrections, buffer size and memory use. |
+| `level` | `info` | `error`, `info` or `debug`. `error` still shows warnings (why a hotkey or a save did not work). `debug` adds counters once a minute: frames, drops, sound corrections, buffer size and memory use. |
 
 The log is `backtrack.log` next to the exe. It rolls over at 5 MB and keeps three files.
 
