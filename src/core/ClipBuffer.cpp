@@ -25,7 +25,7 @@ bool ClipBuffer::push(Packet packet) {
     }
     have_last_pts_ = true;
     last_pts_ = packet.pts;
-    bytes_ += packet.data.size();
+    bytes_ += packet.size();
     packets_.push_back(std::move(packet));
     evict_locked();
     return true;
@@ -42,7 +42,7 @@ void ClipBuffer::evict_locked() {
         }
     }
     for (std::size_t i = 0; i < cut; ++i) {
-        bytes_ -= packets_.front().data.size();
+        bytes_ -= packets_.front().size();
         packets_.pop_front();
     }
 
@@ -50,7 +50,7 @@ void ClipBuffer::evict_locked() {
     // on to the next keyframe so the buffer still starts on one.
     if (bytes_ > max_bytes_) {
         while (!packets_.empty() && (bytes_ > max_bytes_ || !packets_.front().keyframe)) {
-            bytes_ -= packets_.front().data.size();
+            bytes_ -= packets_.front().size();
             packets_.pop_front();
             ++dropped_by_cap_;
         }

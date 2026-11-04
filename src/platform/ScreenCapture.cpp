@@ -19,10 +19,11 @@ namespace {
 constexpr Time100ns kRetryInitialDelay = 100 * kTicksPerMillisecond;
 constexpr Time100ns kRetryMaxDelay = 1000 * kTicksPerMillisecond;
 
-// §3.5 NV12 sample pool. The hardware encoder keeps a few frames in flight and the hand-off to
-// it buffers a few more; ten leaves headroom without wasting VRAM (one 1440p NV12 frame is 5.5 MB).
+// §3.5 NV12 sample pool: up to six frames queued for the encoder (VideoEncoder's
+// kMaxPendingFrames), a few inside it, one being converted, plus headroom. Sixteen 1080p NV12
+// frames are 50 MB of VRAM.
 constexpr DWORD kAllocatorInitialSamples = 4;
-constexpr DWORD kAllocatorMaxSamples = 10;
+constexpr DWORD kAllocatorMaxSamples = 16;
 
 // More views than pool textures means the allocator replaced its textures; drop the stale ones.
 constexpr std::size_t kMaxCachedOutputViews = kAllocatorMaxSamples * 2;
@@ -273,7 +274,7 @@ void ScreenCapture::create_device() {
     BT_CHECK_HR(allocator_->SetDirectXManager(device_manager_.Get()));
 }
 
-void ScreenCapture::start() {
+void ScreenCapture::start(Time100ns clock_offset) {
     if (thread_.joinable() && thread_.get_id() == std::this_thread::get_id()) {
         // Joining ourselves would deadlock; the owner must restart from its own thread.
         throw std::logic_error("ScreenCapture::start() called from a capture callback");
@@ -285,6 +286,7 @@ void ScreenCapture::start() {
         thread_.join();  // a previous run ended on its own (Failed); restart cleanly
     }
     BT_CHECK_WIN32(ResetEvent(stop_event_.get()));
+    clock_offset_ = clock_offset;
     running_ = true;
     thread_ = std::thread(&ScreenCapture::thread_main, this);
 }
@@ -363,7 +365,7 @@ void ScreenCapture::capture_loop() {
             counters_.late_ticks_skipped += static_cast<std::uint64_t>(due - index);
             index = due;
         }
-        const Time100ns pts = start + frame_offset(index, fps_);
+        const Time100ns pts = start + frame_offset(index, fps_) - clock_offset_;
         const Time100ns duration = frame_offset(index + 1, fps_) - frame_offset(index, fps_);
         ++counters_.ticks;
 

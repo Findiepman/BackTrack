@@ -5,10 +5,19 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <vector>
 
 namespace bt {
+
+// The bytes of one packet. Shared and never modified, so copying a clip out of the ring buffer
+// copies pointers, not hundreds of megabytes, and the lock is held for microseconds (§3.8).
+using PacketBytes = std::shared_ptr<const std::vector<std::uint8_t>>;
+
+inline PacketBytes make_packet_bytes(std::vector<std::uint8_t> bytes) {
+    return std::make_shared<const std::vector<std::uint8_t>>(std::move(bytes));
+}
 
 // One compressed packet: an H.264 access unit or an AAC frame. Plain bytes and timestamps, so the
 // buffer knows nothing about Media Foundation (§4).
@@ -16,7 +25,9 @@ struct Packet {
     Time100ns pts = 0;
     Time100ns duration = 0;
     bool keyframe = false;
-    std::vector<std::uint8_t> data;
+    PacketBytes data;  // never null for a packet that was produced by an encoder
+
+    std::size_t size() const { return data ? data->size() : 0; }
 };
 
 struct ClipBufferStats {

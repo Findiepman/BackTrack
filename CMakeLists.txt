@@ -27,6 +27,7 @@ add_library(backtrack_core STATIC
     src/core/Hotkey.cpp
     src/core/ClipBuffer.cpp
     src/core/H264.cpp
+    src/core/ClipPlan.cpp
 )
 target_include_directories(backtrack_core PUBLIC src)
 target_link_libraries(backtrack_core PUBLIC bt_options)
@@ -36,12 +37,19 @@ add_executable(backtrack
     src/platform/Log.cpp
     src/platform/ScreenCapture.cpp
     src/platform/VideoEncoder.cpp
+    src/platform/AudioCapture.cpp
+    src/platform/ClipWriter.cpp
+    src/platform/Recorder.cpp
 )
-target_include_directories(backtrack PRIVATE src ${CMAKE_SOURCE_DIR})
-target_link_libraries(backtrack PRIVATE backtrack_core d3d11 dxgi mfplat mfuuid winmm avrt wmcodecdspuuid)
+target_include_directories(backtrack PRIVATE src)
+target_link_libraries(backtrack PRIVATE backtrack_core d3d11 dxgi mfplat mfuuid mfreadwrite winmm avrt wmcodecdspuuid shell32 ole32)
+
+# Development tool for the audio/video sync check (tools/check_sync.ps1). Not shipped.
+add_executable(sync_beacon tools/sync_beacon.cpp)
+target_link_libraries(sync_beacon PRIVATE bt_options winmm ole32)
 
 enable_testing()
-foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests)
+foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests)
     add_executable(${test_name} tests/${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE backtrack_core)
     target_compile_definitions(${test_name} PRIVATE BT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

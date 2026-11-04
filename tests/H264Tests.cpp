@@ -29,6 +29,13 @@ void splits_three_and_four_byte_start_codes() {
     const h264::AccessUnitInfo info = h264::inspect(au);
     CHECK(info.has_sps && info.has_pps && info.has_idr);
     CHECK_EQ(info.slices, 1);
+
+    const std::vector<std::uint8_t> expected = {0, 0, 0, 1, 0x67, 0x64, 0x00, 0x28, 0, 0, 0, 1, 0x68, 0xEE, 0x3C, 0x80};
+    CHECK(h264::parameter_sets(au) == expected);
+    // A P-frame has no parameter sets.
+    CHECK(h264::parameter_sets(std::vector<std::uint8_t>{0, 0, 1, 0x41, 0x9A}).empty());
+    // SPS without PPS is not usable.
+    CHECK(h264::parameter_sets(std::vector<std::uint8_t>{0, 0, 1, 0x67, 0x64}).empty());
 }
 
 void p_frame_and_noise() {

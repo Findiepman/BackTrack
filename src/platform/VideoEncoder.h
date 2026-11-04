@@ -56,7 +56,9 @@ struct VideoEncoderStats {
 
 class VideoEncoder {
 public:
-    using PacketCallback = std::function<void(Packet&& packet)>;
+    // output_type: the encoder's current output type, which this packet belongs to (§7 needs it
+    // for the MP4). It only changes after a format renegotiation.
+    using PacketCallback = std::function<void(Packet&& packet, IMFMediaType* output_type)>;
 
     VideoEncoder(const VideoEncoderSettings& settings, IMFDXGIDeviceManager* device_manager, PacketCallback on_packet);
     ~VideoEncoder();
@@ -147,6 +149,7 @@ private:
     int keyframe_intervals_logged_ = 0;
     log::RateLimit input_error_log_{std::chrono::seconds(10)};
     log::RateLimit timestamp_error_log_{std::chrono::seconds(10)};
+    log::RateLimit type_error_log_{std::chrono::seconds(30)};
     bool clean_point_fallback_logged_ = false;
 
     struct Counters {

@@ -13,9 +13,11 @@
 namespace bt {
 namespace {
 
-// A few frames of slack between the capture tick and the encoder's NeedInput events. More only
-// adds latency and keeps allocator textures out of the pool (§3.5).
-constexpr std::size_t kMaxPendingFrames = 3;
+// Slack between the capture tick and the encoder's NeedInput events. With a game loading the GPU,
+// AMD's encoder stalls for a few frames at a time; three frames of slack dropped 49 of 75,000
+// frames in a 21-minute run (measured), so it holds six. A replay buffer does not care about the
+// extra latency. ScreenCapture's sample pool is sized for this (§3.5).
+constexpr std::size_t kMaxPendingFrames = 6;
 
 // How long shutdown waits for the encoder's event loop to acknowledge IMFShutdown.
 constexpr DWORD kShutdownTimeoutMs = 2000;
@@ -450,9 +452,16 @@ void VideoEncoder::on_event(IMFAsyncResult* result) {
                 keep_listening = false;
             }
         } catch (const std::exception& e) {
-            log::error("Video encoder failed while handling an event: {}", e.what());
-            failed_ = true;
-            keep_listening = false;
+            if (shutting_down_) {
+                // The flush in shutdown() throws away output an already queued HaveOutput event
+                // announced; ProcessOutput then fails (AMD: E_UNEXPECTED). Expected, and the loop
+                // keeps listening for the drain to complete.
+                log::debug("Video encoder output discarded during shutdown: {}", e.what());
+            } else {
+                log::error("Video encoder failed while handling an event: {}", e.what());
+                failed_ = true;
+                keep_listening = false;
+            }
         }
     }
     if (keep_listening) {
@@ -530,7 +539,7 @@ void VideoEncoder::emit_packet(IMFSample* sample) {
     }
 
     // §3.4.6: the bytes are copied out so no encoder owned sample ever sits in the ring buffer.
-    Packet packet{pts, duration, false, {}};
+    std::vector<std::uint8_t> bytes;
     {
         ComPtr<IMFMediaBuffer> buffer;
         BT_CHECK_HR(sample->ConvertToContiguousBuffer(&buffer));
@@ -541,8 +550,9 @@ void VideoEncoder::emit_packet(IMFSample* sample) {
             IMFMediaBuffer* buffer;
             ~Unlock() { buffer->Unlock(); }
         } unlock{buffer.Get()};
-        packet.data.assign(data, data + length);
+        bytes.assign(data, data + length);
     }
+    Packet packet{pts, duration, false, make_packet_bytes(std::move(bytes))};
 
     // §3.4.6: the keyframe flag comes from CleanPoint. AMD sets it only on keyframes and leaves it
     // out elsewhere (measured), so an absent attribute is not an error. When it is absent the
@@ -551,7 +561,7 @@ void VideoEncoder::emit_packet(IMFSample* sample) {
     if (SUCCEEDED(sample->GetUINT32(MFSampleExtension_CleanPoint, &clean_point))) {
         packet.keyframe = clean_point != 0;
     } else {
-        packet.keyframe = h264::inspect(packet.data).has_idr;
+        packet.keyframe = h264::inspect(*packet.data).has_idr;
         if (packet.keyframe && !clean_point_fallback_logged_) {
             log::warn("Video encoder did not mark a keyframe, detecting keyframes from the H.264 stream");
             clean_point_fallback_logged_ = true;
@@ -559,20 +569,34 @@ void VideoEncoder::emit_packet(IMFSample* sample) {
     }
     const bool keyframe = packet.keyframe;
 
-    if (counters_.packets_out == 0) {
+    // The output type is what the MP4 writer is built from (§7). Asked for again on later packets if
+    // the encoder could not say it yet, rather than leaving every save refused for the session.
+    bool have_type = false;
+    {
+        std::lock_guard lock(output_type_mutex_);
+        have_type = output_type_ != nullptr;
+    }
+    if (!have_type) {
         ComPtr<IMFMediaType> type;
-        UINT32 header_bytes = 0;
         if (SUCCEEDED(transform_->GetOutputCurrentType(output_id_, &type))) {
-            if (FAILED(type->GetBlobSize(MF_MT_MPEG_SEQUENCE_HEADER, &header_bytes))) {
-                header_bytes = 0;
-            }
             std::lock_guard lock(output_type_mutex_);
             output_type_ = type;
+        } else if (type_error_log_.allow()) {
+            log::error("Video encoder does not report its output format yet; clips cannot be saved until it does");
         }
-        const h264::AccessUnitInfo info = h264::inspect(packet.data);
+    }
+    if (counters_.packets_out == 0) {
+        UINT32 header_bytes = 0;
+        {
+            std::lock_guard lock(output_type_mutex_);
+            if (!output_type_ || FAILED(output_type_->GetBlobSize(MF_MT_MPEG_SEQUENCE_HEADER, &header_bytes))) {
+                header_bytes = 0;
+            }
+        }
+        const h264::AccessUnitInfo info = h264::inspect(*packet.data);
         log::info("First video packet: {} bytes, keyframe {}, SPS {}, PPS {}, IDR {}; sequence header in the output "
                   "type: {}",
-                  packet.data.size(), keyframe, info.has_sps, info.has_pps, info.has_idr,
+                  packet.size(), keyframe, info.has_sps, info.has_pps, info.has_idr,
                   header_bytes != 0 ? std::to_string(header_bytes) + " bytes" : std::string("none"));
     }
 
@@ -603,8 +627,13 @@ void VideoEncoder::emit_packet(IMFSample* sample) {
         last_keyframe_pts_ = pts;
     }
     ++counters_.packets_out;
-    counters_.bytes_out += packet.data.size();
-    on_packet_(std::move(packet));
+    counters_.bytes_out += packet.size();
+    ComPtr<IMFMediaType> type;
+    {
+        std::lock_guard lock(output_type_mutex_);
+        type = output_type_;
+    }
+    on_packet_(std::move(packet), type.Get());
 }
 
 void VideoEncoder::software_loop() {

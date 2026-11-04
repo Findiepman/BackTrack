@@ -32,4 +32,8 @@ struct AccessUnitInfo {
 
 AccessUnitInfo inspect(std::span<const std::uint8_t> access_unit);
 
+// The SPS and PPS NAL units of a keyframe, each behind a 00 00 00 01 start code: the form
+// Media Foundation expects in MF_MT_MPEG_SEQUENCE_HEADER. Empty when either is missing.
+std::vector<std::uint8_t> parameter_sets(std::span<const std::uint8_t> keyframe);
+
 }  // namespace bt::h264

@@ -11,7 +11,7 @@ constexpr int kFps = 60;
 
 Packet make(std::int64_t frame, bool keyframe, std::size_t bytes = 100) {
     return Packet{frame_offset(frame, kFps), frame_offset(frame + 1, kFps) - frame_offset(frame, kFps), keyframe,
-                  std::vector<std::uint8_t>(bytes, keyframe ? std::uint8_t{0xAA} : std::uint8_t{0x55})};
+                  make_packet_bytes(std::vector<std::uint8_t>(bytes, keyframe ? std::uint8_t{0xAA} : std::uint8_t{0x55}))};
 }
 
 // A 60 fps stream with a keyframe every second, like the encoder is configured (§3.1).
@@ -91,10 +91,10 @@ void extraction_starts_on_a_keyframe() {
     // End before anything in the buffer: nothing.
     CHECK(buffer.extract(0, frame_offset(5 * kFps, kFps)).empty());
 
-    // Extraction copies: the buffer is unchanged and the copy is independent.
-    auto copy = buffer.extract(now - 10 * kSecond, now);
-    copy.front().data[0] = 0;
-    CHECK_EQ(buffer.extract(now - 10 * kSecond, now).front().data[0], std::uint8_t{0xAA});
+    // Extraction shares the bytes instead of copying them (§3.8), and they cannot be modified.
+    const auto copy = buffer.extract(now - 10 * kSecond, now);
+    CHECK(copy.front().data == buffer.extract(now - 10 * kSecond, now).front().data);
+    CHECK_EQ((*copy.front().data)[0], std::uint8_t{0xAA});
 }
 
 void hard_byte_cap() {
@@ -142,7 +142,7 @@ void audio_every_packet_a_keyframe() {
     ClipBuffer buffer(5 * kSecond, 100'000'000);
     const Time100ns packet = kTicksPerSecond * 1024 / 48000;
     for (int i = 0; i < 2000; ++i) {
-        CHECK(buffer.push(Packet{i * packet, packet, true, std::vector<std::uint8_t>(10, 1)}));
+        CHECK(buffer.push(Packet{i * packet, packet, true, make_packet_bytes(std::vector<std::uint8_t>(10, 1))}));
     }
     const ClipBufferStats s = buffer.stats();
     // Exactly `keep` of audio, plus less than one packet: the oldest is the last one at or before
@@ -177,9 +177,9 @@ void timestamps_not_monotonic() {
 
     // Audio: a backwards packet is dropped, the next one is accepted at once.
     ClipBuffer audio(30 * kSecond, 1'000'000);
-    CHECK(audio.push(Packet{100, 10, true, {1}}));
-    CHECK(!audio.push(Packet{50, 10, true, {1}}));
-    CHECK(audio.push(Packet{110, 10, true, {1}}));
+    CHECK(audio.push(Packet{100, 10, true, make_packet_bytes({1})}));
+    CHECK(!audio.push(Packet{50, 10, true, make_packet_bytes({1})}));
+    CHECK(audio.push(Packet{110, 10, true, make_packet_bytes({1})}));
 }
 
 void clear_waits_for_keyframe() {

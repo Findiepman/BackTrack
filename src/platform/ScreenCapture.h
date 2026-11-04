@@ -83,7 +83,9 @@ public:
     ScreenCapture& operator=(const ScreenCapture&) = delete;
 
     // Must not be called from FrameCallback or EventCallback (it would join its own thread).
-    void start();
+    // clock_offset is subtracted from every timestamp: the owner's recording clock stands still
+    // while paused, so frames after a resume continue where the ones before the pause ended.
+    void start(Time100ns clock_offset = 0);
     void stop();
 
     ID3D11Device* device() const { return device_.Get(); }
@@ -184,6 +186,7 @@ private:
     Counters counters_;
     std::atomic<bool> simulate_lost_{false};
     std::atomic<bool> running_{false};  // capture thread alive; false once it has ended on its own
+    Time100ns clock_offset_ = 0;  // written by start() before the thread exists
     UniqueHandle stop_event_;
     std::thread thread_;
 };

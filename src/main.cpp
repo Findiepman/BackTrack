@@ -1,32 +1,31 @@
-// Development harness for M1 and M2 (build prompt §11). Records the configured monitor through the
-// real capture, colour conversion and H.264 encoder into the ring buffer. The hotkey writes the
-// last seconds from the buffer to a raw .h264 file (M2 proof); --dump-after dumps one NV12
-// frame and checks its colours (M1 proof). M3 replaces this file with the tray application.
+// Backtrack console host. Until the real UI exists this window stands in for it: the title shows
+// what Backtrack is doing, single keys replace the menu, and a sound confirms each saved clip.
+// The recording engine is bt::Recorder; the UI will drive the same object.
 //
-// Usage: backtrack.exe [--save-after <s>] [--dump-after <s>] [--exit-after <s>] [--lose-capture-every <s>]
+// Keys: S save clip, P pause/resume, O open clips folder, E edit settings, L open log, Q quit.
+// Test options: --save-after <s> (repeatable), --pause-after <s>, --resume-after <s>,
+//               --lose-capture-every <s>, --exit-after <s>
 
-#include "core/ClipBuffer.h"
 #include "core/Config.h"
-#include "core/H264.h"
 #include "core/Hotkey.h"
 #include "platform/Com.h"
 #include "platform/Log.h"
-#include "platform/QpcClock.h"
-#include "platform/ScreenCapture.h"
-#include "platform/VideoEncoder.h"
-#include "tools/nv12_compare.h"
+#include "platform/Recorder.h"
 
 #include <mfapi.h>
+#include <mmsystem.h>
+#include <shellapi.h>
 
 #include <atomic>
-#include <chrono>
-#include <memory>
+#include <cstdio>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace {
 
@@ -39,24 +38,29 @@ static_assert(VK_F1 == 0x70 && VK_F12 == 0x7B && VK_F24 == 0x87 && VK_NUMPAD0 ==
               VK_END == 0x23 && VK_INSERT == 0x2D && VK_DELETE == 0x2E && VK_PRIOR == 0x21 && VK_NEXT == 0x22 &&
               VK_SPACE == 0x20 && VK_PAUSE == 0x13 && VK_SNAPSHOT == 0x2C);
 
-constexpr UINT kMsgDumpReady = WM_APP + 1;
-constexpr UINT kMsgCaptureFailed = WM_APP + 2;
+constexpr UINT kMsgCommand = WM_APP + 1;  // wParam: a Command
+constexpr UINT kMsgSaved = WM_APP + 2;
 constexpr int kHotkeyId = 1;
+constexpr UINT kStatusRefreshMs = 1000;
 constexpr UINT kMillisecondsPerSecond = 1000;
+constexpr DWORD kKeyPollMs = 200;
 
-// Windows kills the process 5 s after a close/logoff/shutdown event; leave margin for that.
-constexpr DWORD kCloseWaitMs = 4000;
+// Windows ends the process 5 s after a close/logoff/shutdown event; leave margin for that.
+constexpr DWORD kCloseWaitMs = 4500;
 
-// §3.1 hard byte cap: room for the clip plus slack at twice the configured bitrate. CBR stays
-// near the bitrate, so the cap is only reached when keyframes go missing.
-constexpr std::size_t kByteCapSlackSeconds = 2;
-constexpr std::size_t kByteCapBitrateFactor = 2;
-constexpr std::size_t kBitsPerByte = 8;
-constexpr std::size_t kBitsPerKilobit = 1000;
+// §8: a second copy exits instead of recording twice. Per session, so two users can each run one.
+constexpr wchar_t kInstanceMutexName[] = L"Local\\Backtrack.SingleInstance";
 
-// Mean error per channel (0-255) below which the NV12 frame counts as matching the desktop.
-// Chroma subsampling alone costs 1-3 on text-heavy screens; a wrong matrix or range costs 5+.
-constexpr double kColourPassThreshold = 4.0;
+enum class Command : WPARAM {
+    Save = 's',
+    Pause = 'p',
+    OpenFolder = 'o',
+    EditSettings = 'e',
+    OpenLog = 'l',
+    Quit = 'q',
+    LoseCapture = 'x',  // test option only, no key
+    Resume = 'r',  // test option only, no key
+};
 
 DWORD g_main_thread = 0;
 HANDLE g_finished = nullptr;  // set when run() has cleaned up
@@ -66,15 +70,14 @@ BOOL WINAPI on_console_ctrl(DWORD event) {
         return FALSE;  // let Windows apply its default (end the process) rather than lose the press
     }
     if (event == CTRL_CLOSE_EVENT || event == CTRL_LOGOFF_EVENT || event == CTRL_SHUTDOWN_EVENT) {
-        // Returning ends the process at once; wait so capture stops and the log is complete.
+        // Returning ends the process at once; wait so a clip being written is finished (§6).
         WaitForSingleObject(g_finished, kCloseWaitMs);
     }
     return TRUE;
 }
 
 std::string path_text(const fs::path& path) {
-    // path::string() uses the ANSI code page and throws for names it cannot represent.
-    return bt::to_utf8(path.wstring());
+    return bt::to_utf8(path.wstring());  // path::string() throws for names outside the ANSI code page
 }
 
 fs::path exe_directory() {
@@ -133,6 +136,7 @@ std::string ini_text_as_utf8(const std::string& bytes) {
     return bytes;
 }
 
+// §5.1: written with defaults when missing; never refuses to start because of the config.
 bt::Settings load_config(const fs::path& ini_path) {
     std::string text;
     std::error_code ec;
@@ -158,163 +162,112 @@ bt::Settings load_config(const fs::path& ini_path) {
     return loaded.settings;
 }
 
-struct Options {
-    UINT save_after_s = 0;
-    UINT dump_after_s = 0;
-    UINT exit_after_s = 0;
-    UINT lose_capture_every_s = 0;
+struct ScheduledCommand {
+    UINT after_s = 0;
+    Command command = Command::Save;
+    bool repeat = false;
+    UINT_PTR timer = 0;
 };
 
-Options parse_options(int argc, wchar_t** argv) {
-    Options options;
+std::vector<ScheduledCommand> parse_options(int argc, wchar_t** argv) {
+    std::vector<ScheduledCommand> schedule;
     for (int i = 1; i + 1 < argc; i += 2) {
         const std::wstring name = argv[i];
-        const UINT value = static_cast<UINT>(std::wcstoul(argv[i + 1], nullptr, 10));
-        if (name == L"--save-after") options.save_after_s = value;
-        else if (name == L"--dump-after") options.dump_after_s = value;
-        else if (name == L"--exit-after") options.exit_after_s = value;
-        else if (name == L"--lose-capture-every") options.lose_capture_every_s = value;
+        const UINT seconds = static_cast<UINT>(std::wcstoul(argv[i + 1], nullptr, 10));
+        if (name == L"--save-after") schedule.push_back({seconds, Command::Save});
+        else if (name == L"--pause-after") schedule.push_back({seconds, Command::Pause});
+        else if (name == L"--resume-after") schedule.push_back({seconds, Command::Resume});
+        else if (name == L"--exit-after") schedule.push_back({seconds, Command::Quit});
+        else if (name == L"--lose-capture-every") schedule.push_back({seconds, Command::LoseCapture, true});
         else bt::log::warn("Unknown option {}", bt::to_utf8(name));
     }
-    return options;
-}
-
-struct FrameDump {
-    std::vector<std::uint8_t> nv12;
-    std::vector<std::uint8_t> bgra;
-    bt::VideoSize size;
-};
-
-void write_dump(const fs::path& folder, const FrameDump& dump) {
-    std::error_code ec;
-    fs::create_directories(folder, ec);
-    SYSTEMTIME t{};
-    GetLocalTime(&t);
-    const std::wstring stem = std::format(L"frame_{:04}{:02}{:02}_{:02}{:02}{:02}_{}x{}", t.wYear, t.wMonth, t.wDay,
-                                          t.wHour, t.wMinute, t.wSecond, dump.size.width, dump.size.height);
-    const fs::path nv12_path = folder / (stem + L".nv12");
-    {
-        std::ofstream file(nv12_path, std::ios::binary);
-        file.write(reinterpret_cast<const char*>(dump.nv12.data()), static_cast<std::streamsize>(dump.nv12.size()));
-        if (!file) {
-            bt::log::error("Could not write {}", path_text(nv12_path));
-            return;
-        }
-    }
-    const fs::path decoded_path = folder / (stem + L"_decoded.bmp");
-    if (!bt::tools::write_bmp24(decoded_path, bt::tools::nv12_to_bgr(dump.nv12, dump.size.width, dump.size.height),
-                                dump.size.width, dump.size.height)) {
-        bt::log::error("Could not write {}", path_text(decoded_path));
-        return;
-    }
-    bt::log::info("Dumped {} (raw NV12, {}x{}) and {} (decoded as BT.709 limited)", path_text(nv12_path),
-                  dump.size.width, dump.size.height, path_text(decoded_path));
-
-    if (dump.bgra.empty()) {
-        bt::log::info("No reference image (rotated monitor), colour check skipped");
-        return;
-    }
-    const fs::path reference_path = folder / (stem + L"_desktop.bmp");
-    if (!bt::tools::write_bmp24(reference_path, bt::tools::bgra_to_bgr(dump.bgra), dump.size.width, dump.size.height)) {
-        bt::log::error("Could not write {}", path_text(reference_path));
-    }
-    const auto report = bt::tools::compare_nv12_with_bgra(dump.nv12, dump.bgra, dump.size.width, dump.size.height);
-    if (report.fits.empty()) {
-        bt::log::error("Colour check FAILED: frame buffers do not match {}x{} (NV12 {} bytes, BGRA {} bytes)",
-                       dump.size.width, dump.size.height, dump.nv12.size(), dump.bgra.size());
-        return;
-    }
-    for (const auto& fit : report.fits) {
-        bt::log::info("  as {:<15} mean error R {:.2f} G {:.2f} B {:.2f}", fit.interpretation->name,
-                      fit.mean_abs_error[0], fit.mean_abs_error[1], fit.mean_abs_error[2]);
-    }
-    const auto& best = report.fits.front();
-    const bool pass = std::string_view(best.interpretation->name) == "BT.709 limited" &&
-                      best.overall < kColourPassThreshold && report.luma_min >= 16 && report.luma_max <= 235;
-    bt::log::info("Colour check {}: best match {}, mean error {:.2f}, luma range {}-{} (limited range is 16-235)",
-                  pass ? "PASSED" : "FAILED", best.interpretation->name, best.overall, report.luma_min,
-                  report.luma_max);
-}
-
-// M2 proof: the last clip_seconds from the ring buffer, written as a raw H.264 stream that any
-// player can open. Also checks what §3.1 promises: starts on a keyframe with SPS/PPS, one keyframe
-// per second, timestamps always increasing.
-void save_clip_or_throw(const fs::path& folder, const bt::ClipBuffer& buffer, int clip_seconds) {
-    const bt::Time100ns now = bt::qpc_now();
-    const auto copy_started = std::chrono::steady_clock::now();
-    const std::vector<bt::Packet> clip = buffer.extract(now - bt::seconds_to_100ns(clip_seconds), now);
-    const auto copy_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - copy_started).count();
-    if (clip.empty()) {
-        bt::log::warn("Nothing to save yet: the buffer has no keyframe");
-        return;
-    }
-    std::error_code ec;
-    fs::create_directories(folder, ec);
-    SYSTEMTIME t{};
-    GetLocalTime(&t);
-    const fs::path path = folder / std::format(L"clip_{:04}{:02}{:02}_{:02}{:02}{:02}.h264", t.wYear, t.wMonth,
-                                               t.wDay, t.wHour, t.wMinute, t.wSecond);
-    std::size_t bytes = 0;
-    {
-        std::ofstream file(path, std::ios::binary);
-        for (const bt::Packet& p : clip) {
-            file.write(reinterpret_cast<const char*>(p.data.data()), static_cast<std::streamsize>(p.data.size()));
-            bytes += p.data.size();
-        }
-        if (!file) {
-            bt::log::error("Could not write {}", path_text(path));
-            return;
-        }
-    }
-
-    int keyframes = 0;
-    bool increasing = true;
-    bt::Time100ns min_gap = 0;
-    bt::Time100ns max_gap = 0;
-    bt::Time100ns last_keyframe = 0;
-    for (std::size_t i = 0; i < clip.size(); ++i) {
-        if (i > 0 && clip[i].pts <= clip[i - 1].pts) {
-            increasing = false;
-        }
-        if (clip[i].keyframe) {
-            if (keyframes > 0) {
-                const bt::Time100ns gap = clip[i].pts - last_keyframe;
-                min_gap = keyframes == 1 ? gap : std::min(min_gap, gap);
-                max_gap = keyframes == 1 ? gap : std::max(max_gap, gap);
-            }
-            last_keyframe = clip[i].pts;
-            ++keyframes;
-        }
-    }
-    const bt::h264::AccessUnitInfo first = bt::h264::inspect(clip.front().data);
-    const bt::Time100ns length = clip.back().pts + clip.back().duration - clip.front().pts;
-    const auto as_seconds = [](bt::Time100ns v) { return static_cast<double>(v) / bt::kTicksPerSecond; };
-    bt::log::info("Saved {}", path_text(path));
-    bt::log::info("  {:.3f} s ({} asked), {} packets, {:.1f} MB, copied out of the buffer in {} ms", as_seconds(length),
-                  clip_seconds, clip.size(), static_cast<double>(bytes) / (1024.0 * 1024.0), copy_ms);
-    bt::log::info("  starts on a keyframe: {}, with SPS {} and PPS {}; {} keyframes, every {:.3f} to {:.3f} s; "
-                  "timestamps always increasing: {}",
-                  clip.front().keyframe && first.has_idr, first.has_sps, first.has_pps, keyframes,
-                  as_seconds(min_gap), as_seconds(max_gap), increasing);
-}
-
-// A failed save (out of memory copying a long clip, disk full) is reported, never fatal.
-void save_clip(const fs::path& folder, const bt::ClipBuffer& buffer, int clip_seconds) {
-    try {
-        save_clip_or_throw(folder, buffer, clip_seconds);
-    } catch (const std::exception& e) {
-        bt::log::error("Saving the clip failed: {}", e.what());
-    }
+    return schedule;
 }
 
 void disable_quick_edit() {
-    // With QuickEdit on, clicking the console pauses all output; the capture thread would then
-    // block on its next log line and stop ticking.
+    // With QuickEdit on, clicking the console pauses all output; every thread that logs would
+    // then block on its next line.
     const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
     DWORD mode = 0;
     if (input != INVALID_HANDLE_VALUE && GetConsoleMode(input, &mode)) {
         SetConsoleMode(input, (mode & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS);
+    }
+}
+
+// Reads single key presses from the console and posts them to the main thread as commands.
+class ConsoleKeys {
+public:
+    ConsoleKeys() : thread_(&ConsoleKeys::run, this) {}
+    ~ConsoleKeys() {
+        stop_ = true;
+        thread_.join();
+    }
+    ConsoleKeys(const ConsoleKeys&) = delete;
+    ConsoleKeys& operator=(const ConsoleKeys&) = delete;
+
+private:
+    void run() {
+        const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+        DWORD mode = 0;
+        if (input == INVALID_HANDLE_VALUE || !GetConsoleMode(input, &mode)) {
+            return;  // input is redirected: no keys, only the hotkey and test options
+        }
+        while (!stop_) {
+            if (WaitForSingleObject(input, kKeyPollMs) != WAIT_OBJECT_0) {
+                continue;
+            }
+            INPUT_RECORD record{};
+            DWORD read = 0;
+            if (!ReadConsoleInputW(input, &record, 1, &read) || read == 0 || record.EventType != KEY_EVENT ||
+                !record.Event.KeyEvent.bKeyDown) {
+                continue;
+            }
+            const auto key = static_cast<wchar_t>(std::towlower(record.Event.KeyEvent.uChar.UnicodeChar));
+            if (key == L's' || key == L'p' || key == L'o' || key == L'e' || key == L'l' || key == L'q') {
+                PostThreadMessageW(g_main_thread, kMsgCommand, static_cast<WPARAM>(key), 0);
+            }
+        }
+    }
+
+    std::atomic<bool> stop_{false};
+    std::thread thread_;  // last: starts in the constructor and uses stop_
+};
+
+// ShellExecute wants a single-threaded apartment; the main thread is multithreaded.
+void open_in_shell(const fs::path& target) {
+    std::thread([target] {
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        const auto result = reinterpret_cast<INT_PTR>(
+            ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+        constexpr INT_PTR kShellExecuteSuccess = 32;  // ShellExecute returns > 32 on success
+        if (result <= kShellExecuteSuccess) {
+            bt::log::warn("Could not open {} (error {})", path_text(target), result);
+        }
+        if (SUCCEEDED(com)) {
+            CoUninitialize();
+        }
+    }).join();
+}
+
+void show_status(const bt::Recorder& recorder) {
+    SetConsoleTitleW((L"Backtrack - " + bt::to_wide(recorder.status_text())).c_str());
+}
+
+// Without a window in front of a fullscreen game, sound is the only feedback: the "asterisk" for a
+// saved clip, the "critical stop" for a refused or failed one.
+void play_feedback(const bt::Settings& settings, bool ok) {
+    if (settings.sound) {
+        PlaySoundW(ok ? L"SystemAsterisk" : L"SystemHand", nullptr, SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
+    }
+}
+
+void request_save(bt::Recorder& recorder, const bt::Settings& settings) {
+    std::string reason;
+    if (recorder.save_clip(reason)) {
+        bt::log::info("Saving the last {} seconds...", settings.clip_seconds);
+    } else {
+        bt::log::warn("{}", reason);
+        play_feedback(settings, false);
     }
 }
 
@@ -328,181 +281,123 @@ int run(int argc, wchar_t** argv) {
     disable_quick_edit();
     bt::log::set_console_echo(true);
 
-    // The message queue must exist before Ctrl+C can post WM_QUIT to it.
+    // The message queue must exist before Ctrl+C or a saved clip can post to it.
     MSG peek{};
     PeekMessageW(&peek, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
     g_main_thread = GetCurrentThreadId();
     SetConsoleCtrlHandler(on_console_ctrl, TRUE);
 
+    const bt::UniqueHandle instance(CreateMutexW(nullptr, FALSE, kInstanceMutexName));
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        std::printf("Backtrack is already running.\n");
+        return 0;
+    }
+
     const fs::path exe_dir = exe_directory();
-    const bt::Settings settings = load_config(exe_dir / L"backtrack.ini");
-    bt::log::init(exe_dir / L"backtrack.log", settings.log_level);
-    bt::log::info("Backtrack development harness starting");
-    const Options options = parse_options(argc, argv);
+    const fs::path ini_path = exe_dir / L"backtrack.ini";
+    const fs::path log_path = exe_dir / L"backtrack.log";
+    const bt::Settings settings = load_config(ini_path);
+    bt::log::init(log_path, settings.log_level);
+    bt::log::info("Backtrack starting");
+    std::vector<ScheduledCommand> schedule = parse_options(argc, argv);
 
     bt::ComApartment com(COINIT_MULTITHREADED);
     BT_CHECK_HR(MFStartup(MF_VERSION, MFSTARTUP_FULL));
     struct MfShutdown {
-        ~MfShutdown() { MFShutdown(); }
+        ~MfShutdown() { MFShutdown(); }  // §6: after every pipeline object is gone
     } mf_shutdown;
+
+    bt::Recorder recorder(settings, [&settings](const bt::SaveResult& result) {
+        // Writer thread. §8: a sound either way and the log line (the writer logs failures itself);
+        // the UI will show it.
+        if (result.ok) {
+            bt::log::info("{}", result.message);
+        }
+        play_feedback(settings, result.ok);
+        PostThreadMessageW(g_main_thread, kMsgSaved, 0, 0);
+    });
+    recorder.start();
 
     const bt::Hotkey hotkey = *bt::parse_hotkey(settings.save_hotkey).hotkey;
     const bool hotkey_ok = RegisterHotKey(nullptr, kHotkeyId, hotkey.modifiers | MOD_NOREPEAT, hotkey.virtual_key);
-    if (hotkey_ok) {
-        bt::log::info("Press {} to save the last {} seconds as .h264, Ctrl+C to quit", settings.save_hotkey,
-                      settings.clip_seconds);
-    } else {
-        const HRESULT error = HRESULT_FROM_WIN32(GetLastError());
-        bt::log::warn("Cannot register {} as a hotkey: {}. Use --dump-after instead", settings.save_hotkey,
-                      bt::hresult_text(error));
+    if (!hotkey_ok) {
+        // §5.2: still usable through the S key.
+        bt::log::warn("Cannot use {} as the hotkey: {}. Press S in this window to save instead, or pick another "
+                      "key in backtrack.ini",
+                      settings.save_hotkey, bt::hresult_text(HRESULT_FROM_WIN32(GetLastError())));
     }
+    std::printf("\nBacktrack keeps the last %d seconds. %s saves them.\n"
+                "Keys in this window: S save  P pause/resume  O open clips folder  E edit settings  L open log  "
+                "Q quit\n\n",
+                settings.clip_seconds,
+                hotkey_ok ? (settings.save_hotkey + " (anywhere) or S here").c_str() : "S here");
 
-    std::atomic<bool> dump_requested{false};
-    std::mutex dump_mutex;
-    std::optional<FrameDump> pending_dump;
-    bt::ScreenCapture* capture_ptr = nullptr;
+    const ConsoleKeys keys;
+    const UINT_PTR status_timer = SetTimer(nullptr, 0, kStatusRefreshMs, nullptr);
+    for (ScheduledCommand& item : schedule) {
+        item.timer = SetTimer(nullptr, 0, item.after_s * kMillisecondsPerSecond, nullptr);
+    }
+    show_status(recorder);
 
-    // At the config maximum (300 s at 100 Mbit/s) this is 7.5 GB, so it needs a 64-bit size_t;
-    // CMakeLists.txt refuses 32-bit builds.
-    static_assert(sizeof(std::size_t) == 8);
-    const std::size_t byte_cap = (static_cast<std::size_t>(settings.clip_seconds) + kByteCapSlackSeconds) *
-                                 static_cast<std::size_t>(settings.video_bitrate_kbps) * kBitsPerKilobit / kBitsPerByte *
-                                 kByteCapBitrateFactor;
-    bt::ClipBuffer video_buffer(bt::seconds_to_100ns(settings.clip_seconds), byte_cap);
-    std::unique_ptr<bt::VideoEncoder> encoder;  // created, used and replaced on the capture thread
-    bool encoding_failed = false;  // capture thread only
-    bt::EncoderPreference preference = settings.encoder;  // capture thread only; drops to Software on failure
-
-    auto on_frame = [&](IMFSample* sample, bt::Time100ns pts) {
-        if (!encoding_failed) {
-            try {
-                const bt::VideoSize size = capture_ptr->frame_size();
-                if (encoder && encoder->failed()) {
-                    if (!encoder->hardware()) {
-                        throw std::runtime_error("the software video encoder stopped working");
-                    }
-                    // A hardware encoder that breaks mid-session (driver reset, NVENC session
-                    // limit) is replaced by the software one so recording continues.
-                    bt::log::error("{} stopped working, switching to the software encoder", encoder->name());
-                    preference = bt::EncoderPreference::Software;
-                    encoder.reset();
-                }
-                if (!encoder || !(encoder->size() == size)) {
-                    encoder.reset();
-                    video_buffer.clear();  // an MP4 cannot change resolution or encoder in the middle of a clip
-                    const bt::VideoEncoderSettings encoder_settings{size, settings.fps, settings.video_bitrate_kbps,
-                                                                    preference, capture_ptr->monitor().adapter_luid};
-                    encoder = std::make_unique<bt::VideoEncoder>(encoder_settings, capture_ptr->device_manager(),
-                                                                 [&](bt::Packet&& p) { video_buffer.push(std::move(p)); });
-                }
-                if (encoder->needs_system_memory()) {
-                    LONGLONG duration = 0;
-                    BT_CHECK_HR(sample->GetSampleDuration(&duration));
-                    encoder->encode_system_memory(capture_ptr->read_nv12(sample), pts, duration);
+    auto execute = [&](Command command) -> bool {
+        switch (command) {
+            case Command::Save: request_save(recorder, settings); break;
+            case Command::Pause:
+                if (recorder.paused()) {
+                    recorder.resume();
                 } else {
-                    encoder->encode(sample);
+                    recorder.pause();
                 }
-            } catch (const std::exception& e) {
-                bt::log::error("Encoding stopped: {}", e.what());
-                encoding_failed = true;
-                PostThreadMessageW(g_main_thread, kMsgCaptureFailed, 0, 0);
-            }
-        }
-        if (!dump_requested.exchange(false)) {
-            return;
-        }
-        try {
-            FrameDump dump;
-            dump.nv12 = capture_ptr->read_nv12(sample);
-            dump.bgra = capture_ptr->read_last_bgra();
-            dump.size = capture_ptr->frame_size();
-            std::lock_guard lock(dump_mutex);
-            pending_dump = std::move(dump);
-            PostThreadMessageW(g_main_thread, kMsgDumpReady, 0, 0);
-        } catch (const std::exception& e) {
-            bt::log::error("Frame dump failed: {}", e.what());
-        }
-    };
-    auto on_event = [&](bt::CaptureEvent event, bt::VideoSize size) {
-        if (event == bt::CaptureEvent::FormatChanged) {
-            bt::log::info("Frames are now {}x{}", size.width, size.height);
-        } else if (event == bt::CaptureEvent::Failed) {
-            PostThreadMessageW(g_main_thread, kMsgCaptureFailed, 0, 0);
-        }
-    };
-
-    int exit_code = 0;
-    {
-        bt::ScreenCapture capture(settings.monitor, settings.fps, on_frame, on_event);
-        capture_ptr = &capture;
-        capture.start();
-
-        const UINT_PTR save_timer = options.save_after_s
-            ? SetTimer(nullptr, 0, options.save_after_s * kMillisecondsPerSecond, nullptr) : 0;
-        const UINT_PTR dump_timer = options.dump_after_s
-            ? SetTimer(nullptr, 0, options.dump_after_s * kMillisecondsPerSecond, nullptr) : 0;
-        const UINT_PTR exit_timer = options.exit_after_s
-            ? SetTimer(nullptr, 0, options.exit_after_s * kMillisecondsPerSecond, nullptr) : 0;
-        const UINT_PTR lose_timer = options.lose_capture_every_s
-            ? SetTimer(nullptr, 0, options.lose_capture_every_s * kMillisecondsPerSecond, nullptr) : 0;
-
-        MSG msg{};
-        while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-            if (msg.message == WM_HOTKEY && msg.wParam == kHotkeyId) {
-                save_clip(exe_dir / L"frames", video_buffer, settings.clip_seconds);
-            } else if (msg.message == WM_TIMER && save_timer != 0 && msg.wParam == save_timer) {
-                KillTimer(nullptr, save_timer);
-                save_clip(exe_dir / L"frames", video_buffer, settings.clip_seconds);
-            } else if (msg.message == WM_TIMER && dump_timer != 0 && msg.wParam == dump_timer) {
-                KillTimer(nullptr, dump_timer);
-                dump_requested = true;
-            } else if (msg.message == WM_TIMER && exit_timer != 0 && msg.wParam == exit_timer) {
                 break;
-            } else if (msg.message == WM_TIMER && lose_timer != 0 && msg.wParam == lose_timer) {
+            case Command::Resume: recorder.resume(); break;
+            case Command::OpenFolder: open_in_shell(recorder.output_dir()); break;
+            case Command::EditSettings:
+                bt::log::info("Restart Backtrack after editing the settings");
+                open_in_shell(ini_path);
+                break;
+            case Command::OpenLog: open_in_shell(log_path); break;
+            case Command::LoseCapture:
                 bt::log::info("Simulating a lost capture");
-                capture.simulate_access_lost();
-            } else if (msg.message == kMsgDumpReady) {
-                std::optional<FrameDump> dump;
-                {
-                    std::lock_guard lock(dump_mutex);
-                    dump.swap(pending_dump);
-                }
-                if (dump) {
-                    write_dump(exe_dir / L"frames", *dump);
-                }
-            } else if (msg.message == kMsgCaptureFailed) {
-                exit_code = 1;
+                recorder.simulate_capture_loss();
                 break;
+            case Command::Quit: return false;
+        }
+        show_status(recorder);
+        return true;
+    };
+
+    MSG msg{};
+    bool running = true;
+    while (running && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (msg.message == WM_HOTKEY && msg.wParam == kHotkeyId) {
+            running = execute(Command::Save);
+        } else if (msg.message == kMsgCommand) {
+            running = execute(static_cast<Command>(msg.wParam));
+        } else if (msg.message == kMsgSaved || (msg.message == WM_TIMER && msg.wParam == status_timer)) {
+            show_status(recorder);
+        } else if (msg.message == WM_TIMER) {
+            for (const ScheduledCommand& item : schedule) {
+                if (item.timer != 0 && msg.wParam == item.timer) {
+                    if (!item.repeat) {
+                        KillTimer(nullptr, item.timer);
+                    }
+                    running = execute(item.command);
+                    break;
+                }
             }
         }
-        capture.stop();
-        if (encoder) {
-            const bt::VideoEncoderStats e = encoder->stats();
-            bt::log::info("Encoder counters: {} frames in, {} dropped (encoder behind), {} input errors, {} packets "
-                          "out, {} keyframes (every {:.3f} to {:.3f} s), {:.1f} MB, {} timestamps going backwards",
-                          e.frames_in, e.frames_dropped, e.input_errors, e.packets_out, e.keyframes,
-                          static_cast<double>(e.min_keyframe_interval) / bt::kTicksPerSecond,
-                          static_cast<double>(e.max_keyframe_interval) / bt::kTicksPerSecond,
-                          static_cast<double>(e.bytes_out) / (1024.0 * 1024.0), e.non_increasing_pts);
-            encoder.reset();  // before the capture that owns its device and input textures
-        }
-        const bt::ClipBufferStats b = video_buffer.stats();
-        bt::log::info("Buffer: {} packets, {:.1f} MB, {:.1f} s, dropped {} out of order, {} waiting for a keyframe, {} "
-                      "by the byte cap",
-                      b.packets, static_cast<double>(b.bytes) / (1024.0 * 1024.0),
-                      static_cast<double>(b.newest_pts - b.oldest_pts) / bt::kTicksPerSecond, b.dropped_out_of_order,
-                      b.dropped_waiting_for_keyframe, b.dropped_by_byte_cap);
-        const bt::CaptureStats s = capture.stats();
-        bt::log::info("Capture counters: {} ticks, {} new frames, {} repeated, {} dropped (encoder behind), {} "
-                      "conversion failures, {} late ticks skipped, {} capture losses, {} delivered",
-                      s.ticks, s.new_frames, s.repeated_frames, s.allocator_empty, s.convert_failed,
-                      s.late_ticks_skipped, s.access_lost, s.delivered);
     }
+
+    if (recorder.saving()) {
+        bt::log::info("Finishing the clip that is being saved...");
+        SetConsoleTitleW(L"Backtrack - Saving clip...");
+    }
+    recorder.stop();
     if (hotkey_ok) {
         UnregisterHotKey(nullptr, kHotkeyId);
     }
-    bt::log::info("Backtrack development harness stopped");
-    return exit_code;
+    bt::log::info("Backtrack stopped");
+    return 0;
 }
 
 }  // namespace

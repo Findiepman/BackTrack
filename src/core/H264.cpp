@@ -55,4 +55,24 @@ AccessUnitInfo inspect(std::span<const std::uint8_t> access_unit) {
     return info;
 }
 
+std::vector<std::uint8_t> parameter_sets(std::span<const std::uint8_t> keyframe) {
+    constexpr std::uint8_t kStartCode[] = {0, 0, 0, 1};
+    std::vector<std::uint8_t> out;
+    bool sps = false;
+    bool pps = false;
+    for (const NalUnit& unit : split_annex_b(keyframe)) {
+        if (unit.type != kNalSps && unit.type != kNalPps) {
+            continue;
+        }
+        sps = sps || unit.type == kNalSps;
+        pps = pps || unit.type == kNalPps;
+        out.insert(out.end(), std::begin(kStartCode), std::end(kStartCode));
+        out.insert(out.end(), unit.payload.begin(), unit.payload.end());
+    }
+    if (!sps || !pps) {
+        out.clear();
+    }
+    return out;
+}
+
 }  // namespace bt::h264
