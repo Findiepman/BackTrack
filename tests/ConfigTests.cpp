@@ -1,0 +1,355 @@
+#include "core/Config.h"
+
+#include "Check.h"
+
+#include <fstream>
+#include <sstream>
+
+using namespace bt;
+
+namespace {
+
+bool same_settings(const Settings& a, const Settings& b) {
+    return a.clip_seconds == b.clip_seconds && a.output_dir == b.output_dir && a.filename == b.filename &&
+           a.save_hotkey == b.save_hotkey && a.monitor == b.monitor && a.fps == b.fps &&
+           a.video_bitrate_kbps == b.video_bitrate_kbps && a.encoder == b.encoder &&
+           a.audio_enabled == b.audio_enabled && a.audio_bitrate_kbps == b.audio_bitrate_kbps &&
+           a.sound == b.sound && a.notification == b.notification && a.log_level == b.log_level;
+}
+
+bool any_warning(const LoadedSettings& loaded, std::string_view needle) {
+    for (const std::string& w : loaded.warnings) {
+        if (bt_test::contains(w, needle)) return true;
+    }
+    return false;
+}
+
+void dump_warnings(const LoadedSettings& loaded) {
+    for (const std::string& w : loaded.warnings) std::printf("    warning: %s\n", w.c_str());
+}
+
+void empty_and_missing() {
+    const LoadedSettings empty = load_settings("");
+    CHECK(same_settings(empty.settings, Settings{}));
+    CHECK(empty.warnings.empty());
+
+    const LoadedSettings only_comments = load_settings("; nothing here\n# or here\n\n   \n");
+    CHECK(same_settings(only_comments.settings, Settings{}));
+    CHECK(only_comments.warnings.empty());
+
+    // A partial file keeps defaults for everything it does not mention.
+    const LoadedSettings partial = load_settings("[video]\nfps = 30\n");
+    CHECK_EQ(partial.settings.fps, 30);
+    CHECK_EQ(partial.settings.clip_seconds, 30);
+    CHECK_EQ(partial.settings.save_hotkey, std::string("F8"));
+    CHECK(partial.warnings.empty());
+}
+
+void default_file_is_clean() {
+    const LoadedSettings loaded = load_settings(default_ini_text());
+    CHECK(same_settings(loaded.settings, Settings{}));
+    CHECK(loaded.warnings.empty());
+    dump_warnings(loaded);
+}
+
+void repository_ini_matches_built_in_default() {
+    std::ifstream file(std::string(BT_SOURCE_DIR) + "/backtrack.ini", std::ios::binary);
+    CHECK(file.good());
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    std::string text = buffer.str();
+    std::string normalised;
+    for (char c : text) {
+        if (c != '\r') normalised += c;  // git may check the file out with CRLF
+    }
+    CHECK(normalised == default_ini_text());
+}
+
+void every_key_is_read() {
+    const LoadedSettings loaded = load_settings(R"(
+[clip]
+seconds = 120
+output_dir = D:\Clips
+filename = game_%H%M.mp4
+[hotkey]
+save = ctrl+shift+f12
+[video]
+monitor = 1
+fps = 144
+bitrate_kbps = 40000
+encoder = software
+[audio]
+enabled = false
+bitrate_kbps = 192
+[feedback]
+sound = no
+notification = off
+[logging]
+level = debug
+)");
+    dump_warnings(loaded);
+    CHECK(loaded.warnings.empty());
+    const Settings& s = loaded.settings;
+    CHECK_EQ(s.clip_seconds, 120);
+    CHECK_EQ(s.output_dir, std::string("D:\\Clips"));
+    CHECK_EQ(s.filename, std::string("game_%H%M.mp4"));
+    CHECK_EQ(s.save_hotkey, std::string("Ctrl+Shift+F12"));
+    CHECK_EQ(s.monitor, 1);
+    CHECK_EQ(s.fps, 144);
+    CHECK_EQ(s.video_bitrate_kbps, 40000);
+    CHECK(s.encoder == EncoderPreference::Software);
+    CHECK(!s.audio_enabled);
+    CHECK_EQ(s.audio_bitrate_kbps, 192);
+    CHECK(!s.sound);
+    CHECK(!s.notification);
+    CHECK(s.log_level == LogLevel::Debug);
+}
+
+void whitespace_comments_and_line_endings() {
+    const LoadedSettings loaded = load_settings(
+        "\xEF\xBB\xBF; BOM at the start\r\n"
+        "  [ Clip ]  \r\n"
+        "\tSECONDS\t=\t45   ; inline comment\r\n"
+        "filename = clip#1.mp4\r\n"
+        "output_dir=   \"C:\\My Clips ; with semicolon\"   ; real comment\r\n"
+        "# hash comment\r\n"
+        "[video]\r\n"
+        "fps = 30 # hash inline comment");
+    dump_warnings(loaded);
+    CHECK(loaded.warnings.empty());
+    CHECK_EQ(loaded.settings.clip_seconds, 45);
+    CHECK_EQ(loaded.settings.filename, std::string("clip#1.mp4"));
+    CHECK_EQ(loaded.settings.output_dir, std::string("C:\\My Clips ; with semicolon"));
+    CHECK_EQ(loaded.settings.fps, 30);
+}
+
+void duplicate_keys_use_the_last_one() {
+    const LoadedSettings loaded = load_settings("[clip]\nseconds = 20\nseconds = 40\n");
+    CHECK_EQ(loaded.settings.clip_seconds, 40);
+    CHECK(any_warning(loaded, "line 3"));
+    CHECK(any_warning(loaded, "first on line 2"));
+
+    // The same key in a repeated section is still a duplicate.
+    const LoadedSettings sections = load_settings("[video]\nfps=30\n[audio]\n[video]\nfps=120\n");
+    CHECK_EQ(sections.settings.fps, 120);
+    CHECK(any_warning(sections, "first on line 2"));
+}
+
+void unknown_keys_and_sections() {
+    const LoadedSettings loaded = load_settings("[clip]\nsecs = 10\n[gpu]\nturbo = yes\n[clip]\nseconds = 10\n");
+    CHECK_EQ(loaded.settings.clip_seconds, 10);
+    CHECK(any_warning(loaded, "line 2: unknown setting 'secs' in [clip]"));
+    CHECK(any_warning(loaded, "line 4: unknown setting 'turbo' in [gpu]"));
+    CHECK_EQ(loaded.warnings.size(), std::size_t{2});
+}
+
+void malformed_lines() {
+    const LoadedSettings loaded = load_settings(
+        "seconds = 10\n"  // before any section
+        "[clip\n"  // broken header
+        "seconds = 11\n"  // ignored: no valid section
+        "[]\n"
+        "[clip]\n"
+        "just some words\n"
+        "= 12\n"
+        "seconds = 13\n"
+        "filename = \"unterminated.mp4\n");
+    CHECK_EQ(loaded.settings.clip_seconds, 13);
+    CHECK(any_warning(loaded, "line 1: 'seconds' is not inside"));
+    CHECK(any_warning(loaded, "line 2: '[clip' is not a valid"));
+    CHECK(any_warning(loaded, "line 3: 'seconds' is not inside"));
+    CHECK(any_warning(loaded, "line 4: '[]' is not a valid"));
+    CHECK(any_warning(loaded, "line 6: expected 'key = value'"));
+    CHECK(any_warning(loaded, "line 7: '= 12' has no key"));
+    CHECK(any_warning(loaded, "line 9: filename has an opening quote"));
+    CHECK_EQ(loaded.settings.filename, std::string("unterminated.mp4"));
+}
+
+void bad_values_keep_defaults() {
+    const LoadedSettings loaded = load_settings(R"([clip]
+seconds = thirty
+output_dir =
+filename =
+[video]
+fps = fast
+monitor = -1
+bitrate_kbps = 99999999999999999999
+encoder = gpu
+[audio]
+enabled = maybe
+bitrate_kbps = 1.5
+[logging]
+level = verbose
+[hotkey]
+save = Ctrl+
+)");
+    const Settings& s = loaded.settings;
+    CHECK_EQ(s.clip_seconds, 30);
+    CHECK(any_warning(loaded, "line 2: seconds = 'thirty' is not a whole number, keeping 30"));
+    CHECK_EQ(s.output_dir, Settings{}.output_dir);
+    CHECK(any_warning(loaded, "line 3: output_dir is empty"));
+    CHECK_EQ(s.filename, Settings{}.filename);
+    CHECK(any_warning(loaded, "line 4: filename is empty"));
+    CHECK_EQ(s.fps, 60);
+    CHECK(any_warning(loaded, "line 6:"));
+    CHECK_EQ(s.monitor, 0);
+    CHECK(any_warning(loaded, "line 7: monitor = -1 is below the minimum 0"));
+    CHECK_EQ(s.video_bitrate_kbps, 20000);
+    CHECK(any_warning(loaded, "line 8:"));
+    CHECK(s.encoder == EncoderPreference::Auto);
+    CHECK(any_warning(loaded, "line 9:"));
+    CHECK(s.audio_enabled);
+    CHECK(any_warning(loaded, "line 11:"));
+    CHECK_EQ(s.audio_bitrate_kbps, 160);
+    CHECK(any_warning(loaded, "line 12:"));
+    CHECK(s.log_level == LogLevel::Info);
+    CHECK(any_warning(loaded, "line 14:"));
+    CHECK_EQ(s.save_hotkey, std::string("F8"));
+    CHECK(any_warning(loaded, "line 16: save = 'Ctrl+'"));
+    CHECK_EQ(loaded.warnings.size(), std::size_t{11});
+}
+
+void ranges_and_snapping() {
+    auto seconds = [](const char* v) { return load_settings(std::format("[clip]\nseconds={}", v)); };
+    CHECK_EQ(seconds("3").settings.clip_seconds, 5);
+    CHECK(any_warning(seconds("3"), "below the minimum 5"));
+    CHECK_EQ(seconds("1000").settings.clip_seconds, 300);
+    CHECK(any_warning(seconds("1000"), "above the maximum 300"));
+    CHECK_EQ(seconds("5").settings.clip_seconds, 5);
+    CHECK(seconds("5").warnings.empty());
+    CHECK_EQ(seconds("300").settings.clip_seconds, 300);
+    CHECK_EQ(seconds("+60").settings.clip_seconds, 60);
+
+    auto fps = [](const char* v) { return load_settings(std::format("[video]\nfps={}", v)).settings.fps; };
+    CHECK_EQ(fps("30"), 30);
+    CHECK_EQ(fps("60"), 60);
+    CHECK_EQ(fps("120"), 120);
+    CHECK_EQ(fps("144"), 144);
+    CHECK_EQ(fps("50"), 60);
+    CHECK_EQ(fps("25"), 30);
+    CHECK_EQ(fps("45"), 30);  // tie goes to the lower rate
+    CHECK_EQ(fps("165"), 144);
+    CHECK_EQ(fps("0"), 30);
+    CHECK_EQ(fps("-60"), 30);
+    CHECK(any_warning(load_settings("[video]\nfps=50"), "fps = 50 is not supported (30, 60, 120 or 144), using 60"));
+
+    auto audio = [](const char* v) { return load_settings(std::format("[audio]\nbitrate_kbps={}", v)).settings.audio_bitrate_kbps; };
+    CHECK_EQ(audio("96"), 96);
+    CHECK_EQ(audio("100"), 96);
+    CHECK_EQ(audio("150"), 160);
+    CHECK_EQ(audio("144"), 128);  // tie
+    CHECK_EQ(audio("320"), 192);
+
+    auto video = [](const char* v) { return load_settings(std::format("[video]\nbitrate_kbps={}", v)).settings.video_bitrate_kbps; };
+    CHECK_EQ(video("500"), 1000);
+    CHECK_EQ(video("1000"), 1000);
+    CHECK_EQ(video("100000"), 100000);
+    CHECK_EQ(video("200000"), 100000);
+}
+
+void booleans_and_enums() {
+    for (const char* yes : {"true", "TRUE", "yes", "on", "1"}) {
+        CHECK(load_settings(std::format("[feedback]\nsound={}", yes)).settings.sound);
+    }
+    for (const char* no : {"false", "False", "no", "off", "0"}) {
+        CHECK(!load_settings(std::format("[feedback]\nsound={}", no)).settings.sound);
+    }
+    CHECK(load_settings("[video]\nencoder=HARDWARE").settings.encoder == EncoderPreference::Hardware);
+    CHECK(load_settings("[video]\nencoder=Auto").settings.encoder == EncoderPreference::Auto);
+    CHECK(load_settings("[logging]\nlevel=ERROR").settings.log_level == LogLevel::Error);
+}
+
+void file_names() {
+    const LoadedSettings no_ext = load_settings("[clip]\nfilename = clip_%H");
+    CHECK_EQ(no_ext.settings.filename, std::string("clip_%H.mp4"));
+    CHECK(any_warning(no_ext, "does not end in .mp4"));
+
+    CHECK_EQ(load_settings("[clip]\nfilename = Clip.MP4").settings.filename, std::string("Clip.MP4"));
+
+    const LoadedSettings with_folder = load_settings("[clip]\nfilename = sub\\clip.mp4");
+    CHECK_EQ(with_folder.settings.filename, Settings{}.filename);
+    CHECK(any_warning(with_folder, "folder separator"));
+}
+
+void hotkeys() {
+    CHECK_EQ(load_settings("[hotkey]\nsave = ctrl + alt + f8").settings.save_hotkey, std::string("Ctrl+Alt+F8"));
+    const LoadedSettings bad = load_settings("[hotkey]\nsave = Ctrl+Banana");
+    CHECK_EQ(bad.settings.save_hotkey, std::string("F8"));
+    CHECK(any_warning(bad, "line 2: save = 'Ctrl+Banana': 'Banana' is not a key"));
+    CHECK(any_warning(bad, "Using F8"));
+}
+
+void review_findings() {
+    // A comment after a section header keeps the section.
+    const LoadedSettings header = load_settings("[video] ; my video settings\nfps = 30\n[clip]# x\nseconds = 9\n");
+    CHECK(header.warnings.empty());
+    CHECK_EQ(header.settings.fps, 30);
+    CHECK_EQ(header.settings.clip_seconds, 9);
+
+    // Extreme integers must not overflow while snapping or clamping.
+    CHECK_EQ(load_settings("[video]\nfps = -9223372036854775808").settings.fps, 30);
+    CHECK_EQ(load_settings("[video]\nfps = 9223372036854775807").settings.fps, 144);
+    CHECK_EQ(load_settings("[audio]\nbitrate_kbps = -9223372036854775808").settings.audio_bitrate_kbps, 96);
+    CHECK_EQ(load_settings("[clip]\nseconds = -9223372036854775808").settings.clip_seconds, 5);
+
+    // A path cut short by the inline comment rule says so; quoting avoids it.
+    const LoadedSettings cut = load_settings("[clip]\noutput_dir = D:\\Clips #2\n");
+    CHECK_EQ(cut.settings.output_dir, std::string("D:\\Clips"));
+    CHECK(any_warning(cut, "line 2: output_dir: the text after ';' or '#' was read as a comment"));
+    const LoadedSettings quoted = load_settings("[clip]\noutput_dir = \"D:\\Clips #2\" ; comment\n");
+    CHECK_EQ(quoted.settings.output_dir, std::string("D:\\Clips #2"));
+    CHECK(quoted.warnings.empty());
+    CHECK(load_settings("[clip]\noutput_dir = D:\\Clips#2\n").warnings.empty());
+    const LoadedSettings unclosed = load_settings("[clip]\nfilename = \"clip#1.mp4\n");
+    CHECK_EQ(unclosed.settings.filename, std::string("clip#1.mp4"));
+    CHECK(!any_warning(unclosed, "read as a comment"));
+    CHECK(any_warning(unclosed, "no closing quote"));
+    const LoadedSettings unclosed_cut = load_settings("[clip]\nfilename = \"clip #1.mp4\n");
+    CHECK_EQ(unclosed_cut.settings.filename, std::string("clip.mp4"));
+    CHECK(any_warning(unclosed_cut, "no closing quote"));
+    CHECK(any_warning(unclosed_cut, "read as a comment"));
+    const LoadedSettings only_comment = load_settings("[clip]\noutput_dir = ; leave default\n");
+    CHECK(any_warning(only_comment, "output_dir is empty"));
+    CHECK(!any_warning(only_comment, "read as a comment"));
+
+    // File names Windows or strftime cannot handle.
+    for (const char* bad : {"clip_%H:%M.mp4", "clip?.mp4", "clip*.mp4", "a<b.mp4", "a|b.mp4", "a\"b.mp4"}) {
+        const LoadedSettings loaded = load_settings(std::format("[clip]\nfilename = {}", bad));
+        CHECK_EQ(loaded.settings.filename, Settings{}.filename);
+        CHECK(any_warning(loaded, "does not allow"));
+    }
+    for (const char* bad : {"clip_%c.mp4", "clip_%T.mp4", "clip_%D.mp4", "clip_%Q.mp4", "clip_%.mp4", "clip_%"}) {
+        const LoadedSettings loaded = load_settings(std::format("[clip]\nfilename = {}", bad));
+        CHECK_EQ(loaded.settings.filename, Settings{}.filename);
+        CHECK(any_warning(loaded, "not allowed in a file name"));
+    }
+    const LoadedSettings safe = load_settings("[clip]\nfilename = %Y%m%d_%H%M%S_%j_%a_%A_%b_%B_%p_%I_%U_%W_%w_%y_100%%.mp4");
+    dump_warnings(safe);
+    CHECK(safe.warnings.empty());
+
+    // A valid hotkey that Windows often takes produces a warning but is kept.
+    const LoadedSettings print = load_settings("[hotkey]\nsave = PrintScreen");
+    CHECK_EQ(print.settings.save_hotkey, std::string("PrintScreen"));
+    CHECK(any_warning(print, "Snipping"));
+    CHECK_EQ(load_settings("[hotkey]\nsave = F12").settings.save_hotkey, std::string("F8"));
+}
+
+}  // namespace
+
+int main() {
+    empty_and_missing();
+    default_file_is_clean();
+    repository_ini_matches_built_in_default();
+    every_key_is_read();
+    whitespace_comments_and_line_endings();
+    duplicate_keys_use_the_last_one();
+    unknown_keys_and_sections();
+    malformed_lines();
+    bad_values_keep_defaults();
+    ranges_and_snapping();
+    booleans_and_enums();
+    file_names();
+    hotkeys();
+    review_findings();
+    return bt_test::finish("ConfigTests");
+}

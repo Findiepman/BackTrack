@@ -1,0 +1,22 @@
+# Build output
+build/
+cmake-build-*/
+.cache/
+*.exe
+*.obj
+*.o
+*.pdb
+*.ilk
+
+# IDE files
+.vs/
+.vscode/
+.idea/
+
+# Runtime output
+*.log
+frames/
+
+# Private notes and agent instructions, not part of the program
+superprompt.md
+claude.md
