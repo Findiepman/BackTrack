@@ -4,8 +4,9 @@ A replay buffer for Windows: it keeps the last few seconds of your screen in mem
 to an `.mp4` when you press a hotkey. Built from scratch on what Windows ships with (DXGI,
 Direct3D 11, Media Foundation, WASAPI). No FFmpeg, no OBS.
 
-> **Status: milestone 1 of 5.** Screen capture and colour conversion work. There is no encoder,
-> no clip saving and no tray icon yet. The current exe is a test program for the capture path.
+> **Status: milestone 2 of 5.** Screen capture, colour conversion, the H.264 encoder (GPU, with a
+> software fallback) and the in-memory clip buffer work. There is no MP4 saving, audio or tray
+> icon yet. The current exe is a test program that saves raw `.h264` clips.
 
 ## Building
 
@@ -23,19 +24,21 @@ unit tests. To run only the unit tests (about two seconds, no GPU needed):
 tests\run-tests.bat
 ```
 
-## Trying milestone 1
+## Trying the test program
 
-Run `build\Release\backtrack.exe` from a terminal. It records the monitor set in `backtrack.ini`
-at the configured frame rate and prints what it does.
+Run `build\Release\backtrack.exe` from a terminal. It records the monitor set in `backtrack.ini`,
+encodes it and keeps the last `seconds` in memory.
 
-- Press **F8** (or the hotkey in `backtrack.ini`) to dump the current frame to
-  `build\Release\frames\`. It writes the raw NV12 frame, the desktop image it came from
-  (`_desktop.bmp`) and the NV12 frame decoded back to a picture (`_decoded.bmp`), and checks that
-  the colours match. Look for `Colour check PASSED` in the output.
+- Press **F8** (or the hotkey in `backtrack.ini`) to save the last `seconds` to
+  `build\Release\frames\clip_<date>_<time>.h264`. The log says how long the clip is, that it
+  starts on a keyframe and how often keyframes come (once per second).
+  A raw `.h264` file has no timestamps, so players guess the speed; the MP4 files from milestone 3
+  will not have that problem. To watch one at the right speed: `ffplay -framerate 60 clip.h264`.
 - Press **Ctrl+C** to quit.
 
-Options for testing: `--dump-after <seconds>`, `--exit-after <seconds>`,
-`--lose-capture-every <seconds>` (pretends Windows took the screen away, to test recovery).
+Options for testing: `--save-after <seconds>`, `--dump-after <seconds>` (dumps one frame and checks
+its colours), `--exit-after <seconds>`, `--lose-capture-every <seconds>` (pretends Windows took the
+screen away, to test recovery).
 
 Everything is also written to `backtrack.log` next to the exe.
 

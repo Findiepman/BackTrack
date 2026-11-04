@@ -5,6 +5,11 @@ if(NOT MSVC)
     message(FATAL_ERROR "Backtrack is built with MSVC (Visual Studio 2022 Build Tools).")
 endif()
 
+# The clip buffer can hold several GB at the config maximum (300 s at 100 Mbit/s).
+if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR "Backtrack is 64-bit only. Configure with -A x64.")
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -20,6 +25,8 @@ target_compile_definitions(bt_options INTERFACE UNICODE _UNICODE NOMINMAX WIN32_
 add_library(backtrack_core STATIC
     src/core/Config.cpp
     src/core/Hotkey.cpp
+    src/core/ClipBuffer.cpp
+    src/core/H264.cpp
 )
 target_include_directories(backtrack_core PUBLIC src)
 target_link_libraries(backtrack_core PUBLIC bt_options)
@@ -28,12 +35,13 @@ add_executable(backtrack
     src/main.cpp
     src/platform/Log.cpp
     src/platform/ScreenCapture.cpp
+    src/platform/VideoEncoder.cpp
 )
 target_include_directories(backtrack PRIVATE src ${CMAKE_SOURCE_DIR})
-target_link_libraries(backtrack PRIVATE backtrack_core d3d11 dxgi mfplat mfuuid winmm avrt)
+target_link_libraries(backtrack PRIVATE backtrack_core d3d11 dxgi mfplat mfuuid winmm avrt wmcodecdspuuid)
 
 enable_testing()
-foreach(test_name ConfigTests HotkeyTests ClockTests)
+foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests)
     add_executable(${test_name} tests/${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE backtrack_core)
     target_compile_definitions(${test_name} PRIVATE BT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
