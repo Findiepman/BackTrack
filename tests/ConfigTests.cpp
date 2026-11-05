@@ -10,11 +10,7 @@ using namespace bt;
 namespace {
 
 bool same_settings(const Settings& a, const Settings& b) {
-    return a.clip_seconds == b.clip_seconds && a.output_dir == b.output_dir && a.filename == b.filename &&
-           a.save_hotkey == b.save_hotkey && a.monitor == b.monitor && a.fps == b.fps &&
-           a.video_bitrate_kbps == b.video_bitrate_kbps && a.encoder == b.encoder &&
-           a.audio_enabled == b.audio_enabled && a.audio_bitrate_kbps == b.audio_bitrate_kbps &&
-           a.sound == b.sound && a.notification == b.notification && a.log_level == b.log_level;
+    return a == b;
 }
 
 bool any_warning(const LoadedSettings& loaded, std::string_view needle) {
@@ -334,6 +330,187 @@ void review_findings() {
     CHECK_EQ(load_settings("[hotkey]\nsave = F12").settings.save_hotkey, std::string("F8"));
 }
 
+
+Settings non_default_settings() {
+    Settings s;
+    s.start_minimized = true;
+    s.clip_seconds = 120;
+    s.output_dir = "D:\\Games\\Clips";
+    s.filename = "game_%H%M.mp4";
+    s.max_gb = 250;
+    s.delete_after_days = 30;
+    s.save_hotkey = "Ctrl+Shift+F12";
+    s.monitor = 2;
+    s.fps = 144;
+    s.video_bitrate_kbps = 40000;
+    s.encoder = EncoderPreference::Software;
+    s.audio_enabled = false;
+    s.audio_bitrate_kbps = 192;
+    s.sound = false;
+    s.notification = false;
+    s.saved_bar = false;
+    s.log_level = LogLevel::Debug;
+    return s;
+}
+
+void round_trips(std::string_view base, const Settings& s) {
+    const std::string written = update_ini(base, s);
+    const LoadedSettings loaded = load_settings(written);
+    CHECK(loaded.settings == s);
+    if (!(loaded.settings == s)) std::printf("    written:\n%s\n", written.c_str());
+}
+
+void new_keys_parse() {
+    const LoadedSettings loaded = load_settings(
+        "[general]\nstart_minimized = yes\n[storage]\nmax_gb = 500\ndelete_after_days = 14\n"
+        "[feedback]\nsaved_bar = off\n");
+    dump_warnings(loaded);
+    CHECK(loaded.warnings.empty());
+    CHECK(loaded.settings.start_minimized);
+    CHECK_EQ(loaded.settings.max_gb, 500);
+    CHECK_EQ(loaded.settings.delete_after_days, 14);
+    CHECK(!loaded.settings.saved_bar);
+
+    const LoadedSettings bad = load_settings(
+        "[general]\nstart_minimized = maybe\n[storage]\nmax_gb = 100001\ndelete_after_days = -1\n"
+        "[feedback]\nsaved_bar = 2\n");
+    CHECK(!bad.settings.start_minimized);
+    CHECK(any_warning(bad, "line 2: start_minimized = 'maybe' should be true or false"));
+    CHECK_EQ(bad.settings.max_gb, 100000);
+    CHECK(any_warning(bad, "line 4: max_gb = 100001 is above the maximum 100000"));
+    CHECK_EQ(bad.settings.delete_after_days, 0);
+    CHECK(any_warning(bad, "line 5: delete_after_days = -1 is below the minimum 0"));
+    CHECK(bad.settings.saved_bar);
+    CHECK(any_warning(bad, "line 7: saved_bar"));
+    CHECK_EQ(load_settings("[storage]\ndelete_after_days = 3651").settings.delete_after_days, 3650);
+    CHECK_EQ(load_settings("[storage]\nmax_gb = lots").settings.max_gb, 0);
+    CHECK(load_settings("[logging]\nlevel = warning").settings.log_level == LogLevel::Warning);
+}
+
+void writer_round_trips_every_field() {
+    const Settings s = non_default_settings();
+    round_trips(default_ini_text(), s);
+    round_trips("", s);
+    round_trips("[clip]\nseconds = 5\n", s);
+    round_trips(update_ini("", s), Settings{});
+    // Every enum value.
+    for (const auto e : {EncoderPreference::Auto, EncoderPreference::Hardware, EncoderPreference::Software}) {
+        Settings t;
+        t.encoder = e;
+        round_trips(default_ini_text(), t);
+    }
+    for (const auto l : {LogLevel::Error, LogLevel::Warning, LogLevel::Info, LogLevel::Debug}) {
+        Settings t;
+        t.log_level = l;
+        round_trips(default_ini_text(), t);
+    }
+    // Writing the same settings twice changes nothing.
+    const std::string once = update_ini(default_ini_text(), s);
+    CHECK_EQ(update_ini(once, s), once);
+    // Default settings into the default file give the default file back.
+    CHECK(update_ini(default_ini_text(), Settings{}) == default_ini_text());
+    CHECK(load_settings(update_ini(default_ini_text(), s)).warnings.empty());
+}
+
+void writer_keeps_everything_else() {
+    const std::string before =
+        "; my file\r\n"
+        "\r\n"
+        "[Video]   ; header comment\r\n"
+        "  FPS\t=   30 ; my note\r\n"
+        "turbo = yes\r\n"
+        "encoder=hardware\r\n"
+        "# hash\r\n"
+        "[gpu]\r\n"
+        "boost = 1\r\n";
+    Settings s;
+    s.fps = 144;
+    s.encoder = EncoderPreference::Auto;
+    const std::string after = update_ini(before, s);
+    CHECK(bt_test::contains(after, "; my file\r\n\r\n[Video]   ; header comment\r\n  FPS\t=   144 ; my note\r\n"
+                                   "turbo = yes\r\nencoder=auto\r\n"));
+    CHECK(bt_test::contains(after, "# hash\r\n[gpu]\r\nboost = 1\r\n"));
+    // Missing [video] keys go after the last key line of the section, before the comment.
+    CHECK(bt_test::contains(after, "encoder=auto\r\nmonitor = 0\r\nbitrate_kbps = 20000\r\n# hash"));
+    // No bare LF anywhere.
+    for (std::size_t i = 0; i < after.size(); ++i) {
+        if (after[i] == '\n') CHECK(i > 0 && after[i - 1] == '\r');
+    }
+    round_trips(before, s);
+
+    // LF files stay LF.
+    const std::string lf = update_ini("[video]\nfps = 30\n", s);
+    CHECK(!bt_test::contains(lf, "\r"));
+    CHECK(lf.starts_with("[video]\nfps = 144\n"));
+
+    // A comment right after '=' with no value gets a space so it stays a comment.
+    CHECK(update_ini("[video]\nfps =; note\n", s).starts_with("[video]\nfps =144 ; note\n"));
+    // An old quoted value is replaced including its quotes and the text after them.
+    CHECK(update_ini("[video]\nencoder = \"hardware\" ; x\n", s).starts_with("[video]\nencoder = auto ; x\n"));
+    // A last line without a line ending.
+    round_trips("[video]\nfps = 30", s);
+    CHECK(update_ini("[video]\nfps = 30", s).starts_with("[video]\nfps = 144\n"));
+    // A BOM stays.
+    CHECK(update_ini("\xEF\xBB\xBF[video]\nfps = 30\n", s).starts_with("\xEF\xBB\xBF[video]\nfps = 144\n"));
+}
+
+void writer_duplicates_and_missing() {
+    Settings s;
+    s.clip_seconds = 60;
+    const std::string dup = update_ini("[clip]\nseconds = 20\nseconds = 40\n", s);
+    CHECK(dup.starts_with("[clip]\nseconds = 20\nseconds = 60\n"));
+    CHECK_EQ(load_settings(dup).settings.clip_seconds, 60);
+    // Repeated section: the later block holds the key load_settings uses.
+    const std::string sections = update_ini("[clip]\nseconds = 20\n[audio]\n[clip]\nseconds = 40\n", s);
+    CHECK(sections.starts_with("[clip]\nseconds = 20\n[audio]\nenabled = true\nbitrate_kbps = 160\n[clip]\nseconds = 60\n"));
+
+    // Missing section appended at the end with its keys; empty header gets keys below it.
+    const std::string missing = update_ini("[storage]\n\n[logging]\nlevel = debug\n", s);
+    CHECK(missing.starts_with("[storage]\nmax_gb = 0\ndelete_after_days = 0\n\n[logging]\nlevel = info\n"));
+    CHECK(bt_test::contains(missing, "\n\n[general]\nstart_minimized = false\n"));
+    CHECK(bt_test::contains(missing, "\n\n[feedback]\nsound = true\nnotification = true\nsaved_bar = true\n"));
+    CHECK(load_settings(missing).warnings.empty());
+
+    // An old file without the new keys gets them in the right sections.
+    const std::string old = update_ini("[feedback]\nsound = true\nnotification = true\n\n[logging]\nlevel = info\n",
+                                       Settings{});
+    CHECK(old.starts_with("[feedback]\nsound = true\nnotification = true\nsaved_bar = true\n\n[logging]\n"));
+
+    // Empty text becomes the default file in CRLF.
+    std::string crlf_default;
+    for (const char c : default_ini_text()) {
+        if (c == '\n') crlf_default += '\r';
+        crlf_default += c;
+    }
+    CHECK(update_ini("", Settings{}) == crlf_default);
+    CHECK(update_ini("  \r\n", Settings{}) == crlf_default);
+}
+
+void writer_quotes_strings() {
+    Settings s;
+    s.output_dir = "D:\\Clips #2";
+    CHECK(bt_test::contains(update_ini(default_ini_text(), s), "output_dir = \"D:\\Clips #2\"\n"));
+    round_trips(default_ini_text(), s);
+    s.output_dir = "C:\\a;b";
+    CHECK(bt_test::contains(update_ini(default_ini_text(), s), "output_dir = \"C:\\a;b\"\n"));
+    round_trips(default_ini_text(), s);
+    s.output_dir = "  spaced  ";
+    round_trips(default_ini_text(), s);
+    s.filename = "clip#1.mp4";
+    round_trips(default_ini_text(), s);
+    // A quote inside a value that needs no quoting is fine unquoted.
+    s.output_dir = "D:\\say \"hi\"";
+    round_trips(default_ini_text(), s);
+    // A value that starts with '"' cannot be represented: it is cut, and the file still parses.
+    s.output_dir = "\"D:\\x\" ; y";
+    const LoadedSettings cut = load_settings(update_ini(default_ini_text(), s));
+    CHECK(cut.settings.output_dir == std::string("%USERPROFILE%\\Videos\\Backtrack"));  // empty, kept default
+    CHECK(any_warning(cut, "output_dir is empty"));
+    // Line breaks are dropped instead of breaking the file.
+    s.output_dir = "D:\\a\r\nb";
+    CHECK_EQ(load_settings(update_ini(default_ini_text(), s)).settings.output_dir, std::string("D:\\ab"));
+}
+
 }  // namespace
 
 int main() {
@@ -351,5 +528,10 @@ int main() {
     file_names();
     hotkeys();
     review_findings();
+    new_keys_parse();
+    writer_round_trips_every_field();
+    writer_keeps_everything_else();
+    writer_duplicates_and_missing();
+    writer_quotes_strings();
     return bt_test::finish("ConfigTests");
 }

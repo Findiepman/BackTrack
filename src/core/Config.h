@@ -13,10 +13,15 @@ enum class LogLevel { Error, Warning, Info, Debug };
 
 // Typed settings with the defaults used when a key is missing (§5.1).
 struct Settings {
+    // [general]
+    bool start_minimized = false;  // when started with Windows, open in the tray
     // [clip]
     int clip_seconds = 30;
     std::string output_dir = "%USERPROFILE%\\Videos\\Backtrack";
     std::string filename = "clip_%Y-%m-%d_%H-%M-%S.mp4";
+    // [storage]
+    int max_gb = 0;  // 0 = no limit
+    int delete_after_days = 0;  // 0 = never
     // [hotkey]
     std::string save_hotkey = "F8";  // always a string parse_hotkey accepts
     // [video]
@@ -30,8 +35,11 @@ struct Settings {
     // [feedback]
     bool sound = true;
     bool notification = true;
+    bool saved_bar = true;  // the "Saved" bar in the window
     // [logging]
     LogLevel log_level = LogLevel::Info;
+
+    friend bool operator==(const Settings&, const Settings&) = default;
 };
 
 struct IniEntry {
@@ -59,5 +67,15 @@ LoadedSettings load_settings(std::string_view ini_text);
 
 // The commented file written on first run. Identical to backtrack.ini in the repository.
 std::string_view default_ini_text();
+
+// Returns existing_text with the value of every known key set from settings. Everything else is
+// kept byte for byte: comments, blank lines, unknown keys and sections, key order, spacing around
+// '=', inline comments after the value and the line ending style. When a key appears twice the
+// last one (the one load_settings uses) is changed. A missing key is added after the last line of
+// its section, a missing section at the end of the file. Empty text gives the default file (CRLF)
+// with these values. Strings that need it are written in double quotes. The INI format has no
+// escape for '"', so a string that needs quotes and also contains '"' is cut at that quote, and
+// line breaks inside a string are dropped.
+std::string update_ini(std::string_view existing_text, const Settings& settings);
 
 }  // namespace bt

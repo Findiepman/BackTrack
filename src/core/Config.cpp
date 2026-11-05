@@ -34,6 +34,9 @@ constexpr long long kMaxVideoKbps = 100000;
 // to monitor 0 with one warning (§5.2).
 constexpr long long kMaxMonitorIndex = 1000;
 
+constexpr long long kMaxStorageGb = 100000;
+constexpr long long kMaxDeleteAfterDays = 3650;
+
 constexpr const char* kForbiddenFileNameChars = "<>:\"|?*";
 constexpr const char* kSafeStrftimeSpecifiers = "aAbBdHIjmMpSUwWyY%";
 
@@ -129,6 +132,20 @@ bool ends_with_mp4(std::string_view name) {
     return name.size() >= 4 && to_lower(name.substr(name.size() - 4)) == ".mp4";
 }
 
+// "[video] ; my settings" is a header followed by a comment. A section name cannot contain ']',
+// so everything after the first one must be empty or a comment. Takes a trimmed line. Returns
+// nullopt for a line that is not a header, an empty string for a broken header and the lower case
+// name otherwise.
+std::optional<std::string> section_header(std::string_view line) {
+    if (line.empty() || line.front() != '[') {
+        return std::nullopt;
+    }
+    const std::size_t close = line.find(']');
+    const std::string_view rest = close == std::string_view::npos ? std::string_view{} : trim(line.substr(close + 1));
+    const bool closed = close != std::string_view::npos && (rest.empty() || rest.front() == ';' || rest.front() == '#');
+    return closed ? to_lower(trim(line.substr(1, close - 1))) : std::string();
+}
+
 class Applier {
 public:
     Applier(Settings& settings, std::vector<std::string>& warnings, const IniEntry& entry)
@@ -136,7 +153,13 @@ public:
 
     void apply() {
         const std::string id = e_.section + "." + e_.key;
-        if (id == "clip.seconds") {
+        if (id == "general.start_minimized") {
+            boolean(s_.start_minimized);
+        } else if (id == "storage.max_gb") {
+            clamped_int(s_.max_gb, 0, kMaxStorageGb);
+        } else if (id == "storage.delete_after_days") {
+            clamped_int(s_.delete_after_days, 0, kMaxDeleteAfterDays);
+        } else if (id == "clip.seconds") {
             clamped_int(s_.clip_seconds, kMinClipSeconds, kMaxClipSeconds);
         } else if (id == "clip.output_dir") {
             non_empty_string(s_.output_dir);
@@ -160,6 +183,8 @@ public:
             boolean(s_.sound);
         } else if (id == "feedback.notification") {
             boolean(s_.notification);
+        } else if (id == "feedback.saved_bar") {
+            boolean(s_.saved_bar);
         } else if (id == "logging.level") {
             log_level();
         } else {
@@ -309,12 +334,14 @@ private:
         const std::string v = to_lower(e_.value);
         if (v == "error") {
             s_.log_level = LogLevel::Error;
+        } else if (v == "warning") {
+            s_.log_level = LogLevel::Warning;
         } else if (v == "info") {
             s_.log_level = LogLevel::Info;
         } else if (v == "debug") {
             s_.log_level = LogLevel::Debug;
         } else {
-            warn(std::format("level = '{}' should be error, info or debug, keeping the previous value", e_.value));
+            warn(std::format("level = '{}' should be error, warning, info or debug, keeping the previous value", e_.value));
         }
     }
 
@@ -349,19 +376,11 @@ IniDocument parse_ini(std::string_view text) {
         if (line.empty() || line.front() == ';' || line.front() == '#') {
             continue;
         }
-        if (line.front() == '[') {
-            // "[video] ; my settings" is a header followed by a comment. A section name cannot
-            // contain ']', so everything after the first one must be empty or a comment.
-            const std::size_t close = line.find(']');
-            const std::string_view rest = close == std::string_view::npos ? std::string_view{} : trim(line.substr(close + 1));
-            const bool closed = close != std::string_view::npos && (rest.empty() || rest.front() == ';' || rest.front() == '#');
-            const std::string_view name = closed ? trim(line.substr(1, close - 1)) : std::string_view{};
-            if (!closed || name.empty()) {
+        if (const auto header = section_header(line)) {
+            if (header->empty()) {
                 warn(std::format("'{}' is not a valid [section] header, the keys below it are ignored", line));
-                section.clear();
-            } else {
-                section = to_lower(name);
             }
+            section = *header;
             continue;
         }
         const std::size_t equals = line.find('=');
@@ -424,6 +443,10 @@ LoadedSettings load_settings(std::string_view ini_text) {
 std::string_view default_ini_text() {
     return R"(; Backtrack settings. Restart the program after editing.
 
+[general]
+; When Backtrack starts with Windows, open in the tray.
+start_minimized = false
+
 [clip]
 ; How many seconds to keep in memory and save when the hotkey is pressed.
 seconds = 30
@@ -431,6 +454,12 @@ seconds = 30
 output_dir = %USERPROFILE%\Videos\Backtrack
 ; File name pattern. Supports strftime placeholders.
 filename = clip_%Y-%m-%d_%H-%M-%S.mp4
+
+[storage]
+; Delete the oldest clips when they take more than this many GB, 0 is no limit.
+max_gb = 0
+; Delete clips older than this many days, 0 is never.
+delete_after_days = 0
 
 [hotkey]
 ; Modifiers: Ctrl, Alt, Shift, Win. Keys: A-Z, 0-9, F1-F24, Numpad0-9, Home, End,
@@ -456,11 +485,217 @@ bitrate_kbps = 160
 sound = true
 ; Show a tray notification with the file name.
 notification = true
+; Show the "Saved" bar in the window.
+saved_bar = true
 
 [logging]
-; error, info or debug
+; error, warning, info or debug
 level = info
 )";
+}
+
+namespace {
+
+const char* encoder_name(EncoderPreference e) {
+    switch (e) {
+        case EncoderPreference::Hardware: return "hardware";
+        case EncoderPreference::Software: return "software";
+        case EncoderPreference::Auto: break;
+    }
+    return "auto";
+}
+
+const char* log_level_name(LogLevel l) {
+    switch (l) {
+        case LogLevel::Error: return "error";
+        case LogLevel::Warning: return "warning";
+        case LogLevel::Debug: return "debug";
+        case LogLevel::Info: break;
+    }
+    return "info";
+}
+
+// Writes a string so parse_ini reads it back unchanged wherever the format allows (see update_ini).
+std::string encode_string(std::string_view raw) {
+    std::string v;
+    for (const char c : raw) {
+        if (c != '\r' && c != '\n') {
+            v += c;
+        }
+    }
+    const bool needs_quotes = v.find_first_of(";#") != std::string::npos || v.starts_with('"') ||
+                              (!v.empty() && (kWhitespace.find(v.front()) != std::string_view::npos ||
+                                              kWhitespace.find(v.back()) != std::string_view::npos));
+    if (!needs_quotes) {
+        return v;
+    }
+    // The parser ends a quoted value at the next '"' and has no escape, so cut there.
+    return "\"" + v.substr(0, v.find('"')) + "\"";
+}
+
+std::string bool_text(bool b) {
+    return b ? "true" : "false";
+}
+
+struct KnownKey {
+    std::string_view section;
+    std::string_view key;
+    std::string (*value)(const Settings&);
+};
+
+// In the order of the default file, so appended keys and sections follow it.
+constexpr std::array<KnownKey, 17> kKnownKeys = {{
+    {"general", "start_minimized", [](const Settings& s) { return bool_text(s.start_minimized); }},
+    {"clip", "seconds", [](const Settings& s) { return std::to_string(s.clip_seconds); }},
+    {"clip", "output_dir", [](const Settings& s) { return encode_string(s.output_dir); }},
+    {"clip", "filename", [](const Settings& s) { return encode_string(s.filename); }},
+    {"storage", "max_gb", [](const Settings& s) { return std::to_string(s.max_gb); }},
+    {"storage", "delete_after_days", [](const Settings& s) { return std::to_string(s.delete_after_days); }},
+    {"hotkey", "save", [](const Settings& s) { return encode_string(s.save_hotkey); }},
+    {"video", "monitor", [](const Settings& s) { return std::to_string(s.monitor); }},
+    {"video", "fps", [](const Settings& s) { return std::to_string(s.fps); }},
+    {"video", "bitrate_kbps", [](const Settings& s) { return std::to_string(s.video_bitrate_kbps); }},
+    {"video", "encoder", [](const Settings& s) { return std::string(encoder_name(s.encoder)); }},
+    {"audio", "enabled", [](const Settings& s) { return bool_text(s.audio_enabled); }},
+    {"audio", "bitrate_kbps", [](const Settings& s) { return std::to_string(s.audio_bitrate_kbps); }},
+    {"feedback", "sound", [](const Settings& s) { return bool_text(s.sound); }},
+    {"feedback", "notification", [](const Settings& s) { return bool_text(s.notification); }},
+    {"feedback", "saved_bar", [](const Settings& s) { return bool_text(s.saved_bar); }},
+    {"logging", "level", [](const Settings& s) { return std::string(log_level_name(s.log_level)); }},
+}};
+
+bool is_space(char c) {
+    return kWhitespace.find(c) != std::string_view::npos;
+}
+
+// Replaces the value part of one "key = value ; comment" line, keeping everything around it.
+std::string replace_value(std::string_view line, std::string_view new_value) {
+    std::size_t start = line.find('=') + 1;
+    while (start < line.size() && is_blank(line[start])) {
+        ++start;
+    }
+    std::size_t content_end = line.size();
+    while (content_end > start && (line[content_end - 1] == '\r' || line[content_end - 1] == '\n')) {
+        --content_end;
+    }
+    const std::string_view value = line.substr(start, content_end - start);
+    std::size_t value_len = 0;
+    const std::size_t close = value.starts_with('"') ? value.find('"', 1) : std::string_view::npos;
+    if (close != std::string_view::npos) {
+        value_len = close + 1;
+    } else {
+        value_len = strip_inline_comment(value).size();
+        while (value_len > 0 && is_space(value[value_len - 1])) {
+            --value_len;
+        }
+    }
+    std::string out(line.substr(0, start));
+    out += new_value;
+    const std::string_view rest = line.substr(start + value_len);
+    // "fps =; note" has no space before the comment; "60;" would then be read as the value.
+    if (!rest.empty() && !new_value.empty() && !is_space(rest.front())) {
+        out += ' ';
+    }
+    out += rest;
+    return out;
+}
+
+}  // namespace
+
+std::string update_ini(std::string_view existing_text, const Settings& settings) {
+    std::string base;
+    if (trim(existing_text).empty()) {
+        for (const char c : default_ini_text()) {
+            if (c == '\n') {
+                base += '\r';
+            }
+            base += c;
+        }
+        existing_text = base;
+    }
+    const bool crlf = existing_text.find("\r\n") != std::string_view::npos ||
+                      existing_text.find('\n') == std::string_view::npos;
+    const std::string_view eol = crlf ? "\r\n" : "\n";
+
+    // Lines with their endings; lines[i] is line number i + 1 as parse_ini counts them.
+    std::vector<std::string> lines;
+    for (std::size_t pos = 0; pos < existing_text.size();) {
+        std::size_t end = existing_text.find('\n', pos);
+        end = end == std::string_view::npos ? existing_text.size() : end + 1;
+        lines.emplace_back(existing_text.substr(pos, end - pos));
+        pos = end;
+    }
+
+    // parse_ini decides which lines are entries, so the writer cannot disagree with the reader.
+    // Duplicates: the last line wins, exactly like load_settings.
+    const IniDocument doc = parse_ini(existing_text);
+    std::map<std::string, int> last_line_of_key;
+    std::map<std::string, int> last_line_of_section;
+    for (const IniEntry& e : doc.entries) {
+        last_line_of_key[e.section + "." + e.key] = e.line;
+        int& last = last_line_of_section[e.section];
+        last = std::max(last, e.line);
+    }
+    // A section header with no keys below it still gets its missing keys right under it.
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        std::string_view raw = lines[i];
+        if (i == 0 && raw.starts_with(kUtf8Bom)) {
+            raw.remove_prefix(kUtf8Bom.size());
+        }
+        if (const auto header = section_header(trim(raw)); header && !header->empty()) {
+            int& last = last_line_of_section[*header];
+            last = std::max(last, static_cast<int>(i) + 1);
+        }
+    }
+
+    std::map<int, std::vector<std::string>> inserted_after;  // line number -> new key lines
+    std::vector<std::string> new_sections;  // in kKnownKeys order
+    std::map<std::string, std::vector<std::string>, std::less<>> new_section_lines;
+    for (const KnownKey& k : kKnownKeys) {
+        const std::string section(k.section);
+        const std::string value = k.value(settings);
+        if (const auto it = last_line_of_key.find(section + "." + std::string(k.key)); it != last_line_of_key.end()) {
+            std::string& line = lines[static_cast<std::size_t>(it->second - 1)];
+            line = replace_value(line, value);
+        } else if (const auto sec = last_line_of_section.find(section); sec != last_line_of_section.end()) {
+            inserted_after[sec->second].push_back(std::format("{} = {}", k.key, value));
+        } else {
+            if (!new_section_lines.contains(section)) {
+                new_sections.push_back(section);
+            }
+            new_section_lines[section].push_back(std::format("{} = {}", k.key, value));
+        }
+    }
+
+    std::string out;
+    auto end_line = [&] {
+        if (!out.empty() && out.back() != '\n') {
+            out += eol;
+        }
+    };
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        out += lines[i];
+        if (const auto it = inserted_after.find(static_cast<int>(i) + 1); it != inserted_after.end()) {
+            end_line();
+            for (const std::string& l : it->second) {
+                out += l;
+                out += eol;
+            }
+        }
+    }
+    for (const std::string& section : new_sections) {
+        end_line();
+        if (!trim(out).empty()) {
+            out += eol;
+        }
+        out += std::format("[{}]", section);
+        out += eol;
+        for (const std::string& l : new_section_lines[section]) {
+            out += l;
+            out += eol;
+        }
+    }
+    return out;
 }
 
 }  // namespace bt
