@@ -31,6 +31,7 @@ add_library(backtrack_core STATIC
     src/core/Mp4.cpp
     src/core/Json.cpp
     src/core/Library.cpp
+    src/core/TrimPlan.cpp
 )
 target_include_directories(backtrack_core PUBLIC src)
 target_link_libraries(backtrack_core PUBLIC bt_options)
@@ -47,6 +48,9 @@ add_executable(backtrack WIN32
     src/platform/ClipWriter.cpp
     src/platform/Recorder.cpp
     src/platform/MediaProbe.cpp
+    src/platform/FrameReader.cpp
+    src/platform/Filmstrip.cpp
+    src/platform/Trim.cpp
     src/platform/Shell.cpp
     src/ui/App.cpp
     src/ui/Graphics.cpp
@@ -60,8 +64,14 @@ target_link_libraries(backtrack PRIVATE backtrack_core d3d11 dxgi mfplat mfuuid 
 add_executable(sync_beacon tools/sync_beacon.cpp)
 target_link_libraries(sync_beacon PRIVATE bt_options winmm ole32)
 
+# Development tool: runs a trim or a filmstrip from the command line (tools/media_check.cpp). Not shipped.
+add_executable(media_check tools/media_check.cpp src/platform/Log.cpp src/platform/ClipWriter.cpp
+               src/platform/Trim.cpp src/platform/FrameReader.cpp src/platform/Filmstrip.cpp)
+target_include_directories(media_check PRIVATE src)
+target_link_libraries(media_check PRIVATE backtrack_core mfplat mfuuid mfreadwrite ole32 propsys)
+
 enable_testing()
-foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests)
+foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests TrimPlanTests)
     add_executable(${test_name} tests/${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE backtrack_core)
     target_compile_definitions(${test_name} PRIVATE BT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
