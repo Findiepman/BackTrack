@@ -178,8 +178,24 @@ void AudioFifo::finish_window(std::size_t headroom, std::size_t headroom_now) {
     }
 }
 
+bool AudioFifo::pull_gap(std::span<float> out) {
+    const std::size_t n = out.size();
+    pulled_frames_.fetch_add(n, std::memory_order_relaxed);
+    std::size_t got = 0;
+    if (!gap_dry_) {
+        const std::uint64_t read = read_.load(std::memory_order_relaxed);
+        const std::size_t available = static_cast<std::size_t>(write_.load(std::memory_order_acquire) - read);
+        got = read_frames(std::min(available, n), out.data());
+        gap_dry_ = got < n;
+    }
+    std::fill(out.begin() + static_cast<std::ptrdiff_t>(got), out.end(), 0.0f);
+    underflow_frames_.fetch_add(n - got, std::memory_order_relaxed);
+    return gap_dry_;
+}
+
 void AudioFifo::reset_consumer() {
     read_.store(write_.load(std::memory_order_acquire), std::memory_order_release);
+    gap_dry_ = false;
     priming_ = true;
     pending_correction_ = 0;
     window_started_ = false;

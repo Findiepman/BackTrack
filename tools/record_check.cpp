@@ -31,6 +31,7 @@ const char* status_name(bt::MicStatus status) {
         case bt::MicStatus::NoDevice: return "no device";
         case bt::MicStatus::Blocked: return "blocked";
         case bt::MicStatus::Failed: return "failed";
+        case bt::MicStatus::OnlyBluetooth: return "only bluetooth";
     }
     return "?";
 }
@@ -54,7 +55,8 @@ int run(int argc, wchar_t** argv) {
     const int exit_after = _wtoi(argv[4]);
 
     for (const bt::MicDevice& mic : bt::list_microphones()) {
-        std::printf("microphone: %s%s\n", mic.name.c_str(), mic.is_default ? " (default)" : "");
+        std::printf("microphone: %s%s%s\n", mic.name.c_str(), mic.is_default ? " (default)" : "",
+                    mic.bluetooth ? " (bluetooth)" : "");
     }
 
     bt::ComApartment com(COINIT_MULTITHREADED);
@@ -71,8 +73,9 @@ int run(int argc, wchar_t** argv) {
         for (int second = 1; second <= exit_after; ++second) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             const bt::AudioLevels levels = recorder.audio_levels();
-            std::printf("%2d s: system %.2f, mic %.2f (%s, %s, gate %s) | %s\n", second, levels.system, levels.mic,
+            std::printf("%2d s: system %.2f, mic %.2f (%s, %s, gate %s%s%s) | %s\n", second, levels.system, levels.mic,
                         status_name(levels.mic_status), levels.mic_name.c_str(), levels.mic_gate_open ? "open" : "closed",
+                        levels.mic_fallback ? ", fallback" : "", levels.ptt_blocked ? ", ptt blocked" : "",
                         recorder.status_text().c_str());
             if (second == save_after) {
                 std::string reason;

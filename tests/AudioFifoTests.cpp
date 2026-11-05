@@ -361,6 +361,63 @@ void stall_runs_dry_once_and_recovers() {
     CHECK(max_fill_late <= kMaxFill);
 }
 
+void gap_fill_does_not_scatter_live_voice() {
+    // The loopback fills a 3 s gap in 100 ms chunks, far faster than real time. The FIFO holds
+    // the 1 s that was said during the gap (values 1..48000); meanwhile the microphone keeps pushing
+    // live voice (values 900000+). The fill must play everything in order until it runs dry, then
+    // only zeros: never re-prime and drop later live voice into the past.
+    AudioFifo fifo(kCapacity);
+    fifo.push(counting(1, 48000));
+    std::vector<float> chunk(4800);
+    std::vector<float> played;
+    bool dry = false;
+    std::size_t live = 900000;
+    for (int i = 0; i < 30; ++i) {
+        dry = fifo.pull_gap(chunk) || dry;
+        played.insert(played.end(), chunk.begin(), chunk.end());
+        fifo.push(counting(live, 480));  // live voice arriving while the fill runs
+        live += 480;
+    }
+    CHECK(dry);
+    bool in_order = true;
+    for (std::size_t i = 0; i < 48000; ++i) {
+        in_order = in_order && played[i] == static_cast<float>(i + 1);
+    }
+    CHECK(in_order);
+    // Frames that arrived before it ran dry follow on in order (they are the newest voice, right
+    // behind the queued second); from the first zero on, only zeros: no re-priming that would drop
+    // later live voice into the past.
+    std::size_t i = 48000;
+    float expected = 900000.0f;
+    while (i < played.size() && played[i] != 0.0f) {
+        CHECK_EQ(played[i], expected);
+        expected += 1.0f;
+        ++i;
+    }
+    CHECK(i < played.size());
+    bool zeros_after = true;
+    for (; i < played.size(); ++i) {
+        zeros_after = zeros_after && played[i] == 0.0f;
+    }
+    CHECK(zeros_after);
+    CHECK_EQ(fifo.stats().underflows, std::uint64_t{0});
+
+    // After the gap: forget what came in during the fill, then the live voice plays from now on.
+    fifo.reset_consumer();
+    fifo.push(counting(2000000, kBlock + 960));
+    std::vector<float> out(kBlock);
+    fifo.pull(out);
+    CHECK_EQ(out[0], 2000000.0f);
+
+    // A gap that does not run dry leaves the FIFO running as it was.
+    AudioFifo enough(kCapacity);
+    enough.push(counting(1, 2000));
+    std::vector<float> small(480);
+    CHECK(!enough.pull_gap(small));
+    CHECK_EQ(small[0], 1.0f);
+    CHECK_EQ(enough.size(), std::size_t{1520});
+}
+
 void two_threads() {
     // The real thing: a producer and a consumer thread at the same time. Every value comes out in
     // order (no slow correction can start: the window is longer than the run).
@@ -420,6 +477,7 @@ int main() {
     backlog_is_dropped_at_once();
     stays_in_band_without_overshoot();
     stall_runs_dry_once_and_recovers();
+    gap_fill_does_not_scatter_live_voice();
     two_threads();
     return bt_test::finish("AudioFifoTests");
 }

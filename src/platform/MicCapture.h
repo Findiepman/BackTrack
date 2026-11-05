@@ -72,6 +72,8 @@ public:
 
     void set_noise_suppression(bool on) { noise_suppression_ = on; }
     MicStatus status() const { return status_; }
+    // The chosen microphone is not connected, so the Windows default is being recorded instead.
+    bool fallback() const { return fallback_; }
     std::string device_name() const;  // empty until a device has been opened
     MicStats stats() const;
 
@@ -91,6 +93,7 @@ private:
     AudioFifo& fifo_;
     std::atomic<bool> noise_suppression_;
     std::atomic<MicStatus> status_{MicStatus::Off};
+    std::atomic<bool> fallback_{false};
     mutable std::mutex name_mutex_;
     std::string device_name_;
 
@@ -103,6 +106,7 @@ private:
     UINT32 device_rate_ = 0;
     UINT32 channels_ = 0;  // of the resampler's float output, the same as the device's
     std::wstring device_id_;  // the device open now
+    std::wstring last_device_id_;  // the device opened last; kept when it closes, preferred on reopen
     bool open_ = false;
     ULONGLONG opened_at_ms_ = 0;
     LONGLONG next_sample_time_ = 0;
@@ -111,7 +115,8 @@ private:
     std::array<float, kMaxWeighedChannels> channel_power_{};
     std::vector<float> mono_;  // one packet's 48 kHz mono samples, grows to the largest seen
     log::RateLimit error_log_{std::chrono::seconds(30)};
-    bool warned_bluetooth_ = false;
+    bool warned_bluetooth_skipped_ = false;  // "not using the Bluetooth mic, recording X instead"
+    bool warned_only_bluetooth_ = false;  // "the only microphone is a Bluetooth headset's"
     bool warned_missing_ = false;
     bool warned_blocked_ = false;
 

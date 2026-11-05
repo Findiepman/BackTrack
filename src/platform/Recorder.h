@@ -66,6 +66,10 @@ struct AudioLevels {
     MicStatus mic_status = MicStatus::Off;
     std::string mic_name;  // the microphone being recorded; empty before one was opened
     bool mic_gate_open = false;  // not muted and (push-to-talk off or its key held)
+    bool mic_fallback = false;  // the chosen microphone is not connected: the Windows default is recorded
+    // Push-to-talk is on and closed while an admin (elevated) program is in front and Backtrack is
+    // not elevated: Windows may hide the key from Backtrack then.
+    bool ptt_blocked = false;
 };
 
 // What the Record page shows about the replay buffer.

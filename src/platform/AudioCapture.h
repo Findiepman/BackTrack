@@ -103,6 +103,10 @@ public:
     MicStatus mic_status() const { return mic_ ? mic_->status() : MicStatus::Off; }
     std::string mic_name() const { return mic_ ? mic_->device_name() : std::string(); }
     bool mic_gate_open() const { return mic_gate_open_; }
+    bool mic_fallback() const { return mic_ && mic_->fallback(); }
+    // Push-to-talk is on, the microphone is closed, and an elevated program is in front while
+    // Backtrack is not elevated: Windows may hide the key from Backtrack then.
+    bool push_to_talk_blocked() const { return push_to_talk_blocked_; }
 
     // The AAC output type, with MF_MT_USER_DATA (AudioSpecificConfig) for the MP4 writer (§7).
     ComPtr<IMFMediaType> output_type() const { return output_type_; }
@@ -128,9 +132,12 @@ private:
     void read_packets();
     void handle_packet(const BYTE* data, UINT32 frames, DWORD flags, UINT64 qpc_position, Time100ns arrival);
     void encode_pcm(const BYTE* data, UINT32 frames);  // data null: silence
+    void fill_gap(UINT32 frames);  // silence for a gap in the timeline
+    void keep_mic_flowing();
     void drain_resampler();
     void mix(IMFSample* pcm);  // the microphone and the volumes, in place, before encode_aac
     bool push_to_talk_open();
+    bool foreground_elevated();
     void encode_aac(IMFSample* pcm);
     void drain_aac();
     Time100ns timeline() const;
@@ -201,6 +208,13 @@ private:
     std::vector<float> mix_mic_;
     Time100ns push_to_talk_released_at_ = 0;
     bool push_to_talk_was_held_ = false;
+    const bool self_elevated_;
+    DWORD foreground_pid_ = 0;
+    bool foreground_elevated_ = false;
+    std::atomic<bool> push_to_talk_blocked_{false};
+    bool gap_fill_ = false;  // inside fill_gap: the mic FIFO is read with pull_gap
+    bool gap_ran_dry_ = false;
+    bool logged_quiet_fill_ = false;
     std::atomic<float> system_level_{0.0f};
     std::atomic<float> mic_level_{0.0f};
     std::atomic<bool> mic_gate_open_{false};

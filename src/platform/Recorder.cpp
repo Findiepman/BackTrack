@@ -276,6 +276,10 @@ void Recorder::pause() {
         capture_->stop();
     }
     if (audio_) {
+        // Also joins the microphone thread, which may be inside a slow Activate/Initialize (a
+        // Bluetooth device can take a second or two). WASAPI gives no way to cancel those, and
+        // pause_started_ must be taken after the sound has stopped, so this waits under
+        // pipeline_mutex_; the supervisor only takes that lock briefly and waits at most as long.
         audio_->stop();
     }
     // Taken once both have stopped: no frame or sound from before the pause is stamped later.
@@ -308,7 +312,13 @@ void Recorder::resume() {
             rebuild_pipeline_ = true;  // it failed while paused; the supervisor builds it now
         }
         if (audio_) {
-            audio_->start(paused_total_);
+            try {
+                audio_->start(paused_total_);
+            } catch (const std::exception& e) {
+                // A thread or event that cannot be made: the picture carries on, the status says
+                // "no sound", and the next resume tries again.
+                log::error("Cannot restart sound recording: {}", e.what());
+            }
         }
         log::info("Recording resumed");
     }
@@ -409,6 +419,7 @@ std::string Recorder::status_text() const {
     const char* mic_note = mic == MicStatus::Blocked    ? ", microphone blocked by Windows"
                            : mic == MicStatus::NoDevice ? ", no microphone"
                            : mic == MicStatus::Failed   ? ", microphone not working"
+                           : mic == MicStatus::OnlyBluetooth ? ", only a Bluetooth headset mic"
                                                         : "";
     return std::format("Recording {} s, {} fps, {}{}{}", settings_.clip_seconds, settings_.fps, encoder,
                        sound ? "" : ", no sound", mic_note);
@@ -422,6 +433,8 @@ AudioLevels Recorder::audio_levels() const {
         levels.mic_status = audio_->mic_status();
         levels.mic_name = audio_->mic_name();
         levels.mic_gate_open = audio_->mic_gate_open();
+        levels.mic_fallback = audio_->mic_fallback();
+        levels.ptt_blocked = audio_->push_to_talk_blocked();
     }
     return levels;
 }

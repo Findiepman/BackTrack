@@ -57,8 +57,31 @@ constexpr std::size_t kMicFifoFrames = std::size_t{1} << 18;
 // of milliseconds after it was spoken (microphone buffer, FIFO, noise suppression), and the end of
 // the last word must not be cut off.
 constexpr Time100ns kPushToTalkRelease = 200 * kTicksPerMillisecond;
+// Without a keep-alive stream, quiet time is filled up to this far behind real time, in steps of
+// at least kQuietStep (see keep_mic_flowing). 50 ms: a packet is read at most two polls after it
+// was mixed, so sound that starts playing is never stamped before the filled part ends.
+constexpr Time100ns kQuietLag = 50 * kTicksPerMillisecond;
+constexpr Time100ns kQuietStep = 10 * kTicksPerMillisecond;
 constexpr int kPercent = 100;
 constexpr int kMaxVolumePercent = 200;  // the settings' limit
+
+// True when the process runs elevated (as administrator). A process that cannot even be asked is
+// taken as elevated: only higher-privileged processes refuse a limited query.
+bool process_elevated(DWORD pid) {
+    const UniqueHandle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
+    if (!process) {
+        return GetLastError() == ERROR_ACCESS_DENIED;
+    }
+    HANDLE raw_token = nullptr;
+    if (!OpenProcessToken(process.get(), TOKEN_QUERY, &raw_token)) {
+        return GetLastError() == ERROR_ACCESS_DENIED;
+    }
+    const UniqueHandle token(raw_token);
+    TOKEN_ELEVATION elevation{};
+    DWORD size = 0;
+    return GetTokenInformation(token.get(), TokenElevation, &elevation, sizeof(elevation), &size) &&
+           elevation.TokenIsElevated != 0;
+}
 
 std::uint64_t pack_hotkey(const Hotkey& key) {
     return static_cast<std::uint64_t>(key.modifiers) << 32 | key.virtual_key;
@@ -189,7 +212,8 @@ AudioCapture::AudioCapture(int bitrate_kbps, Time100ns max_gap_fill, const Audio
       system_gain_(mix.system_sound ? static_cast<float>(mix.system_volume) / kPercent : 0.0f, kGainRampFrames),
       mic_gain_(0.0f, kGainRampFrames),
       system_meter_(kMeterHalfLifeFrames),
-      mic_meter_(kMeterHalfLifeFrames) {
+      mic_meter_(kMeterHalfLifeFrames),
+      self_elevated_(process_elevated(GetCurrentProcessId())) {
     if (mix.mic) {
         mic_fifo_ = std::make_unique<AudioFifo>(kMicFifoFrames);
         mic_ = std::make_unique<MicCapture>(mix.mic_device, mix.noise_suppression, *mic_fifo_);
@@ -272,6 +296,7 @@ void AudioCapture::stop() {
     system_level_ = 0.0f;
     mic_level_ = 0.0f;
     mic_gate_open_ = false;
+    push_to_talk_blocked_ = false;
 }
 
 AudioStats AudioCapture::stats() const {
@@ -328,9 +353,30 @@ bool AudioCapture::push_to_talk_open() {
     return push_to_talk_was_held_ && now - push_to_talk_released_at_ < kPushToTalkRelease;
 }
 
+bool AudioCapture::foreground_elevated() {
+    // UNVERIFIED: that GetAsyncKeyState reads every key as up while an elevated window has the
+    // focus and Backtrack is not elevated (User Interface Privilege Isolation). Widely reported for
+    // push-to-talk in games run as administrator; not tried here with a real key held. This only
+    // tells the UI why push-to-talk may not react; it changes nothing in the recording.
+    if (self_elevated_) {
+        return false;
+    }
+    const HWND window = GetForegroundWindow();
+    DWORD pid = 0;
+    if (window == nullptr || GetWindowThreadProcessId(window, &pid) == 0 || pid == 0) {
+        return false;
+    }
+    if (pid != foreground_pid_) {  // asked once per program that comes to the front
+        foreground_pid_ = pid;
+        foreground_elevated_ = process_elevated(pid);
+    }
+    return foreground_elevated_;
+}
+
 void AudioCapture::mix(IMFSample* pcm) {
     const bool gate = mic_ && !mic_muted_ && (!push_to_talk_ || push_to_talk_open());
     mic_gate_open_ = gate;
+    push_to_talk_blocked_ = mic_ && push_to_talk_ && !mic_muted_ && !gate && foreground_elevated();
     system_gain_.set_target(system_sound_ ? static_cast<float>(system_volume_) / kPercent : 0.0f);
     mic_gain_.set_target(gate ? static_cast<float>(mic_volume_) / kPercent : 0.0f);
 
@@ -354,7 +400,11 @@ void AudioCapture::mix(IMFSample* pcm) {
     if (mic_) {
         // Pulled even while muted: the FIFO keeps moving, so unmuting plays what is said now.
         mix_mic_.resize(frames);
-        mic_fifo_->pull(mix_mic_);
+        if (gap_fill_) {
+            gap_ran_dry_ = mic_fifo_->pull_gap(mix_mic_) || gap_ran_dry_;
+        } else {
+            mic_fifo_->pull(mix_mic_);
+        }
         voice = mix_mic_;
     }
     const MixPeaks peaks = mix_block(mix_pcm_, voice, system_gain_, mic_gain_);
@@ -387,6 +437,7 @@ void AudioCapture::thread_main() {
     system_level_ = 0.0f;
     mic_level_ = 0.0f;
     mic_gate_open_ = false;
+    push_to_talk_blocked_ = false;
     running_ = false;
 }
 
@@ -476,6 +527,57 @@ void AudioCapture::run_loop() {
             close_device();
             next_open = invalidated && settled ? 0 : GetTickCount64() + kReopenDelayMs;
         }
+        if (open_ && mic_ && !render_client_audio_) {
+            try {
+                keep_mic_flowing();
+            } catch (const std::exception& e) {
+                if (error_log_.allow()) {
+                    log::warn("Keeping the microphone going in a quiet moment failed: {}", e.what());
+                }
+            }
+        }
+    }
+}
+
+void AudioCapture::keep_mic_flowing() {
+    // Without the silent keep-alive stream, loopback delivers nothing at all while nothing plays,
+    // so nothing would take the microphone out of its FIFO: the voice would wait and then be lost
+    // when the FIFO is full. So the quiet time is filled here as it passes, from the clock, a
+    // little behind real time so that sound which starts playing is never overtaken.
+    const Time100ns now = qpc_now() - clock_offset_;
+    if (!anchored_) {
+        anchored_ = true;
+        anchor_ = now - kQuietLag;
+        segment_base_ = 0;
+        segment_frames_ = 0;
+    }
+    const Time100ns behind = now - kQuietLag - timeline();
+    if (behind < kQuietStep) {
+        return;
+    }
+    if (!logged_quiet_fill_) {
+        logged_quiet_fill_ = true;
+        log::info("No silent keep-alive stream on this device: quiet moments are filled from the clock so the "
+                  "microphone keeps recording");
+    }
+    encode_pcm(nullptr, static_cast<UINT32>(static_cast<std::uint64_t>(behind) * device_rate_ / kTicksPerSecond));
+    counters_.silence_inserted_ms += static_cast<std::uint64_t>(behind / kTicksPerMillisecond);
+}
+
+void AudioCapture::fill_gap(UINT32 frames) {
+    // A gap is filled far faster than real time; the microphone FIFO hands out what was said
+    // during it and then zeros (AudioFifo::pull_gap), and starts afresh after it.
+    struct Gap {
+        AudioCapture* self;
+        explicit Gap(AudioCapture* s) : self(s) {
+            self->gap_fill_ = true;
+            self->gap_ran_dry_ = false;
+        }
+        ~Gap() { self->gap_fill_ = false; }
+    } gap{this};
+    encode_pcm(nullptr, frames);
+    if (mic_fifo_ && gap_ran_dry_) {
+        mic_fifo_->reset_consumer();
     }
 }
 void AudioCapture::open_device(IMMDeviceEnumerator* enumerator) {
@@ -726,11 +828,11 @@ void AudioCapture::handle_packet(const BYTE* data, UINT32 frames, DWORD flags, U
             // voice would land minutes away from when it was said, so it goes.
             mic_fifo_->reset_consumer();
         }
-        encode_pcm(nullptr, static_cast<UINT32>(static_cast<std::uint64_t>(max_gap_fill_) * device_rate_ / kTicksPerSecond));
+        fill_gap(static_cast<UINT32>(static_cast<std::uint64_t>(max_gap_fill_) * device_rate_ / kTicksPerSecond));
         counters_.silence_inserted_ms += static_cast<std::uint64_t>(max_gap_fill_ / kTicksPerMillisecond);
     } else if (drift > kDriftTolerance) {
         const auto missing = static_cast<UINT32>(static_cast<std::uint64_t>(drift) * device_rate_ / kTicksPerSecond);
-        encode_pcm(nullptr, missing);
+        fill_gap(missing);
         counters_.silence_inserted_ms += static_cast<std::uint64_t>(drift / kTicksPerMillisecond);
     } else if (drift < -kDriftTolerance) {
         const auto ahead = static_cast<UINT32>(static_cast<std::uint64_t>(-drift) * device_rate_ / kTicksPerSecond);

@@ -66,6 +66,14 @@ public:
     // Consumer. Fills `out` completely (zeros where nothing was available).
     void pull(std::span<float> out);
 
+    // Consumer, while it fills a gap in its own stream with silence. That runs far faster than
+    // real time, so it must not wait for new frames: it takes what is queued straight (what was
+    // said during the gap, in order), and once that runs out gives only zeros, also when new
+    // frames arrive meanwhile (they were said now, not during the gap). Returns true when it ran
+    // out; the consumer then calls reset_consumer() after the gap, so the voice after it starts at
+    // the right moment.
+    bool pull_gap(std::span<float> out);
+
     // Consumer. Forgets everything queued and waits for target_frames again, e.g. after the
     // consumer was stopped while the producer kept pushing.
     void reset_consumer();
@@ -89,6 +97,7 @@ private:
 
     // Consumer only.
     bool priming_ = true;
+    bool gap_dry_ = false;  // pull_gap ran out; zeros until reset_consumer()
     std::int64_t pending_correction_ = 0;  // > 0: frames still to consume extra, < 0: to stretch
     std::size_t window_pulled_ = 0;
     std::size_t window_min_ = 0;

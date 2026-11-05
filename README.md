@@ -95,6 +95,10 @@ file is never overwritten.
   the status says so, and the microphone is used as soon as that is turned on.
 - The microphone is timed by your playback device. When nothing at all can play sound (no
   speakers or headphones), the microphone is not recorded either.
+- Push-to-talk and a game (or any program) running as administrator: while such a program is in
+  front, Windows may hide your keys from Backtrack, so holding the push-to-talk key does nothing.
+  The Record page says so when it happens. Run Backtrack as administrator too, or turn
+  push-to-talk off for that game.
 - The "saved" sound (and the error sound when a save is refused) plays on your speakers, so the
   next clip that overlaps that moment contains it, like anything else you hear. `sound = false`
   turns it off.
