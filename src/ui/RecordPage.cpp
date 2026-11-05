@@ -242,7 +242,9 @@ void App::paint_record_page(const Rect& area) {
             constexpr int kBars = 22;
             const Rect lm{right - 120, ry + 21, 120, 14};
             const float bw = (lm.w - 2 * (kBars - 1)) / kBars;
-            const int lit = live ? static_cast<int>(std::lround(std::clamp(level, 0.0f, 1.0f) * kBars)) : 0;
+            // Loudness scale like any sound meter: -60 dB at the left end, 0 dB (full scale) at the right.
+            const float db = 20.0f * std::log10(std::max(level, 1e-6f));
+            const int lit = live ? static_cast<int>(std::lround(std::clamp((db + 60.0f) / 60.0f, 0.0f, 1.0f) * kBars)) : 0;
             for (int i = 0; i < kBars; ++i) {
                 const Color on = i > 17 ? kWarn : kAccent;
                 const Color c = i < lit ? on : kLine;
@@ -289,18 +291,20 @@ void App::paint_record_page(const Rect& area) {
                     break;
                 case MicStatus::Failed: mic_text = L"The microphone could not be opened"; mic_color = kWarn; break;
                 case MicStatus::Recording: {
-                    mic_text = to_wide(levels.mic_name);
+                    // The state first: a long device name must not push it out of sight.
+                    const std::wstring name = to_wide(levels.mic_name);
                     if (muted) {
-                        mic_text += settings_.mic_mute_hotkey.empty()
-                                        ? std::wstring(L" \u00b7 Muted")
-                                        : std::format(L" \u00b7 Muted ({} unmutes)", to_wide(settings_.mic_mute_hotkey));
+                        mic_text = (settings_.mic_mute_hotkey.empty()
+                                        ? std::wstring(L"Muted")
+                                        : std::format(L"Muted ({} unmutes)", to_wide(settings_.mic_mute_hotkey))) +
+                                   L" \u00b7 " + name;
                         mic_color = kWarn;
                     } else if (settings_.push_to_talk) {
-                        mic_text += levels.mic_gate_open
-                                        ? std::wstring(L" \u00b7 Talking")
-                                        : std::format(L" \u00b7 Hold {} to talk", to_wide(settings_.push_to_talk_key));
-                    } else if (settings_.noise_suppression) {
-                        mic_text += L" \u00b7 Noise suppression on";
+                        mic_text = (levels.mic_gate_open ? std::wstring(L"Talking")
+                                                         : std::format(L"Hold {} to talk", to_wide(settings_.push_to_talk_key))) +
+                                   L" \u00b7 " + name;
+                    } else {
+                        mic_text = name + (settings_.noise_suppression ? L" \u00b7 Noise suppression on" : L"");
                     }
                     break;
                 }
