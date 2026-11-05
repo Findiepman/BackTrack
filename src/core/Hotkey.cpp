@@ -36,6 +36,12 @@ constexpr NamedKey kCanonicalNames[] = {
     {"PrintScreen", 0x2C},
 };
 
+// Only for a held key (push-to-talk): watched with GetAsyncKeyState, never registered.
+constexpr NamedKey kHeldOnlyNames[] = {
+    {"CapsLock", 0x14}, {"Tab", 0x09}, {"Backquote", 0xC0}, {"Up", 0x26},     {"Down", 0x28},
+    {"Left", 0x25},     {"Right", 0x27}, {"Mouse3", 0x04},  {"Mouse4", 0x05}, {"Mouse5", 0x06},
+};
+
 struct NamedModifier {
     std::string_view name;
     std::uint32_t bit;
@@ -132,8 +138,9 @@ std::string modifier_name(std::uint32_t bit) {
 }
 
 std::string key_name(std::uint32_t vk) {
-    if (vk == kVkMouse4) return "Mouse4";
-    if (vk == kVkMouse5) return "Mouse5";
+    for (const auto& key : kHeldOnlyNames) {
+        if (key.virtual_key == vk) return std::string(key.name);
+    }
     if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
         return std::string(1, static_cast<char>(vk));
     }
@@ -190,8 +197,17 @@ HotkeyParseResult parse_hotkey(std::string_view text, HotkeyUse use) {
             continue;
         }
         std::optional<std::uint32_t> vk = key_from_token(lower);
-        if (!vk && held && lower == "mouse4") vk = kVkMouse4;
-        if (!vk && held && lower == "mouse5") vk = kVkMouse5;
+        if (!vk && held) {
+            for (const auto& key : kHeldOnlyNames) {
+                if (to_lower(key.name) == lower) vk = key.virtual_key;
+            }
+        }
+        if (!vk && held) {
+            return fail(std::format("'{}' is not a key Backtrack knows. Use A-Z, 0-9, F1-F24, Numpad0-9, Space, Home, "
+                                    "End, Insert, Delete, PageUp, PageDown, CapsLock, Tab, Backquote, Up, Down, Left, "
+                                    "Right or Mouse3, Mouse4, Mouse5, optionally with Ctrl, Alt, Shift or Win",
+                                    token));
+        }
         if (!vk) {
             return fail(std::format("'{}' is not a key Backtrack knows. Use A-Z, 0-9, F1-F24, Numpad0-9, Home, End, "
                                     "Insert, Delete, PageUp, PageDown, Space, Pause or PrintScreen, "
@@ -222,6 +238,11 @@ HotkeyParseResult parse_hotkey(std::string_view text, HotkeyUse use) {
     const bool numpad = hotkey.virtual_key >= kVkNumpad0 && hotkey.virtual_key < kVkNumpad0 + kNumpadDigits;
     if ((hotkey.modifiers & hotkey_mod::kShift) && numpad) {
         return fail("Shift+Numpad never arrives: with NumLock on, Shift turns numpad keys into arrow keys");
+    }
+
+    if (held && (hotkey.virtual_key == kVkPause || hotkey.virtual_key == kVkPrintScreen)) {
+        // Windows sends these as a single press: there is no "still held" to watch.
+        return fail(std::format("'{}' cannot be held down, pick another key for push-to-talk", *key_token));
     }
 
     HotkeyParseResult result{hotkey, {}, {}};

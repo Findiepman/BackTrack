@@ -28,6 +28,9 @@ using namespace theme;
 
 using namespace ids;
 constexpr int kHotkeyId = 1;
+constexpr int kMuteHotkeyId = 2;
+constexpr UINT_PTR kMeterTimer = 3;
+constexpr UINT kMeterMs = 66;  // the Record page's sound meters, about 15 times a second
 constexpr UINT kTrayId = 1;
 constexpr int kSearchBoxId = 101;
 constexpr int kEditBoxId = 102;
@@ -48,7 +51,7 @@ constexpr auto kNoticeTime = std::chrono::seconds(8);
 
 // Tray menu command ids (the tray menu is the one Windows menu left: it opens outside the window).
 enum MenuId : UINT {
-    kTrayOpen = 4000, kTraySave, kTrayPause, kTrayFolder, kTraySettings, kTrayLog, kTrayQuit,
+    kTrayOpen = 4000, kTraySave, kTrayPause, kTrayFolder, kTraySettings, kTrayLog, kTrayQuit, kTrayMute,
 };
 
 struct SortName {
@@ -187,6 +190,7 @@ void App::construct() {
     recorder_ = make_recorder_(settings_);
     recorder_->start();
     recorder_settings_ = settings_;
+    apply_audio_live();  // the push-to-talk key is parsed here
     worker_ = std::thread([this] { worker_main(); });
 
     taskbar_created_ = RegisterWindowMessageW(L"TaskbarCreated");
@@ -365,6 +369,8 @@ void App::release() {
     clip_view_.reset();  // the player decodes on the window's graphics device
     if (window_ != nullptr && IsWindow(window_)) {
         if (hotkey_registered_) UnregisterHotKey(window_, kHotkeyId);
+        if (mute_hotkey_registered_) UnregisterHotKey(window_, kMuteHotkeyId);
+        mute_hotkey_registered_ = false;
         hotkey_registered_ = false;
         remove_tray_icon();
     }
@@ -737,19 +743,43 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
         }
         case WM_DISPLAYCHANGE:
             // A display was plugged in or out: the Record and Settings pages list them.
-            try {
-                monitors_ = list_monitors();
-            } catch (const std::exception& e) {
-                log::warn("Could not list the monitors: {}", e.what());
-            }
+            refresh_devices();
             invalidate();
+            break;
+        case WM_DEVICECHANGE:
+            // A microphone plugged in or out: the pickers and the Record page show it.
+            if (wparam == 0x0007 /* DBT_DEVNODES_CHANGED */ && (page_ == Page::Settings || page_ == Page::Record)) {
+                refresh_devices();
+                invalidate();
+            }
+            break;
+        case WM_MBUTTONDOWN:
+            if (capturing_hotkey_ && capture_target_ == HotkeyTarget::PushToTalk) {
+                capture_hotkey(VK_MBUTTON);  // the wheel button as the push-to-talk key
+                return 0;
+            }
+            break;
+        case WM_XBUTTONDOWN:
+            if (capturing_hotkey_ && capture_target_ == HotkeyTarget::PushToTalk) {
+                // A mouse side button as the push-to-talk key.
+                capture_hotkey(GET_XBUTTON_WPARAM(wparam) == XBUTTON1 ? VK_XBUTTON1 : VK_XBUTTON2);
+                return TRUE;
+            }
             break;
         case WM_HOTKEY:
             if (wparam == kHotkeyId) save_clip();
+            if (wparam == kMuteHotkeyId) toggle_mic_mute();
             return 0;
         case WM_TIMER:
             if (wparam == kPlayerTimer) {
                 tick_player();
+                return 0;
+            }
+            if (wparam == kMeterTimer) {
+                // Kept while the page is open (also hidden or minimised: no repaint then), so the
+                // meters move again as soon as the window is back.
+                if (page_ != Page::Record) KillTimer(window_, kMeterTimer);
+                else if (IsWindowVisible(window_) && !IsIconic(window_)) invalidate();
                 return 0;
             }
             if (wparam == kTickTimer) {
@@ -855,9 +885,14 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
             KillTimer(window_, kTickTimer);
             KillTimer(window_, kPlayerTimer);
             clip_view_.reset();
+            KillTimer(window_, kMeterTimer);
             if (hotkey_registered_) {
                 UnregisterHotKey(window_, kHotkeyId);
                 hotkey_registered_ = false;
+            }
+            if (mute_hotkey_registered_) {
+                UnregisterHotKey(window_, kMuteHotkeyId);
+                mute_hotkey_registered_ = false;
             }
             remove_tray_icon();
             save_library();
@@ -1256,13 +1291,104 @@ void App::refresh_status() {
 }
 
 void App::register_hotkey() {
-    const auto parsed = parse_hotkey(settings_.save_hotkey);
-    if (!parsed.hotkey) return;
-    hotkey_registered_ =
-        RegisterHotKey(window_, kHotkeyId, parsed.hotkey->modifiers | MOD_NOREPEAT, parsed.hotkey->virtual_key) != FALSE;
-    if (!hotkey_registered_) {
-        log::warn("Cannot use {} as the hotkey: {}. Use the Save button, or pick another key in Settings > Hotkeys",
-                  settings_.save_hotkey, hresult_text(HRESULT_FROM_WIN32(GetLastError())));
+    if (const auto parsed = parse_hotkey(settings_.save_hotkey); parsed.hotkey) {
+        hotkey_registered_ = RegisterHotKey(window_, kHotkeyId, parsed.hotkey->modifiers | MOD_NOREPEAT,
+                                            parsed.hotkey->virtual_key) != FALSE;
+        if (!hotkey_registered_) {
+            log::warn("Cannot use {} as the hotkey: {}. Use the Save button, or pick another key in Settings > Hotkeys",
+                      settings_.save_hotkey, hresult_text(HRESULT_FROM_WIN32(GetLastError())));
+        }
+    }
+    // The microphone's mute key; none when it is empty or the same as the save key (one key cannot do both).
+    if (!settings_.mic_mute_hotkey.empty() && settings_.mic_mute_hotkey == settings_.save_hotkey) {
+        log::warn("The mute key {} is also the save key; it only saves clips", settings_.mic_mute_hotkey);
+    } else if (!settings_.mic_mute_hotkey.empty()) {
+        if (const auto parsed = parse_hotkey(settings_.mic_mute_hotkey); parsed.hotkey) {
+            mute_hotkey_registered_ = RegisterHotKey(window_, kMuteHotkeyId, parsed.hotkey->modifiers | MOD_NOREPEAT,
+                                                     parsed.hotkey->virtual_key) != FALSE;
+            if (!mute_hotkey_registered_) {
+                log::warn("Cannot use {} to mute the microphone: {}", settings_.mic_mute_hotkey,
+                          hresult_text(HRESULT_FROM_WIN32(GetLastError())));
+            }
+        }
+    }
+}
+
+namespace {
+
+// Two short tones as a WAV in memory: rising for "mic on", falling for "mic muted". Heard in a
+// fullscreen game where the window is not visible (and recorded like any other sound).
+const std::vector<std::uint8_t>& mute_tone(bool muted) {
+    static const auto make = [](bool falling) {
+        constexpr int kRate = 44100;
+        constexpr int kToneMs = 70;
+        constexpr int kSamples = kRate * kToneMs / 1000;
+        std::vector<std::int16_t> pcm;
+        const double first = falling ? 880.0 : 587.33;
+        const double second = falling ? 587.33 : 880.0;
+        for (const double hz : {first, second}) {
+            for (int i = 0; i < kSamples; ++i) {
+                const double fade = std::min({1.0, i / 220.0, (kSamples - i) / 220.0});  // no clicks
+                pcm.push_back(static_cast<std::int16_t>(std::sin(2 * 3.14159265358979 * hz * i / kRate) * 6000 * fade));
+            }
+        }
+        const auto data_bytes = static_cast<std::uint32_t>(pcm.size() * 2);
+        std::vector<std::uint8_t> wav;
+        const auto put = [&wav](std::uint32_t v, int bytes) {
+            for (int b = 0; b < bytes; ++b) wav.push_back(static_cast<std::uint8_t>((v >> (8 * b)) & 0xFF));
+        };
+        for (const char c : std::string_view("RIFF")) wav.push_back(static_cast<std::uint8_t>(c));
+        put(36 + data_bytes, 4);
+        for (const char c : std::string_view("WAVEfmt ")) wav.push_back(static_cast<std::uint8_t>(c));
+        put(16, 4);
+        put(1, 2);
+        put(1, 2);
+        put(kRate, 4);
+        put(kRate * 2, 4);
+        put(2, 2);
+        put(16, 2);
+        for (const char c : std::string_view("data")) wav.push_back(static_cast<std::uint8_t>(c));
+        put(data_bytes, 4);
+        for (const std::int16_t s : pcm) put(static_cast<std::uint16_t>(s), 2);
+        return wav;
+    };
+    static const std::vector<std::uint8_t> muted_tone = make(true);
+    static const std::vector<std::uint8_t> unmuted_tone = make(false);
+    return muted ? muted_tone : unmuted_tone;
+}
+
+}  // namespace
+
+void App::toggle_mic_mute() {
+    if (finished_ || !settings_.mic_enabled) return;  // no microphone recorded: nothing to mute
+    recorder_->set_mic_muted(!recorder_->mic_muted());
+    const bool muted = recorder_->mic_muted();  // what the recorder really did (no sound engine: never muted)
+    log::info("Microphone {}", muted ? "muted" : "unmuted");
+    if (settings_.sound) {
+        PlaySoundW(reinterpret_cast<LPCWSTR>(mute_tone(muted).data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+    }
+    invalidate();
+}
+
+void App::apply_audio_live() {
+    recorder_->set_volumes(settings_.system_volume, settings_.mic_volume);
+    recorder_->set_noise_suppression(settings_.noise_suppression);
+    const auto key = parse_hotkey(settings_.push_to_talk_key, HotkeyUse::Held);
+    // A key that cannot be read keeps the mic closed (key 0 is never held): never recording the
+    // voice all the time when the player asked for push-to-talk.
+    recorder_->set_push_to_talk(settings_.push_to_talk, key.hotkey.value_or(Hotkey{}));
+}
+
+void App::refresh_devices() {
+    try {
+        monitors_ = list_monitors();
+    } catch (const std::exception& e) {
+        log::warn("Could not list the monitors: {}", e.what());
+    }
+    try {
+        microphones_ = list_microphones();
+    } catch (const std::exception& e) {
+        log::warn("Could not list the microphones: {}", e.what());
     }
 }
 
@@ -1348,6 +1474,11 @@ void App::tray_menu() {
     const std::wstring save = std::format(L"Save last {} s\t{}", settings_.clip_seconds, to_wide(settings_.save_hotkey));
     AppendMenuW(menu, MF_STRING, kTraySave, save.c_str());
     AppendMenuW(menu, MF_STRING, kTrayPause, recorder_->paused() ? L"Resume Instant Replay" : L"Pause Instant Replay");
+    if (settings_.mic_enabled) {
+        const std::wstring mute = (recorder_->mic_muted() ? std::wstring(L"Unmute microphone") : std::wstring(L"Mute microphone")) +
+                                  (settings_.mic_mute_hotkey.empty() ? L"" : L"\t" + to_wide(settings_.mic_mute_hotkey));
+        AppendMenuW(menu, MF_STRING, kTrayMute, mute.c_str());
+    }
     AppendMenuW(menu, MF_STRING, kTrayFolder, L"Open clips folder");
     AppendMenuW(menu, MF_STRING, kTraySettings, L"Settings");
     AppendMenuW(menu, MF_STRING, kTrayLog, L"Open log");
@@ -1368,6 +1499,7 @@ void App::tray_menu() {
             break;
         case kTraySave: save_clip(); break;
         case kTrayPause: toggle_pause(); break;
+        case kTrayMute: toggle_mic_mute(); break;
         case kTrayFolder: shell::open(recorder_->output_dir()); break;
         case kTraySettings:
             show(SW_SHOW);
@@ -2132,13 +2264,8 @@ void App::set_page(Page page) {
         capturing_hotkey_ = false;
         apply_hotkey();
     }
-    if (page == Page::Record || page == Page::Settings) {
-        try {
-            monitors_ = list_monitors();
-        } catch (const std::exception& e) {
-            log::warn("Could not list the monitors: {}", e.what());
-        }
-    }
+    if (page == Page::Record || page == Page::Settings) refresh_devices();
+    if (page == Page::Record) SetTimer(window_, kMeterTimer, kMeterMs, nullptr);
     page_ = page;
     invalidate();
 }

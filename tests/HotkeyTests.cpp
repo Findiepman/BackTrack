@@ -171,6 +171,15 @@ void held_keys() {
     // What can never arrive stays refused either way.
     CHECK(!parse_hotkey("Shift+Numpad5", HotkeyUse::Held).hotkey.has_value());
     CHECK(!parse_hotkey("Ctrl+Pause", HotkeyUse::Held).hotkey.has_value());
+    CHECK(!parse_hotkey("Pause", HotkeyUse::Held).hotkey.has_value());  // only ever a single press
+    for (const char* name : {"CapsLock", "Tab", "Backquote", "Up", "Down", "Left", "Right", "Mouse3"}) {
+        const auto key = parse_hotkey(name, HotkeyUse::Held);
+        CHECK(key.hotkey.has_value());
+        if (key.hotkey) CHECK(hotkey_to_string(*key.hotkey) == name);
+        CHECK(!parse_hotkey(name).hotkey.has_value());  // never a global hotkey
+    }
+    CHECK(bt_test::contains(parse_hotkey("Escape", HotkeyUse::Held).error, "Mouse4"));
+    CHECK(!parse_hotkey("PrintScreen", HotkeyUse::Held).hotkey.has_value());
 }
 
 int main() {

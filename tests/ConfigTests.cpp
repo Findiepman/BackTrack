@@ -531,7 +531,7 @@ void mic_settings() {
     const Settings d{};
     CHECK(d.mic_enabled && d.noise_suppression && !d.push_to_talk);
     CHECK(d.mic_device.empty() && d.mic_volume == 100 && d.system_volume == 100);
-    CHECK(d.mic_mute_hotkey == "Ctrl+Shift+M" && d.push_to_talk_key == "V");
+    CHECK(d.mic_mute_hotkey == "Alt+F7" && d.push_to_talk_key == "V");
 
     const LoadedSettings loaded = load_settings(
         "[audio]\nmic = false\nmic_volume = 250\nsystem_volume = -5\nmic_device =\nnoise_suppression = maybe\n"
@@ -547,7 +547,7 @@ void mic_settings() {
 
     // A mute key must still be a valid global hotkey: a plain letter is refused, the default kept.
     const LoadedSettings bad = load_settings("[hotkey]\nmic_mute = M\npush_to_talk = Ctrl+Ctrl\n");
-    CHECK(bad.settings.mic_mute_hotkey == "Ctrl+Shift+M");
+    CHECK(bad.settings.mic_mute_hotkey == "Alt+F7");
     CHECK(bad.settings.push_to_talk_key == "V");
     CHECK(bad.warnings.size() == 2);
 }

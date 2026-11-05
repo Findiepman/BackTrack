@@ -1,7 +1,7 @@
 # Backtrack
 
 A replay buffer for Windows. Backtrack keeps the last 30 seconds (or however many you choose) of
-your screen and sound in memory, and saves them to an `.mp4` the moment you press a hotkey.
+your screen, sound and microphone in memory, and saves them to an `.mp4` the moment you press a hotkey.
 Nothing touches the disk until you press it.
 
 Built from scratch on what Windows ships with: Desktop Duplication and Direct3D 11 for the
@@ -9,8 +9,13 @@ screen, the graphics card's own H.264 encoder through Media Foundation (AMD, NVI
 Windows' software encoder as fallback), WASAPI for sound. No FFmpeg, no OBS, no runtime to install.
 
 > **Status:** the recording engine and the whole window are done: library, clip page (player, trim,
-> tags, notes), Record and Settings. Sharing, long recordings, screenshots and the microphone are
+> tags, notes), Record and Settings, and the microphone. Sharing, long recordings and screenshots are
 > shown in the window as "Soon".
+>
+> **Microphone:** recorded by default and mixed into the clip's sound track with what you hear.
+> Mute it with **Alt+F7** (two short tones say muted / on), from the tray menu or the Record
+> page, or turn on push-to-talk (hold **V**, or another key or a mouse button you pick). Noise
+> suppression takes out fans and hum. All of it is under Settings > Audio and Hotkeys.
 
 ## Using it
 
@@ -40,14 +45,14 @@ Windows' software encoder as fallback), WASAPI for sound. No FFmpeg, no OBS, no 
    replay buffer is, Backtrack's own CPU and memory use and your latest clips.
 5. **Settings** changes everything below while Backtrack runs; changes are saved to `backtrack.ini`
    at once (your comments in that file are kept). Changing the display, frame rate, bitrate,
-   encoder, buffer length, recording game sound or its quality restarts Instant Replay about a
-   second later (the clips folder: at once): the seconds it was holding are lost, nothing else. If
+   encoder, buffer length, recording game sound or its quality, recording the microphone or which
+   microphone restarts Instant Replay about a second later (the clips folder: at once): the seconds it was holding are lost, nothing else. If
    it cannot start with the new values, it goes back to the previous ones and says so. Changing the clips folder asks whether to move
    your clips there (with Windows' own progress window) or leave them; either way a copy of the
    library is kept as `library.before-folder-change-<date-time>.json`.
 6. Clicking the window's **X** hides Backtrack to the tray (the icon next to the clock); Instant
    Replay keeps running. Click the tray icon to open the window again; right-click it to save a
-   clip, pause, open the clips folder, open Settings, open the log or **Quit**. Quitting waits
+   clip, pause, mute the microphone, open the clips folder, open Settings, open the log or **Quit**. Quitting waits
    for a clip that is still being saved.
 
 Backtrack puts itself in the Start menu the first time it runs, so you can press the Windows key and
@@ -133,6 +138,8 @@ To use `;` or `#` in a path, put the whole value in double quotes: `output_dir =
 
 | Key | Default | Meaning |
 |---|---|---|
+| `mic_mute` | `Alt+F7` | Mutes and unmutes the microphone. Empty: no key. Same rules as `save`. |
+| `push_to_talk` | `V` | The key to hold for push-to-talk. Plain letters and digits work here, and also CapsLock, Tab, Backquote (the key left of 1), Up/Down/Left/Right and `Mouse3` / `Mouse4` / `Mouse5` (wheel and side buttons): it is only watched, every program still gets it. Pause and PrintScreen cannot be held. |
 | `save` | `F8` | The save hotkey, e.g. `Ctrl+Alt+F8` or `Ctrl+Shift+F12`. Modifiers: Ctrl, Alt, Shift, Win. Keys: A-Z, 0-9, F1-F24, Numpad0-9, Home, End, Insert, Delete, PageUp, PageDown, Space, Pause, PrintScreen. |
 
 Refused (Backtrack falls back to F8 and says why in the log): letters, digits or Space without a

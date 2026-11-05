@@ -22,6 +22,7 @@
 #include "core/Config.h"
 #include "core/Library.h"
 #include "platform/MediaProbe.h"
+#include "platform/MicCapture.h"
 #include "platform/Recorder.h"
 #include "platform/VideoPlayer.h"
 #include "ui/Graphics.h"
@@ -103,6 +104,7 @@ public:
 
 private:
     enum class Page { Library, Clip, Record, Uploads, Settings };
+    enum class HotkeyTarget { Save, MicMute, PushToTalk };  // which key the Hotkeys page is changing
 
     enum class Action {
         None,
@@ -318,6 +320,11 @@ private:
     void capture_hotkey(WPARAM key);
     void cancel_hotkey_capture();
     void sample_load();  // Backtrack's own CPU and memory use, for the Record page
+    void toggle_mic_mute();
+    void apply_audio_live();  // volumes, noise suppression, push-to-talk: no restart needed
+    void refresh_devices();  // monitors_ and microphones_
+    float hotkey_row(float x, float y, float w, HotkeyTarget target, const wchar_t* label, const wchar_t* description,
+                     const std::string& keys, const std::string& default_keys, bool registered);
 
     // Tray.
     void add_tray_icon();
@@ -426,6 +433,10 @@ private:
     std::string settings_section_ = "general";
     std::string settings_query_;
     bool capturing_hotkey_ = false;
+    HotkeyTarget capture_target_ = HotkeyTarget::Save;  // which key "press keys" is listening for
+    HotkeyTarget message_target_ = HotkeyTarget::Save;  // the row hotkey_message_ belongs to
+    bool mute_hotkey_registered_ = false;
+    std::vector<MicDevice> microphones_;  // refreshed when the Record or Settings page opens
     std::wstring hotkey_message_;  // why the last pressed combination cannot be used
     std::optional<std::chrono::steady_clock::time_point> restart_due_;  // settings wait a moment, then restart once
     std::string ini_problem_;  // the last write of backtrack.ini failed

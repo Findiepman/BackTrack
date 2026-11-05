@@ -20,6 +20,7 @@ inline constexpr std::uint32_t kWin = 0x0008;
 // held key (push-to-talk): RegisterHotKey cannot take mouse buttons.
 inline constexpr std::uint32_t kVkMouse4 = 0x05;  // VK_XBUTTON1
 inline constexpr std::uint32_t kVkMouse5 = 0x06;  // VK_XBUTTON2
+inline constexpr std::uint32_t kVkMouse3 = 0x04;  // VK_MBUTTON, the wheel button
 
 // How the key is used. A Global hotkey is taken by RegisterHotKey for the whole of Windows, so it
 // may not swallow a plain letter. A Held key (push-to-talk) is only watched while it is down and
@@ -45,7 +46,8 @@ struct HotkeyParseResult {
 //  - F12 without a modifier: Windows reserves it for debuggers
 //  - Ctrl+Pause: the keyboard sends Break (VK_CANCEL) instead of Pause
 //  - Shift+NumpadN: with NumLock on, Shift turns numpad keys into Home/End/arrows
-// A Held key also accepts plain letters, digits, Space, F12 and Mouse4/Mouse5.
+// A Held key also accepts plain letters, digits, Space and F12, and keys a global hotkey cannot
+// use: CapsLock, Tab, Backquote (the key left of 1), the arrow keys and Mouse3/Mouse4/Mouse5.
 HotkeyParseResult parse_hotkey(std::string_view text, HotkeyUse use = HotkeyUse::Global);
 
 // Canonical form, e.g. "Ctrl+Alt+F8". Modifiers always in the order Ctrl, Alt, Shift, Win.

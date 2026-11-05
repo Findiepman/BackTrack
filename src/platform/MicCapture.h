@@ -38,12 +38,15 @@
 namespace bt {
 
 // Blocked: Windows' privacy settings (Settings > Privacy & security > Microphone) deny access.
-enum class MicStatus { Off, Starting, Recording, NoDevice, Blocked, Failed };
+// OnlyBluetooth: the only microphone is a Bluetooth headset's, which is not used unless chosen by
+// name (opening it drops the headset's sound to call quality for as long as Backtrack records).
+enum class MicStatus { Off, Starting, Recording, NoDevice, Blocked, Failed, OnlyBluetooth };
 
 struct MicDevice {
     std::wstring id;  // the WASAPI endpoint id, what Settings::mic_device holds
     std::string name;  // friendly name, UTF-8 ("Microphone (USB Audio Device)")
     bool is_default = false;
+    bool bluetooth = false;  // a Bluetooth headset's microphone
 };
 
 // Active capture devices, the Windows default first. Empty when there are none or the audio
@@ -108,6 +111,7 @@ private:
     std::array<float, kMaxWeighedChannels> channel_power_{};
     std::vector<float> mono_;  // one packet's 48 kHz mono samples, grows to the largest seen
     log::RateLimit error_log_{std::chrono::seconds(30)};
+    bool warned_bluetooth_ = false;
     bool warned_missing_ = false;
     bool warned_blocked_ = false;
 

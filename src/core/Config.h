@@ -24,7 +24,7 @@ struct Settings {
     int delete_after_days = 0;  // 0 = never
     // [hotkey]
     std::string save_hotkey = "F8";  // always a string parse_hotkey accepts
-    std::string mic_mute_hotkey = "Ctrl+Shift+M";  // empty: no mute key; else a Global hotkey
+    std::string mic_mute_hotkey = "Alt+F7";  // empty: no mute key; else a Global hotkey
     std::string push_to_talk_key = "V";  // a Held key (parse_hotkey with HotkeyUse::Held)
     // [video]
     int monitor = 0;

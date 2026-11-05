@@ -73,26 +73,64 @@ bool is_active_capture(IMMDevice* device) {
            flow == eCapture;
 }
 
-// The device to record now: the chosen one when it is there, else the Windows default.
-// Throws (E_NOTFOUND) when there is no microphone at all.
-ComPtr<IMMDevice> pick_device(IMMDeviceEnumerator* enumerator, const std::wstring& wanted, bool& fallback) {
+// PKEY_Device_EnumeratorName, spelled out so no INITGUID is needed.
+constexpr PROPERTYKEY kDeviceEnumeratorName = {
+    {0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 24};
+
+// A Bluetooth headset's microphone (hands-free profile, or LE audio). Recording from it switches the
+// headset to its call mode, which also drops what the player hears to call quality.
+bool is_bluetooth(IMMDevice* device) {
+    ComPtr<IPropertyStore> properties;
+    if (FAILED(device->OpenPropertyStore(STGM_READ, &properties))) return false;
+    PROPVARIANT value;
+    PropVariantInit(&value);
+    bool bluetooth = false;
+    if (SUCCEEDED(properties->GetValue(kDeviceEnumeratorName, &value)) && value.vt == VT_LPWSTR && value.pwszVal != nullptr) {
+        const std::wstring name = value.pwszVal;
+        bluetooth = _wcsnicmp(name.c_str(), L"BTH", 3) == 0;  // BTHENUM, BTHHFENUM, BTHLEDEVICE
+    }
+    PropVariantClear(&value);
+    return bluetooth;
+}
+
+// The default is a Bluetooth headset and no other microphone is connected.
+constexpr HRESULT kOnlyBluetooth = MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x0B71);
+
+// The device to record now: the chosen one when it is there, else the Windows default, except a
+// Bluetooth headset's microphone that was not chosen by name: then another microphone.
+// Throws (E_NOTFOUND) when there is no microphone at all, kOnlyBluetooth when only a Bluetooth one.
+ComPtr<IMMDevice> pick_device(IMMDeviceEnumerator* enumerator, const std::wstring& wanted, bool& fallback,
+                              bool& skipped_bluetooth) {
     fallback = false;
+    skipped_bluetooth = false;
     if (!wanted.empty()) {
         ComPtr<IMMDevice> device;
         if (SUCCEEDED(enumerator->GetDevice(wanted.c_str(), &device)) && is_active_capture(device.Get())) {
-            return device;
+            return device;  // chosen by name: used even when it is Bluetooth
         }
         fallback = true;
     }
     ComPtr<IMMDevice> device;
     BT_CHECK_HR(enumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &device));
-    return device;
+    if (!is_bluetooth(device.Get())) return device;
+    skipped_bluetooth = true;
+    ComPtr<IMMDeviceCollection> collection;
+    UINT count = 0;
+    if (SUCCEEDED(enumerator->EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE, &collection)) &&
+        SUCCEEDED(collection->GetCount(&count))) {
+        for (UINT i = 0; i < count; ++i) {
+            ComPtr<IMMDevice> other;
+            if (SUCCEEDED(collection->Item(i, &other)) && !is_bluetooth(other.Get())) return other;
+        }
+    }
+    throw HresultError(kOnlyBluetooth, "only a Bluetooth headset microphone is connected");
 }
 
 std::wstring pick_device_id(IMMDeviceEnumerator* enumerator, const std::wstring& wanted) {
     try {
         bool fallback = false;
-        return id_of(pick_device(enumerator, wanted, fallback).Get());
+        bool skipped = false;
+        return id_of(pick_device(enumerator, wanted, fallback, skipped).Get());
     } catch (const std::exception&) {
         return {};
     }
@@ -165,6 +203,7 @@ std::vector<MicDevice> list_microphones() {
             }
             entry.name = friendly_name(device.Get());
             entry.is_default = entry.id == default_id;
+            entry.bluetooth = is_bluetooth(device.Get());
             devices.push_back(std::move(entry));
         }
     } catch (const std::exception& e) {
@@ -358,6 +397,14 @@ void MicCapture::run_loop() {
                                   "that is turned on");
                     }
                     next_open = GetTickCount64() + kBlockedRetryMs;
+                } else if (hr == kOnlyBluetooth) {
+                    status_ = MicStatus::OnlyBluetooth;
+                    if (!warned_bluetooth_) {
+                        warned_bluetooth_ = true;
+                        log::info("The only microphone is a Bluetooth headset's; it is not used unless picked in "
+                                  "Settings > Audio (it would lower the headset's sound to call quality)");
+                    }
+                    next_open = GetTickCount64() + kNoDeviceRetryMs;
                 } else if (hr == E_NOTFOUND) {
                     status_ = MicStatus::NoDevice;
                     if (error_log_.allow()) {
@@ -413,8 +460,14 @@ void MicCapture::run_loop() {
 
 void MicCapture::open_device(IMMDeviceEnumerator* enumerator) {
     bool fallback = false;
-    const ComPtr<IMMDevice> device = pick_device(enumerator, wanted_id_, fallback);
+    bool skipped_bluetooth = false;
+    const ComPtr<IMMDevice> device = pick_device(enumerator, wanted_id_, fallback, skipped_bluetooth);
     const std::string name = friendly_name(device.Get());
+    if (skipped_bluetooth && !warned_bluetooth_) {
+        warned_bluetooth_ = true;
+        log::info("Not using the Bluetooth headset microphone (it would lower the headset's sound to call quality); "
+                  "recording {} instead. Pick the headset in Settings > Audio to use it anyway", name);
+    }
     if (fallback && !warned_missing_) {
         warned_missing_ = true;
         log::warn("The chosen microphone is not connected; recording the Windows default microphone ({}) until it is",

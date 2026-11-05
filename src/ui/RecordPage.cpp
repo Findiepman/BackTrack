@@ -86,6 +86,12 @@ void App::run_record(const std::string& what, const Rect&) {
         toggle_pause();
     } else if (what == "audio") {
         change_settings([](Settings& s) { s.audio_enabled = !s.audio_enabled; });
+    } else if (what == "mic") {
+        change_settings([](Settings& s) { s.mic_enabled = !s.mic_enabled; });
+    } else if (what == "mute") {
+        toggle_mic_mute();
+    } else if (what == "mic-privacy") {
+        run_setting("mic-privacy", Rect{});
     } else if (what == "save") {
         save_clip();
     } else if (what == "all") {
@@ -125,7 +131,19 @@ void App::paint_record_page(const Rect& area) {
     {
         const float px = x0 + 20;
         const float pw = left_w - 40;
-        const float screen_h = std::floor(pw * 9.0f / 16.0f);
+        // As tall as the displays drawn side by side need (4 displays make a short row), at most 16:9.
+        float screen_h = std::floor(pw * 9.0f / 16.0f);
+        if (monitors_.size() > 1) {
+            const float tile_w = (pw - 12 - 6 * static_cast<float>(monitors_.size() - 1)) / static_cast<float>(monitors_.size());
+            float tallest = 0;
+            for (const MonitorInfo& m : monitors_) {
+                if (m.desktop_size.width > 0) {
+                    tallest = std::max(tallest, tile_w * static_cast<float>(m.desktop_size.height) /
+                                                    static_cast<float>(m.desktop_size.width));
+                }
+            }
+            if (tallest > 0) screen_h = std::min(screen_h, std::floor(tallest + 12));
+        }
         const Rect box{x0, y, left_w, 18 + 40 + 12 + screen_h + 16 + 56 + 18};
         card(box);
         // Out of range (unplugged) records monitor 0, like the recorder does.
@@ -215,26 +233,90 @@ void App::paint_record_page(const Rect& area) {
         const float pw = left_w - 40;
         const Rect box{x0, top, left_w, 18 + 40 + 12 + 56 + 1 + 56 + 10};
         card(box);
-        heading(px, top + 18, L"Audio", L"What goes into your clips", pw);
+        heading(px, top + 18, L"Audio", L"What goes into your clips, mixed into one sound track", pw);
+        const AudioLevels levels = recorder_->audio_levels();
+        const bool muted = recorder_->mic_muted();
         float ry = top + 18 + 40 + 12;
-        const auto audio_row = [&](wchar_t glyph, const wchar_t* title, const std::wstring& text, bool on, bool soon,
-                                   const char* arg) {
-            // .aud: an icon tile, two lines, the switch.
+        // .lm: 22 bars, the loud end in the warning colour.
+        const auto meter = [&](float right, float level, bool live) {
+            constexpr int kBars = 22;
+            const Rect lm{right - 120, ry + 21, 120, 14};
+            const float bw = (lm.w - 2 * (kBars - 1)) / kBars;
+            const int lit = live ? static_cast<int>(std::lround(std::clamp(level, 0.0f, 1.0f) * kBars)) : 0;
+            for (int i = 0; i < kBars; ++i) {
+                const Color on = i > 17 ? kWarn : kAccent;
+                const Color c = i < lit ? on : kLine;
+                g.fill_round(Rect{lm.x + static_cast<float>(i) * (bw + 2), lm.y, bw, lm.h}, 2, live ? c : c.with_alpha(0.55f));
+            }
+        };
+        const auto audio_row = [&](wchar_t glyph, const wchar_t* title, const std::wstring& text, Color text_color,
+                                   bool on, const char* arg, float level, bool live, bool with_mute) {
+            // .aud: an icon tile, two lines, the level meter, the switch.
             const Rect icon{px, ry + 10, 36, 36};
-            g.fill_round(icon, 10, on && !soon ? kSoft : kInk.with_alpha(0.08f));
-            g.icon(glyph, icon, 15, on && !soon ? kAccent : kMute);
-            const float tw = g.text(title, Rect{px + 48, ry + 9, pw * 0.5f, 20}, TextStyle{14, Weight::Semibold},
-                                    soon ? kInk.with_alpha(0.55f) : kInk);
-            if (soon) soon_badge(px + 48 + tw + 8, ry + 19);
-            g.text(text, Rect{px + 48, ry + 29, pw - 48 - 60, 18}, TextStyle{12.5f}, kMute);
-            toggle(px + pw, ry + 28, on, Action::Record, arg, soon);
+            g.fill_round(icon, 10, on ? kSoft : kInk.with_alpha(0.08f));
+            g.icon(glyph, icon, 15, on ? kAccent : kMute);
+            g.text(title, Rect{px + 48, ry + 9, pw * 0.5f, 20}, TextStyle{14, Weight::Semibold}, kInk);
+            const float right = px + pw - 42 - 16;
+            const float mute_w = with_mute ? 34.0f + 8.0f : 0.0f;
+            g.text(text, Rect{px + 48, ry + 29, std::max(40.0f, right - 120 - 16 - mute_w - (px + 48)), 18}, TextStyle{12.5f},
+                   text_color);
+            if (pw > 380) meter(right - mute_w, level, live);
+            if (with_mute) {
+                icon_button(Rect{right - 34, ry + 11, 34, 34}, muted ? glyph::kMute : glyph::kMicrophone, 14, Action::Record,
+                            "mute", false, muted ? kWarn : App::kNoColor);
+            }
+            toggle(px + pw, ry + 28, on, Action::Record, arg);
             ry += 56;
         };
-        audio_row(glyph::kMicrophone, L"Microphone", L"Your voice, coming later", false, true, "mic");
+        // The microphone's state in words.
+        std::wstring mic_text = L"Off";
+        Color mic_color = kMute;
+        if (settings_.mic_enabled) {
+            switch (levels.mic_status) {
+                case MicStatus::Off:
+                    // Asked for, but the recorder has no sound at all (see backtrack.log).
+                    mic_text = L"Sound recording is not available right now";
+                    mic_color = kWarn;
+                    break;
+                case MicStatus::Starting: mic_text = L"Starting..."; break;
+                case MicStatus::NoDevice: mic_text = L"No microphone found. Plug one in."; break;
+                case MicStatus::OnlyBluetooth:
+                    mic_text = L"Only a Bluetooth headset mic: pick it in Settings > Audio to use it (call-quality sound).";
+                    break;
+                case MicStatus::Blocked:
+                    mic_text = L"Windows blocks microphone access. Click to open its privacy settings.";
+                    mic_color = kWarn;
+                    break;
+                case MicStatus::Failed: mic_text = L"The microphone could not be opened"; mic_color = kWarn; break;
+                case MicStatus::Recording: {
+                    mic_text = to_wide(levels.mic_name);
+                    if (muted) {
+                        mic_text += settings_.mic_mute_hotkey.empty()
+                                        ? std::wstring(L" \u00b7 Muted")
+                                        : std::format(L" \u00b7 Muted ({} unmutes)", to_wide(settings_.mic_mute_hotkey));
+                        mic_color = kWarn;
+                    } else if (settings_.push_to_talk) {
+                        mic_text += levels.mic_gate_open
+                                        ? std::wstring(L" \u00b7 Talking")
+                                        : std::format(L" \u00b7 Hold {} to talk", to_wide(settings_.push_to_talk_key));
+                    } else if (settings_.noise_suppression) {
+                        mic_text += L" \u00b7 Noise suppression on";
+                    }
+                    break;
+                }
+            }
+        }
+        const float mic_row_y = ry;
+        audio_row(muted ? glyph::kMute : glyph::kMicrophone, L"Microphone", mic_text, mic_color, settings_.mic_enabled,
+                  "mic", levels.mic, settings_.mic_enabled && levels.mic_status == MicStatus::Recording && !muted,
+                  settings_.mic_enabled);
+        if (settings_.mic_enabled && levels.mic_status == MicStatus::Blocked) {
+            add_hit(Rect{px + 48, mic_row_y + 27, pw * 0.5f, 22}, Action::Record, "mic-privacy");
+        }
         g.fill(Rect{px, ry, pw, 1}, kLine);
         ry += 1;
-        audio_row(glyph::kSpeaker, L"System audio", L"Default playback device: games, voice chat, music",
-                  settings_.audio_enabled, false, "audio");
+        audio_row(glyph::kSpeaker, L"System audio", L"Default playback device: games, voice chat, music", kMute,
+                  settings_.audio_enabled, "audio", levels.system, settings_.audio_enabled, false);
         left_bottom = box.bottom();
     }
 
