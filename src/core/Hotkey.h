@@ -16,6 +16,16 @@ inline constexpr std::uint32_t kShift = 0x0004;
 inline constexpr std::uint32_t kWin = 0x0008;
 }  // namespace hotkey_mod
 
+// Win32 VK codes of the mouse side buttons ("Mouse4" = back, "Mouse5" = forward). Only allowed for a
+// held key (push-to-talk): RegisterHotKey cannot take mouse buttons.
+inline constexpr std::uint32_t kVkMouse4 = 0x05;  // VK_XBUTTON1
+inline constexpr std::uint32_t kVkMouse5 = 0x06;  // VK_XBUTTON2
+
+// How the key is used. A Global hotkey is taken by RegisterHotKey for the whole of Windows, so it
+// may not swallow a plain letter. A Held key (push-to-talk) is only watched while it is down and
+// every program still gets it, so any key works, the mouse side buttons too.
+enum class HotkeyUse { Global, Held };
+
 struct Hotkey {
     std::uint32_t modifiers = 0;  // hotkey_mod bits
     std::uint32_t virtual_key = 0;  // Win32 VK_* code
@@ -35,7 +45,8 @@ struct HotkeyParseResult {
 //  - F12 without a modifier: Windows reserves it for debuggers
 //  - Ctrl+Pause: the keyboard sends Break (VK_CANCEL) instead of Pause
 //  - Shift+NumpadN: with NumLock on, Shift turns numpad keys into Home/End/arrows
-HotkeyParseResult parse_hotkey(std::string_view text);
+// A Held key also accepts plain letters, digits, Space, F12 and Mouse4/Mouse5.
+HotkeyParseResult parse_hotkey(std::string_view text, HotkeyUse use = HotkeyUse::Global);
 
 // Canonical form, e.g. "Ctrl+Alt+F8". Modifiers always in the order Ctrl, Alt, Shift, Win.
 std::string hotkey_to_string(const Hotkey& hotkey);

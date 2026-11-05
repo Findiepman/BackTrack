@@ -24,14 +24,22 @@ struct Settings {
     int delete_after_days = 0;  // 0 = never
     // [hotkey]
     std::string save_hotkey = "F8";  // always a string parse_hotkey accepts
+    std::string mic_mute_hotkey = "Ctrl+Shift+M";  // empty: no mute key; else a Global hotkey
+    std::string push_to_talk_key = "V";  // a Held key (parse_hotkey with HotkeyUse::Held)
     // [video]
     int monitor = 0;
     int fps = 60;
     int video_bitrate_kbps = 20000;
     EncoderPreference encoder = EncoderPreference::Auto;
     // [audio]
-    bool audio_enabled = true;
+    bool audio_enabled = true;  // what you hear (game, voice chat, music)
     int audio_bitrate_kbps = 160;
+    int system_volume = 100;  // percent, 0..200, of what you hear in the clip
+    bool mic_enabled = true;
+    std::string mic_device;  // Windows endpoint id; empty: the Windows default microphone (followed when it changes)
+    int mic_volume = 100;  // percent, 0..200
+    bool noise_suppression = true;
+    bool push_to_talk = false;  // the mic is only recorded while push_to_talk_key is held
     // [feedback]
     bool sound = true;
     bool notification = true;

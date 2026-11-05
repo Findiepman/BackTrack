@@ -346,6 +346,14 @@ Settings non_default_settings() {
     s.encoder = EncoderPreference::Software;
     s.audio_enabled = false;
     s.audio_bitrate_kbps = 192;
+    s.system_volume = 35;
+    s.mic_enabled = false;
+    s.mic_device = "{0.0.1.00000000}.{6c1a3b0e-1111-4c44-9d9d-0123456789ab}";
+    s.mic_volume = 180;
+    s.noise_suppression = false;
+    s.push_to_talk = true;
+    s.mic_mute_hotkey = "";
+    s.push_to_talk_key = "Mouse4";
     s.sound = false;
     s.notification = false;
     s.saved_bar = false;
@@ -462,7 +470,12 @@ void writer_duplicates_and_missing() {
     CHECK_EQ(load_settings(dup).settings.clip_seconds, 60);
     // Repeated section: the later block holds the key load_settings uses.
     const std::string sections = update_ini("[clip]\nseconds = 20\n[audio]\n[clip]\nseconds = 40\n", s);
-    CHECK(sections.starts_with("[clip]\nseconds = 20\n[audio]\nenabled = true\nbitrate_kbps = 160\n[clip]\nseconds = 60\n"));
+    CHECK(sections.starts_with("[clip]\nseconds = 20\n[audio]\nenabled = true\nbitrate_kbps = 160\nsystem_volume = 100\n"
+                               "mic = true\nmic_device = \nmic_volume = 100\nnoise_suppression = true\n"
+                               "push_to_talk = false\n[clip]\nseconds = 60\n"));
+    if (!sections.starts_with("[clip]\nseconds = 20\n[audio]\nenabled = true\nbitrate_kbps = 160\nsystem_volume = 100\n")) {
+        std::printf("    written:\n%s\n", sections.c_str());
+    }
 
     // Missing section appended at the end with its keys; empty header gets keys below it.
     const std::string missing = update_ini("[storage]\n\n[logging]\nlevel = debug\n", s);
@@ -513,7 +526,34 @@ void writer_quotes_strings() {
 
 }  // namespace
 
+void mic_settings() {
+    // Defaults: the mic is on, mixed in, with noise suppression, no push-to-talk.
+    const Settings d{};
+    CHECK(d.mic_enabled && d.noise_suppression && !d.push_to_talk);
+    CHECK(d.mic_device.empty() && d.mic_volume == 100 && d.system_volume == 100);
+    CHECK(d.mic_mute_hotkey == "Ctrl+Shift+M" && d.push_to_talk_key == "V");
+
+    const LoadedSettings loaded = load_settings(
+        "[audio]\nmic = false\nmic_volume = 250\nsystem_volume = -5\nmic_device =\nnoise_suppression = maybe\n"
+        "[hotkey]\nmic_mute =\npush_to_talk = v\n");
+    CHECK(!loaded.settings.mic_enabled);
+    CHECK(loaded.settings.mic_volume == 200);  // clamped
+    CHECK(loaded.settings.system_volume == 0);
+    CHECK(loaded.settings.mic_device.empty());
+    CHECK(loaded.settings.noise_suppression);  // bad value keeps the default
+    CHECK(loaded.settings.mic_mute_hotkey.empty());  // empty: no mute key
+    CHECK(loaded.settings.push_to_talk_key == "V");  // a plain letter is fine for a held key
+    CHECK(loaded.warnings.size() == 3);
+
+    // A mute key must still be a valid global hotkey: a plain letter is refused, the default kept.
+    const LoadedSettings bad = load_settings("[hotkey]\nmic_mute = M\npush_to_talk = Ctrl+Ctrl\n");
+    CHECK(bad.settings.mic_mute_hotkey == "Ctrl+Shift+M");
+    CHECK(bad.settings.push_to_talk_key == "V");
+    CHECK(bad.warnings.size() == 2);
+}
+
 int main() {
+    mic_settings();
     empty_and_missing();
     default_file_is_clean();
     repository_ini_matches_built_in_default();

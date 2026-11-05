@@ -132,6 +132,8 @@ std::string modifier_name(std::uint32_t bit) {
 }
 
 std::string key_name(std::uint32_t vk) {
+    if (vk == kVkMouse4) return "Mouse4";
+    if (vk == kVkMouse5) return "Mouse5";
     if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
         return std::string(1, static_cast<char>(vk));
     }
@@ -155,7 +157,8 @@ HotkeyParseResult fail(std::string message) {
 
 }  // namespace
 
-HotkeyParseResult parse_hotkey(std::string_view text) {
+HotkeyParseResult parse_hotkey(std::string_view text, HotkeyUse use) {
+    const bool held = use == HotkeyUse::Held;
     const std::string_view whole = trim(text);
     if (whole.empty()) {
         return fail("the hotkey is empty");
@@ -186,7 +189,9 @@ HotkeyParseResult parse_hotkey(std::string_view text) {
             hotkey.modifiers |= *bit;
             continue;
         }
-        const auto vk = key_from_token(lower);
+        std::optional<std::uint32_t> vk = key_from_token(lower);
+        if (!vk && held && lower == "mouse4") vk = kVkMouse4;
+        if (!vk && held && lower == "mouse5") vk = kVkMouse5;
         if (!vk) {
             return fail(std::format("'{}' is not a key Backtrack knows. Use A-Z, 0-9, F1-F24, Numpad0-9, Home, End, "
                                     "Insert, Delete, PageUp, PageDown, Space, Pause or PrintScreen, "
@@ -204,11 +209,11 @@ HotkeyParseResult parse_hotkey(std::string_view text) {
     if (!key_token) {
         return fail(std::format("'{}' has only modifiers, add a key such as F8", whole));
     }
-    if (hotkey.modifiers == 0 && needs_modifier(hotkey.virtual_key)) {
+    if (!held && hotkey.modifiers == 0 && needs_modifier(hotkey.virtual_key)) {
         return fail(std::format("'{}' on its own would block that key in every program, add Ctrl, Alt, Shift or Win",
                                 *key_token));
     }
-    if (hotkey.modifiers == 0 && hotkey.virtual_key == kVkF12) {
+    if (!held && hotkey.modifiers == 0 && hotkey.virtual_key == kVkF12) {
         return fail("F12 on its own is reserved by Windows for debuggers, add Ctrl, Alt, Shift or Win");
     }
     if ((hotkey.modifiers & hotkey_mod::kCtrl) && hotkey.virtual_key == kVkPause) {
@@ -220,7 +225,7 @@ HotkeyParseResult parse_hotkey(std::string_view text) {
     }
 
     HotkeyParseResult result{hotkey, {}, {}};
-    if (hotkey.modifiers == 0 && hotkey.virtual_key == kVkPrintScreen) {
+    if (!held && hotkey.modifiers == 0 && hotkey.virtual_key == kVkPrintScreen) {
         result.warning = "PrintScreen on its own opens the Snipping Tool on Windows 11 unless that is turned off "
                          "in Settings > Accessibility > Keyboard";
     } else if (numpad) {

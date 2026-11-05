@@ -155,7 +155,26 @@ void reserved_combinations() {
 
 }  // namespace
 
+void held_keys() {
+    // Push-to-talk: watched, not taken, so any key works, the mouse side buttons too.
+    const auto v = parse_hotkey("v", HotkeyUse::Held);
+    CHECK(v.hotkey && v.hotkey->virtual_key == 'V' && v.hotkey->modifiers == 0);
+    CHECK(parse_hotkey("Space", HotkeyUse::Held).hotkey.has_value());
+    CHECK(parse_hotkey("F12", HotkeyUse::Held).hotkey.has_value());
+    const auto mouse = parse_hotkey("mouse5", HotkeyUse::Held);
+    CHECK(mouse.hotkey && mouse.hotkey->virtual_key == kVkMouse5);
+    CHECK(hotkey_to_string(*mouse.hotkey) == "Mouse5");
+    CHECK(parse_hotkey("Ctrl+Mouse4", HotkeyUse::Held).hotkey.has_value());
+    // Still refused as a global hotkey.
+    CHECK(!parse_hotkey("v").hotkey.has_value());
+    CHECK(!parse_hotkey("Mouse4").hotkey.has_value());
+    // What can never arrive stays refused either way.
+    CHECK(!parse_hotkey("Shift+Numpad5", HotkeyUse::Held).hotkey.has_value());
+    CHECK(!parse_hotkey("Ctrl+Pause", HotkeyUse::Held).hotkey.has_value());
+}
+
 int main() {
+    held_keys();
     every_letter_and_digit();
     every_function_key();
     every_numpad_key();

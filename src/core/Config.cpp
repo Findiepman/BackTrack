@@ -36,6 +36,7 @@ constexpr long long kMaxMonitorIndex = 1000;
 
 constexpr long long kMaxStorageGb = 100000;
 constexpr long long kMaxDeleteAfterDays = 3650;
+constexpr long long kMaxVolumePercent = 200;
 
 constexpr const char* kForbiddenFileNameChars = "<>:\"|?*";
 constexpr const char* kSafeStrftimeSpecifiers = "aAbBdHIjmMpSUwWyY%";
@@ -167,6 +168,10 @@ public:
             file_name();
         } else if (id == "hotkey.save") {
             hotkey();
+        } else if (id == "hotkey.mic_mute") {
+            other_hotkey(s_.mic_mute_hotkey, HotkeyUse::Global, true);
+        } else if (id == "hotkey.push_to_talk") {
+            other_hotkey(s_.push_to_talk_key, HotkeyUse::Held, false);
         } else if (id == "video.monitor") {
             clamped_int(s_.monitor, 0, kMaxMonitorIndex);
         } else if (id == "video.fps") {
@@ -179,6 +184,19 @@ public:
             boolean(s_.audio_enabled);
         } else if (id == "audio.bitrate_kbps") {
             snapped_int(s_.audio_bitrate_kbps, kAllowedAudioKbps);
+        } else if (id == "audio.system_volume") {
+            clamped_int(s_.system_volume, 0, kMaxVolumePercent);
+        } else if (id == "audio.mic") {
+            boolean(s_.mic_enabled);
+        } else if (id == "audio.mic_device") {
+            warn_if_comment_cut();
+            s_.mic_device = e_.value;  // empty is allowed: the Windows default
+        } else if (id == "audio.mic_volume") {
+            clamped_int(s_.mic_volume, 0, kMaxVolumePercent);
+        } else if (id == "audio.noise_suppression") {
+            boolean(s_.noise_suppression);
+        } else if (id == "audio.push_to_talk") {
+            boolean(s_.push_to_talk);
         } else if (id == "feedback.sound") {
             boolean(s_.sound);
         } else if (id == "feedback.notification") {
@@ -314,6 +332,21 @@ private:
         if (!parsed.warning.empty()) {
             warn(std::format("save = {}: {}", s_.save_hotkey, parsed.warning));
         }
+    }
+
+    // A second hotkey: empty may mean "none" (allow_empty), anything else must parse.
+    void other_hotkey(std::string& target, HotkeyUse use, bool allow_empty) {
+        if (allow_empty && trim(e_.value).empty()) {
+            target.clear();
+            return;
+        }
+        const HotkeyParseResult parsed = parse_hotkey(e_.value, use);
+        if (!parsed.hotkey) {
+            warn(std::format("{} = '{}': {}. Using {}", e_.key, e_.value, parsed.error,
+                             target.empty() ? std::string("none") : target));
+            return;
+        }
+        target = hotkey_to_string(*parsed.hotkey);
     }
 
     void encoder() {
@@ -466,6 +499,11 @@ delete_after_days = 0
 ; Insert, Delete, PageUp, PageDown, Space, Pause, PrintScreen.
 ; Letters, digits and Space need at least one modifier, for example Ctrl+Alt+C.
 save = F8
+; Mutes and unmutes the microphone in recordings. Empty: no key.
+mic_mute = Ctrl+Shift+M
+; Held down to record the microphone when push_to_talk is on. Any key works here
+; (letters too, and Mouse4/Mouse5 for the mouse side buttons): other programs still get it.
+push_to_talk = V
 
 [video]
 ; Which monitor to record, 0 is the primary monitor.
@@ -479,6 +517,18 @@ encoder = auto
 ; Record what you hear (the default playback device).
 enabled = true
 bitrate_kbps = 160
+; Volume of what you hear in the clip, in percent (0 to 200).
+system_volume = 100
+; Record the microphone, mixed into the same sound track.
+mic = true
+; Which microphone: empty is the Windows default (followed when it changes).
+mic_device =
+; Microphone volume in the clip, in percent (0 to 200).
+mic_volume = 100
+; Take out steady background noise (fans, hum) and quiet keyboard clicks from the microphone.
+noise_suppression = true
+; Only record the microphone while the push_to_talk key is held.
+push_to_talk = false
 
 [feedback]
 ; Play a sound when a clip is saved.
@@ -544,7 +594,7 @@ struct KnownKey {
 };
 
 // In the order of the default file, so appended keys and sections follow it.
-constexpr std::array<KnownKey, 17> kKnownKeys = {{
+constexpr std::array<KnownKey, 25> kKnownKeys = {{
     {"general", "start_minimized", [](const Settings& s) { return bool_text(s.start_minimized); }},
     {"clip", "seconds", [](const Settings& s) { return std::to_string(s.clip_seconds); }},
     {"clip", "output_dir", [](const Settings& s) { return encode_string(s.output_dir); }},
@@ -552,12 +602,20 @@ constexpr std::array<KnownKey, 17> kKnownKeys = {{
     {"storage", "max_gb", [](const Settings& s) { return std::to_string(s.max_gb); }},
     {"storage", "delete_after_days", [](const Settings& s) { return std::to_string(s.delete_after_days); }},
     {"hotkey", "save", [](const Settings& s) { return encode_string(s.save_hotkey); }},
+    {"hotkey", "mic_mute", [](const Settings& s) { return encode_string(s.mic_mute_hotkey); }},
+    {"hotkey", "push_to_talk", [](const Settings& s) { return encode_string(s.push_to_talk_key); }},
     {"video", "monitor", [](const Settings& s) { return std::to_string(s.monitor); }},
     {"video", "fps", [](const Settings& s) { return std::to_string(s.fps); }},
     {"video", "bitrate_kbps", [](const Settings& s) { return std::to_string(s.video_bitrate_kbps); }},
     {"video", "encoder", [](const Settings& s) { return std::string(encoder_name(s.encoder)); }},
     {"audio", "enabled", [](const Settings& s) { return bool_text(s.audio_enabled); }},
     {"audio", "bitrate_kbps", [](const Settings& s) { return std::to_string(s.audio_bitrate_kbps); }},
+    {"audio", "system_volume", [](const Settings& s) { return std::to_string(s.system_volume); }},
+    {"audio", "mic", [](const Settings& s) { return bool_text(s.mic_enabled); }},
+    {"audio", "mic_device", [](const Settings& s) { return encode_string(s.mic_device); }},
+    {"audio", "mic_volume", [](const Settings& s) { return std::to_string(s.mic_volume); }},
+    {"audio", "noise_suppression", [](const Settings& s) { return bool_text(s.noise_suppression); }},
+    {"audio", "push_to_talk", [](const Settings& s) { return bool_text(s.push_to_talk); }},
     {"feedback", "sound", [](const Settings& s) { return bool_text(s.sound); }},
     {"feedback", "notification", [](const Settings& s) { return bool_text(s.notification); }},
     {"feedback", "saved_bar", [](const Settings& s) { return bool_text(s.saved_bar); }},
