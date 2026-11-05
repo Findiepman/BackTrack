@@ -14,7 +14,8 @@
 //   - Capture thread (ScreenCapture): hands frames to the encoder under encoder_mutex_ and never
 //     waits for the supervisor; frames arriving while there is no encoder are counted and dropped.
 //   - Encoder threads: packets into the video buffer under stream_mutex_.
-//   - Audio thread (AudioCapture): packets into the audio buffer under stream_mutex_.
+//   - Audio thread (AudioCapture): packets into the audio buffer under stream_mutex_. It mixes in
+//     the microphone, which MicCapture records on a thread of its own.
 //   - Writer thread: writes saved clips one after another, then calls SavedCallback (§3.8).
 //
 // Locks: pipeline_mutex_ may be held while taking encoder_mutex_ or stream_mutex_; nothing ever
@@ -29,7 +30,9 @@
 
 #include "core/ClipBuffer.h"
 #include "core/Config.h"
+#include "core/Hotkey.h"
 #include "platform/AudioCapture.h"
+#include "platform/MicCapture.h"
 #include "platform/ClipWriter.h"
 #include "platform/ScreenCapture.h"
 #include "platform/VideoEncoder.h"
@@ -52,6 +55,17 @@ struct SaveResult {
     std::filesystem::path path;
     std::string message;  // one line for the user: what was saved, or why not
     double seconds = 0.0;
+};
+
+// The sound meters and the microphone's state for the UI. MicStatus is in platform/MicCapture.h
+// (Off, Starting, Recording, NoDevice, Blocked = Windows privacy settings, Failed), and so is
+// list_microphones() for the device list.
+struct AudioLevels {
+    float system = 0;  // peaks 0..1 after the volume
+    float mic = 0;  // after the volume and the gate
+    MicStatus mic_status = MicStatus::Off;
+    std::string mic_name;  // the microphone being recorded; empty before one was opened
+    bool mic_gate_open = false;  // not muted and (push-to-talk off or its key held)
 };
 
 // What the Record page shows about the replay buffer.
@@ -92,6 +106,15 @@ public:
     const std::filesystem::path& output_dir() const { return output_dir_; }
     // The configured clips folder could not be used and clips go to the Videos folder this run.
     bool output_dir_is_fallback() const { return output_dir_fallback_; }
+
+    // Sound. All live (no restart), from any thread. The initial values come from Settings;
+    // changing mic_enabled or mic_device needs a new Recorder. The mute is not saved anywhere.
+    AudioLevels audio_levels() const;
+    void set_volumes(int system_percent, int mic_percent);
+    void set_noise_suppression(bool on);
+    void set_mic_muted(bool muted);
+    bool mic_muted() const;
+    void set_push_to_talk(bool on, Hotkey key);
 
     // Test hook: behave as if Windows took the screen away (UAC prompt).
     void simulate_capture_loss();

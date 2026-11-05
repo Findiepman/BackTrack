@@ -45,6 +45,25 @@ constexpr ULONGLONG kSettleMs = 1000;
 // After a flush the first AAC packet may start up to two frames (priming) away from the input.
 constexpr Time100ns kAacFlushTolerance = 2 * kTicksPerSecond * kAacFrameSamples / kOutputRate;
 
+// Mixing. Gain changes (volume, mute, push-to-talk) ramp over 10 ms so they never click.
+constexpr std::uint32_t kGainRampFrames = kOutputRate / 100;
+// The meters fall by half every 150 ms after a peak, like a VU meter's peak hold.
+constexpr float kMeterHalfLifeFrames = kOutputRate * 0.15f;
+// 5.5 s of microphone at 48 kHz (1 MB): far more than the ~40 ms the FIFO holds while running.
+// The rest fills up while the loopback takes nothing (a device switch: up to the 2 s reopen delay
+// plus opening), and the gap fill afterwards puts that voice where it belongs instead of silence.
+constexpr std::size_t kMicFifoFrames = std::size_t{1} << 18;
+// Push-to-talk stays open this long after the key is let go: the voice reaches the mix a few tens
+// of milliseconds after it was spoken (microphone buffer, FIFO, noise suppression), and the end of
+// the last word must not be cut off.
+constexpr Time100ns kPushToTalkRelease = 200 * kTicksPerMillisecond;
+constexpr int kPercent = 100;
+constexpr int kMaxVolumePercent = 200;  // the settings' limit
+
+std::uint64_t pack_hotkey(const Hotkey& key) {
+    return static_cast<std::uint64_t>(key.modifiers) << 32 | key.virtual_key;
+}
+
 // PKEY_Device_FriendlyName, spelled out so the header's DEFINE_PROPERTYKEY needs no INITGUID.
 constexpr PROPERTYKEY kDeviceFriendlyName = {
     {0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 14};
@@ -157,8 +176,29 @@ private:
     HANDLE wake_;
 };
 
-AudioCapture::AudioCapture(int bitrate_kbps, Time100ns max_gap_fill, PacketCallback on_packet)
-    : on_packet_(std::move(on_packet)), max_gap_fill_(max_gap_fill) {
+AudioCapture::AudioCapture(int bitrate_kbps, Time100ns max_gap_fill, const AudioMixOptions& mix,
+                           PacketCallback on_packet)
+    : on_packet_(std::move(on_packet)),
+      max_gap_fill_(max_gap_fill),
+      system_sound_(mix.system_sound),
+      system_volume_(mix.system_volume),
+      mic_volume_(mix.mic_volume),
+      push_to_talk_(mix.push_to_talk),
+      push_to_talk_key_(pack_hotkey(mix.push_to_talk_key)),
+      // Start where the first block will want to be, so the recording does not fade in.
+      system_gain_(mix.system_sound ? static_cast<float>(mix.system_volume) / kPercent : 0.0f, kGainRampFrames),
+      mic_gain_(0.0f, kGainRampFrames),
+      system_meter_(kMeterHalfLifeFrames),
+      mic_meter_(kMeterHalfLifeFrames) {
+    if (mix.mic) {
+        mic_fifo_ = std::make_unique<AudioFifo>(kMicFifoFrames);
+        mic_ = std::make_unique<MicCapture>(mix.mic_device, mix.noise_suppression, *mic_fifo_);
+    }
+    mix_pcm_.reserve(static_cast<std::size_t>(kOutputRate) * kOutputChannels * kChunkMilliseconds / kMillisecondsPerSecond);
+    mix_mic_.reserve(static_cast<std::size_t>(kOutputRate) * kChunkMilliseconds / kMillisecondsPerSecond);
+    if (!system_sound_) {
+        log::info("Game sound is not recorded ([audio] enabled = false); the playback device only keeps the time");
+    }
     stop_event_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     BT_CHECK_WIN32(static_cast<bool>(stop_event_));
     wake_event_.reset(CreateEventW(nullptr, FALSE, FALSE, nullptr));
@@ -205,6 +245,9 @@ AudioCapture::~AudioCapture() {
 }
 
 void AudioCapture::start(Time100ns clock_offset) {
+    if (mic_) {
+        mic_->start();  // does nothing when it is running
+    }
     if (thread_.joinable()) {
         if (running_) {
             return;
@@ -219,12 +262,18 @@ void AudioCapture::start(Time100ns clock_offset) {
 }
 
 void AudioCapture::stop() {
-    if (!thread_.joinable()) {
-        return;
+    if (thread_.joinable()) {
+        SetEvent(stop_event_.get());
+        thread_.join();
     }
-    SetEvent(stop_event_.get());
-    thread_.join();
+    if (mic_) {
+        mic_->stop();
+    }
+    system_level_ = 0.0f;
+    mic_level_ = 0.0f;
+    mic_gate_open_ = false;
 }
+
 AudioStats AudioCapture::stats() const {
     AudioStats s;
     s.packets_out = counters_.packets_out;
@@ -232,7 +281,88 @@ AudioStats AudioCapture::stats() const {
     s.trimmed_ms = counters_.trimmed_ms;
     s.device_opens = counters_.device_opens;
     s.silent_packets = counters_.silent_packets;
+    if (mic_) {
+        s.mic = true;
+        s.mic_capture = mic_->stats();
+        s.mic_fifo = mic_fifo_->stats();
+    }
     return s;
+}
+
+void AudioCapture::set_volumes(int system_percent, int mic_percent) {
+    system_volume_ = std::clamp(system_percent, 0, kMaxVolumePercent);
+    mic_volume_ = std::clamp(mic_percent, 0, kMaxVolumePercent);
+}
+
+void AudioCapture::set_noise_suppression(bool on) {
+    if (mic_) {
+        mic_->set_noise_suppression(on);
+    }
+}
+
+void AudioCapture::set_push_to_talk(bool on, Hotkey key) {
+    push_to_talk_key_ = pack_hotkey(key);
+    push_to_talk_ = on;
+}
+
+bool AudioCapture::push_to_talk_open() {
+    const std::uint64_t key = push_to_talk_key_;
+    const auto virtual_key = static_cast<int>(key & 0xFFFFFFFFu);
+    const auto modifiers = static_cast<std::uint32_t>(key >> 32);
+    if (virtual_key == 0) {
+        return false;
+    }
+    // GetAsyncKeyState sees the key whichever program has the focus, the mouse side buttons too.
+    // More modifiers than asked for are fine: Shift+V still talks when the key is V.
+    const auto down = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
+    const bool held = down(virtual_key) && ((modifiers & hotkey_mod::kCtrl) == 0 || down(VK_CONTROL)) &&
+                      ((modifiers & hotkey_mod::kAlt) == 0 || down(VK_MENU)) &&
+                      ((modifiers & hotkey_mod::kShift) == 0 || down(VK_SHIFT)) &&
+                      ((modifiers & hotkey_mod::kWin) == 0 || down(VK_LWIN) || down(VK_RWIN));
+    const Time100ns now = qpc_now();
+    if (held) {
+        push_to_talk_was_held_ = true;
+        push_to_talk_released_at_ = now;
+        return true;
+    }
+    return push_to_talk_was_held_ && now - push_to_talk_released_at_ < kPushToTalkRelease;
+}
+
+void AudioCapture::mix(IMFSample* pcm) {
+    const bool gate = mic_ && !mic_muted_ && (!push_to_talk_ || push_to_talk_open());
+    mic_gate_open_ = gate;
+    system_gain_.set_target(system_sound_ ? static_cast<float>(system_volume_) / kPercent : 0.0f);
+    mic_gain_.set_target(gate ? static_cast<float>(mic_volume_) / kPercent : 0.0f);
+
+    ComPtr<IMFMediaBuffer> buffer;
+    BT_CHECK_HR(pcm->GetBufferByIndex(0, &buffer));
+    BYTE* bytes = nullptr;
+    DWORD length = 0;
+    BT_CHECK_HR(buffer->Lock(&bytes, nullptr, &length));
+    struct Unlock {
+        IMFMediaBuffer* buffer;
+        ~Unlock() { buffer->Unlock(); }
+    } unlock{buffer.Get()};
+    const std::size_t frames = length / kOutputBlockAlign;
+    if (frames == 0) {
+        return;
+    }
+    // Copied out and back rather than cast: the buffer is raw bytes from Media Foundation.
+    mix_pcm_.resize(frames * kOutputChannels);
+    std::memcpy(mix_pcm_.data(), bytes, frames * kOutputBlockAlign);
+    std::span<const float> voice;
+    if (mic_) {
+        // Pulled even while muted: the FIFO keeps moving, so unmuting plays what is said now.
+        mix_mic_.resize(frames);
+        mic_fifo_->pull(mix_mic_);
+        voice = mix_mic_;
+    }
+    const MixPeaks peaks = mix_block(mix_pcm_, voice, system_gain_, mic_gain_);
+    std::memcpy(bytes, mix_pcm_.data(), frames * kOutputBlockAlign);
+    system_meter_.add(peaks.system, frames);
+    mic_meter_.add(peaks.mic, frames);
+    system_level_ = system_meter_.level();
+    mic_level_ = mic_meter_.level();
 }
 
 void AudioCapture::thread_main() {
@@ -241,6 +371,10 @@ void AudioCapture::thread_main() {
     // the owner. Video keeps recording either way.
     try {
         ComApartment com(COINIT_MULTITHREADED);
+        if (mic_fifo_) {
+            // What the microphone said while this thread was stopped (paused) belongs to no clip.
+            mic_fifo_->reset_consumer();
+        }
         run_loop();
     } catch (const std::exception& e) {
         log::error("Sound recording stopped: {}", e.what());
@@ -249,6 +383,10 @@ void AudioCapture::thread_main() {
         log::error("Sound recording stopped: unknown exception");
         failed_ = true;
     }
+    // Nothing is mixed any more: the meters fall to zero instead of freezing on the last block.
+    system_level_ = 0.0f;
+    mic_level_ = 0.0f;
+    mic_gate_open_ = false;
     running_ = false;
 }
 
@@ -583,6 +721,11 @@ void AudioCapture::handle_packet(const BYTE* data, UINT32 frames, DWORD flags, U
         // documented; the first packet after it is checked against where the timeline is.
         aac_expected_after_flush_ = timeline();
         check_aac_after_flush_ = true;
+        if (mic_fifo_) {
+            // The microphone queued the start of the outage; the fill below is its end. That old
+            // voice would land minutes away from when it was said, so it goes.
+            mic_fifo_->reset_consumer();
+        }
         encode_pcm(nullptr, static_cast<UINT32>(static_cast<std::uint64_t>(max_gap_fill_) * device_rate_ / kTicksPerSecond));
         counters_.silence_inserted_ms += static_cast<std::uint64_t>(max_gap_fill_ / kTicksPerMillisecond);
     } else if (drift > kDriftTolerance) {
@@ -662,6 +805,7 @@ void AudioCapture::drain_resampler() {
         if (length == 0) {
             return;
         }
+        mix(output.Get());
         encode_aac(output.Get());
     }
 }

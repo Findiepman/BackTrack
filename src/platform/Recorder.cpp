@@ -167,15 +167,31 @@ Recorder::Recorder(const Settings& settings, const std::filesystem::path& app_di
     if (videos_folder() != output_dir_ && !name_prefix.empty()) {
         remove_stale_temp_files(videos_folder(), name_prefix);
     }
-    if (!settings_.audio_enabled) {
-        log::info("Sound recording is off ([audio] enabled = false)");
+    if (!settings_.audio_enabled && !settings_.mic_enabled) {
+        log::info("Sound recording is off ([audio] enabled = false, mic = false)");
         return;
     }
     try {
         // A gap in the sound is filled with silence as far back as the audio buffer reaches, so a
         // clip never contains a hole (one second more than the buffer, for rounding).
         const Time100ns max_gap_fill = seconds_to_100ns(settings_.clip_seconds + kAudioExtraSeconds + 1);
-        audio_ = std::make_unique<AudioCapture>(settings_.audio_bitrate_kbps, max_gap_fill,
+        AudioMixOptions mix;
+        mix.system_sound = settings_.audio_enabled;
+        mix.system_volume = settings_.system_volume;
+        mix.mic = settings_.mic_enabled;
+        mix.mic_device = to_wide(settings_.mic_device);
+        mix.mic_volume = settings_.mic_volume;
+        mix.noise_suppression = settings_.noise_suppression;
+        mix.push_to_talk = settings_.push_to_talk;
+        const HotkeyParseResult key = parse_hotkey(settings_.push_to_talk_key, HotkeyUse::Held);
+        if (key.hotkey) {
+            mix.push_to_talk_key = *key.hotkey;
+        } else if (settings_.push_to_talk) {
+            // Recording the microphone all the time would be the wrong surprise for push-to-talk.
+            log::warn("The push-to-talk key '{}' cannot be used ({}); the microphone stays off until it is fixed",
+                      settings_.push_to_talk_key, key.error);
+        }
+        audio_ = std::make_unique<AudioCapture>(settings_.audio_bitrate_kbps, max_gap_fill, mix,
                                                 [this](Packet&& packet) { on_audio_packet(std::move(packet)); });
         audio_type_ = audio_->output_type();
     } catch (const std::exception& e) {
@@ -389,8 +405,53 @@ std::string Recorder::status_text() const {
         encoder = encoder_->hardware() ? "hardware" : "software";
     }
     const bool sound = audio_ && audio_->recording();
-    return std::format("Recording {} s, {} fps, {}{}", settings_.clip_seconds, settings_.fps, encoder,
-                       sound ? "" : ", no sound");
+    const MicStatus mic = audio_ ? audio_->mic_status() : MicStatus::Off;
+    const char* mic_note = mic == MicStatus::Blocked    ? ", microphone blocked by Windows"
+                           : mic == MicStatus::NoDevice ? ", no microphone"
+                           : mic == MicStatus::Failed   ? ", microphone not working"
+                                                        : "";
+    return std::format("Recording {} s, {} fps, {}{}{}", settings_.clip_seconds, settings_.fps, encoder,
+                       sound ? "" : ", no sound", mic_note);
+}
+
+AudioLevels Recorder::audio_levels() const {
+    AudioLevels levels;
+    if (audio_) {
+        levels.system = audio_->system_level();
+        levels.mic = audio_->mic_level();
+        levels.mic_status = audio_->mic_status();
+        levels.mic_name = audio_->mic_name();
+        levels.mic_gate_open = audio_->mic_gate_open();
+    }
+    return levels;
+}
+
+void Recorder::set_volumes(int system_percent, int mic_percent) {
+    if (audio_) {
+        audio_->set_volumes(system_percent, mic_percent);
+    }
+}
+
+void Recorder::set_noise_suppression(bool on) {
+    if (audio_) {
+        audio_->set_noise_suppression(on);
+    }
+}
+
+void Recorder::set_mic_muted(bool muted) {
+    if (audio_) {
+        audio_->set_mic_muted(muted);
+    }
+}
+
+bool Recorder::mic_muted() const {
+    return audio_ && audio_->mic_muted();
+}
+
+void Recorder::set_push_to_talk(bool on, Hotkey key) {
+    if (audio_) {
+        audio_->set_push_to_talk(on, key);
+    }
 }
 
 void Recorder::simulate_capture_loss() {
@@ -694,6 +755,16 @@ void Recorder::log_counters() {
         const AudioStats a = audio_->stats();
         log::debug("Sound: {} packets, {} ms silence filled in, {} ms trimmed, {} silent packets, device opened {} times",
                    a.packets_out, a.silence_inserted_ms, a.trimmed_ms, a.silent_packets, a.device_opens);
+        if (a.mic) {
+            constexpr double kFramesPerMs = 48.0;
+            log::debug("Microphone: {} packets, opened {} times; mix: headroom {:.1f} ms, {} dropouts ({:.0f} ms), "
+                       "{:.0f} ms dropped at once, {:.1f} ms caught up by resampling, {:.0f} ms overflowed",
+                       a.mic_capture.packets, a.mic_capture.device_opens, a.mic_fifo.headroom_frames / kFramesPerMs,
+                       a.mic_fifo.underflows, static_cast<double>(a.mic_fifo.underflow_frames) / kFramesPerMs,
+                       static_cast<double>(a.mic_fifo.dropped_frames) / kFramesPerMs,
+                       static_cast<double>(a.mic_fifo.corrected_frames) / kFramesPerMs,
+                       static_cast<double>(a.mic_fifo.overflow_frames) / kFramesPerMs);
+        }
     }
     ClipBufferStats v;
     ClipBufferStats a;

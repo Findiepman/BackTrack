@@ -32,6 +32,10 @@ add_library(backtrack_core STATIC
     src/core/Json.cpp
     src/core/Library.cpp
     src/core/TrimPlan.cpp
+    src/core/AudioFifo.cpp
+    src/core/AudioMix.cpp
+    src/core/Fft.cpp
+    src/core/NoiseSuppressor.cpp
 )
 target_include_directories(backtrack_core PUBLIC src)
 target_link_libraries(backtrack_core PUBLIC bt_options)
@@ -45,6 +49,7 @@ add_executable(backtrack WIN32
     src/platform/ScreenCapture.cpp
     src/platform/VideoEncoder.cpp
     src/platform/AudioCapture.cpp
+    src/platform/MicCapture.cpp
     src/platform/ClipWriter.cpp
     src/platform/Recorder.cpp
     src/platform/MediaProbe.cpp
@@ -91,8 +96,17 @@ add_executable(media_check tools/media_check.cpp src/platform/Log.cpp src/platfo
 target_include_directories(media_check PRIVATE src)
 target_link_libraries(media_check PRIVATE backtrack_core mfplat mfuuid mfreadwrite ole32 propsys)
 
+# Development tool: the recording engine without the window and its single-instance lock, to check
+# sound and picture while Backtrack itself runs (tools/record_check.cpp). Not shipped.
+add_executable(record_check tools/record_check.cpp src/platform/Log.cpp src/platform/ScreenCapture.cpp
+               src/platform/VideoEncoder.cpp src/platform/AudioCapture.cpp src/platform/MicCapture.cpp
+               src/platform/ClipWriter.cpp src/platform/Recorder.cpp)
+target_include_directories(record_check PRIVATE src)
+target_link_libraries(record_check PRIVATE backtrack_core d3d11 dxgi mfplat mfuuid mfreadwrite winmm avrt
+                      wmcodecdspuuid shell32 ole32 propsys)
+
 enable_testing()
-foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests TrimPlanTests)
+foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests TrimPlanTests AudioFifoTests AudioMixTests NoiseSuppressorTests)
     add_executable(${test_name} tests/${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE backtrack_core)
     target_compile_definitions(${test_name} PRIVATE BT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

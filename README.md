@@ -82,6 +82,14 @@ file is never overwritten.
 - Sound is what you hear on the default playback device. Switching the default device (plugging in
   a headset) is picked up automatically. Bluetooth headphones are fine: their playback delay is
   taken out, so sound and picture stay in sync in the clip.
+- The microphone is mixed into the same sound track. Your voice is in the clip about 50 ms after
+  you said it (the microphone's own buffer, noise suppression and the step that keeps the two sound
+  cards in step); that stays the same however long Backtrack runs. While the microphone is
+  recorded, Windows shows its microphone icon in the taskbar; pausing stops it. If Windows' privacy
+  settings do not let desktop apps use the microphone (Settings > Privacy & security > Microphone),
+  the status says so, and the microphone is used as soon as that is turned on.
+- The microphone is timed by your playback device. When nothing at all can play sound (no
+  speakers or headphones), the microphone is not recorded either.
 - The "saved" sound (and the error sound when a save is refused) plays on your speakers, so the
   next clip that overlaps that moment contains it, like anything else you hear. `sound = false`
   turns it off.
@@ -148,8 +156,14 @@ and the tray menu still work.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` | Record what you hear. `false` saves clips without sound. |
+| `enabled` | `true` | Record what you hear. `false` leaves it out of clips (with `mic = false` too, clips have no sound). |
 | `bitrate_kbps` | `160` | Sound quality: 96, 128, 160 or 192. Others are rounded to the nearest. |
+| `system_volume` | `100` | Volume of what you hear in the clip, 0 to 200 percent. |
+| `mic` | `true` | Record the microphone, mixed into the same sound track. |
+| `mic_device` | empty | Which microphone (a Windows device id; the Settings page fills it in). Empty is the Windows default microphone, followed when it changes. A chosen microphone that is not connected is replaced by the default until it is. |
+| `mic_volume` | `100` | Volume of the microphone in the clip, 0 to 200 percent. |
+| `noise_suppression` | `true` | Take steady background noise (fans, hum, hiss) out of the microphone and soften key clicks between words. |
+| `push_to_talk` | `false` | Only record the microphone while the `[hotkey] push_to_talk` key is held (and 0.2 s after, so the last word is not cut off). |
 
 ### `[feedback]`
 
@@ -192,6 +206,11 @@ tests\run-tests.bat
 `--pause-after <s>`, `--resume-after <s>`, `--lose-capture-every <s>` (pretends Windows took the
 screen away, as a UAC prompt does), `--exit-after <s>` and `--hidden` (start in the tray).
 
+`build\Release\record_check.exe <backtrack.ini> <log file> <save after s> <exit after s>` runs
+the same recording engine without the window, prints the sound meters and the microphone's state
+every second and saves one clip to the ini's `output_dir`. It has no single-instance lock, so it
+also works while Backtrack itself is running.
+
 ### Checking sound/picture sync
 
 `build\Release\sync_beacon.exe <seconds>` shows a square in the top-left corner of the primary
@@ -203,14 +222,19 @@ offset between each flash and beep in the clip.
 
 Screen frames are captured on a fixed tick (a static screen still produces every frame), converted
 to NV12 on the GPU and encoded to H.264 with one keyframe per second and no B-frames. Sound is
-captured from the default playback device, resampled to 48 kHz and encoded to AAC. Both streams of
-compressed packets go into ring buffers in memory that always start on a keyframe. Saving copies
+captured from the default playback device, resampled to 48 kHz and encoded to AAC. The microphone
+is recorded on its own thread, resampled to 48 kHz, cleaned by a noise suppressor (short-time
+Fourier transform, a noise floor per frequency found from its quiet moments, Wiener gain) and
+mixed into the game sound just before the AAC encoder, through a small buffer that keeps the two
+sound cards' clocks in step by stretching or squeezing the voice by a fraction of a percent. Both
+streams of compressed packets go into ring buffers in memory that always start on a keyframe. Saving copies
 the last `seconds` out of the buffers in a few milliseconds and writes them to an MP4 on a separate
 thread without re-encoding, under a `.tmp` name that is renamed when complete. Every timestamp
 comes from one clock, so sound and picture stay in sync however long Backtrack runs.
 
 Code layout: `src/core` is plain C++ with unit tests (settings, hotkeys, ring buffer, clip
-planning, the clip library and its JSON file); `src/platform` is everything that talks to Windows;
+planning, the clip library and its JSON file, the microphone's buffer, mixer and noise
+suppressor); `src/platform` is everything that talks to Windows;
 `src/platform/Recorder.h` is the engine the window drives; `src/ui` is the window, drawn with
 Direct2D and DirectWrite on a Direct3D 11 swap chain (part of Windows, nothing to install). The
 clip page plays clips with Windows' Media Foundation media engine on the same graphics device, so
