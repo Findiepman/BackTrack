@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>Backtrack - hand-drawn stopwatch sticker</title>
+  <path d="M130 14 C190 10 244 50 242 120 C240 190 196 244 126 242 C58 240 12 196 14 128 C16 62 62 18 130 14 Z" fill="#1f3a3d" transform="translate(6 7)"/>
+  <path d="M130 14 C190 10 244 50 242 120 C240 190 196 244 126 242 C58 240 12 196 14 128 C16 62 62 18 130 14 Z" fill="#ffc94a"/>
+  <g stroke="#1f3a3d" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M128 62 C170 58 200 90 198 130 C196 172 164 198 126 196 C86 194 58 164 60 124 C62 88 90 64 128 62 Z" fill="#fff3d6"/>
+    <path d="M128 128 L128 68 A60 60 0 0 0 128 188 Z" fill="#ff7a59" stroke="none"/>
+    <path d="M112 42 Q128 32 146 43 M128 62 L128 46 M178 72 L188 62" fill="none"/>
+    <path d="M118 172 L136 186 L117 200" fill="none" stroke-width="8"/>
+    <path d="M128 128 L128 72 M128 128 L151 104" fill="none"/>
+  </g>
+  <circle cx="128" cy="128" r="7" fill="#1f3a3d"/>
+</svg>

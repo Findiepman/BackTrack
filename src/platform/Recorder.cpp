@@ -346,6 +346,20 @@ bool Recorder::save_clip(std::string& reason) {
     return true;
 }
 
+BufferStatus Recorder::buffer_status() {
+    BufferStatus status;
+    const ClipBufferStats video = video_buffer_.stats();
+    const ClipBufferStats audio = audio_buffer_.stats();
+    status.bytes = video.bytes + audio.bytes;
+    if (video.packets > 0 && video.newest_pts > video.oldest_pts) {
+        status.seconds = static_cast<double>(video.newest_pts - video.oldest_pts) / 1e7;
+    }
+    std::lock_guard lock(encoder_mutex_);
+    status.encoder_running = encoder_ != nullptr;
+    status.hardware_encoder = encoder_ != nullptr && encoder_->hardware();
+    return status;
+}
+
 std::string Recorder::status_text() const {
     if (supervisor_dead_ || writer_dead_) {
         return "Not working: internal error, see backtrack.log";

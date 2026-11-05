@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>Backtrack - esports B shield</title>
+  <path d="M128 8 L236 40 V168 L128 248 L20 168 V40 Z" fill="#ff2e4d"/>
+  <path d="M128 22 L222 49 V162 L128 232 L34 162 V49 Z" fill="#0b0b12"/>
+  <path fill-rule="evenodd" fill="#ff2e4d" transform="translate(9 9)" d="M76 50 H150 L176 70 V104 L160 118 L182 134 V158 L156 174 H76 Z M102 72 V102 H144 L150 96 V78 L144 72 Z M102 124 V152 H148 L156 146 V130 L148 124 Z"/>
+  <path fill-rule="evenodd" fill="#f5ff3b" d="M76 50 H150 L176 70 V104 L160 118 L182 134 V158 L156 174 H76 Z M102 72 V102 H144 L150 96 V78 L144 72 Z M102 124 V152 H148 L156 146 V130 L148 124 Z"/>
+  <g fill="#f5ff3b"><path d="M128 190 V212 L108 201 Z"/><path d="M152 190 V212 L132 201 Z"/></g>
+</svg>

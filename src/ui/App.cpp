@@ -4,6 +4,7 @@
 #include "platform/Log.h"
 #include "platform/Shell.h"
 #include "platform/Text.h"
+#include "ui/AppIds.h"
 #include "ui/Icon.h"
 #include "ui/Theme.h"
 
@@ -25,15 +26,14 @@ namespace {
 namespace fs = std::filesystem;
 using namespace theme;
 
-constexpr UINT kMsgSaved = WM_APP + 2;
-constexpr UINT kMsgProbe = WM_APP + 3;
-constexpr UINT kMsgTray = WM_APP + 4;
-constexpr UINT_PTR kTickTimer = 1;
-constexpr UINT kTickMs = 1000;
+using namespace ids;
 constexpr int kHotkeyId = 1;
 constexpr UINT kTrayId = 1;
 constexpr int kSearchBoxId = 101;
 constexpr int kEditBoxId = 102;
+constexpr int kNotesBoxId = 103;
+constexpr int kTagBoxId = 104;
+constexpr int kSettingsSearchId = 105;
 
 constexpr auto kScanInterval = std::chrono::seconds(3);
 constexpr auto kCleanupInterval = std::chrono::hours(1);
@@ -46,14 +46,9 @@ constexpr float kStartHeight = 800.0f;
 constexpr std::size_t kMaxBitmaps = 240;  // thumbnails kept on the GPU (~80 MB at 384x216)
 constexpr auto kNoticeTime = std::chrono::seconds(8);
 
-// Menu command ids.
+// Tray menu command ids (the tray menu is the one Windows menu left: it opens outside the window).
 enum MenuId : UINT {
-    kMenuOpen = 1, kMenuShowInFolder, kMenuFavorite, kMenuRename, kMenuTrash, kMenuRestore, kMenuDeleteNow,
-    kMenuNewCollectionFor, kMenuCollectionBase = 1000,  // + index into collections
-    kMenuRenameCollection = 2000, kMenuDeleteCollection,
-    kMenuSortBase = 3000,  // + ClipSort
     kTrayOpen = 4000, kTraySave, kTrayPause, kTrayFolder, kTraySettings, kTrayLog, kTrayQuit,
-    kMenuMoreCollectionsBase = 5000,  // + index into collections
 };
 
 struct SortName {
@@ -70,6 +65,11 @@ const wchar_t* sort_label(ClipSort sort) {
         if (s.sort == sort) return s.label;
     }
     return L"Newest";
+}
+
+COLORREF colorref(Color c) {
+    return RGB(static_cast<int>(std::lround(c.r * 255)), static_cast<int>(std::lround(c.g * 255)),
+               static_cast<int>(std::lround(c.b * 255)));
 }
 
 std::string path_text(const fs::path& path) {
@@ -151,6 +151,11 @@ void SavedInbox::attach(HWND window) {
 }
 
 void SavedInbox::push(const SaveResult& result) {
+    // §8: without the window in front of a fullscreen game, sound is the only feedback: the
+    // "asterisk" for a saved clip, the "critical stop" for a failed one.
+    if (sound_) {
+        PlaySoundW(result.ok ? L"SystemAsterisk" : L"SystemHand", nullptr, SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
+    }
     std::lock_guard lock(mutex_);
     results_.push_back(result);
     if (window_ != nullptr) {
@@ -166,8 +171,8 @@ std::vector<SaveResult> SavedInbox::take() {
 // ---------------------------------------------------------------------------------------------
 // Window
 
-App::App(const Settings& settings, const AppPaths& paths, Recorder& recorder, SavedInbox& inbox)
-    : settings_(settings), paths_(paths), recorder_(recorder), inbox_(inbox) {
+App::App(const Settings& settings, const AppPaths& paths, RecorderFactory make_recorder, SavedInbox& inbox)
+    : settings_(settings), paths_(paths), make_recorder_(std::move(make_recorder)), inbox_(inbox) {
     try {
         construct();
     } catch (...) {
@@ -178,6 +183,12 @@ App::App(const Settings& settings, const AppPaths& paths, Recorder& recorder, Sa
 }
 
 void App::construct() {
+    inbox_.set_sound(settings_.sound);
+    recorder_ = make_recorder_(settings_);
+    recorder_->start();
+    recorder_settings_ = settings_;
+    worker_ = std::thread([this] { worker_main(); });
+
     taskbar_created_ = RegisterWindowMessageW(L"TaskbarCreated");
     show_message_ = RegisterWindowMessageW(kShowMessage);
 
@@ -202,6 +213,7 @@ void App::construct() {
                               CW_USEDEFAULT, CW_USEDEFAULT, static_cast<int>(kStartWidth),
                               static_cast<int>(kStartHeight), nullptr, nullptr, instance, this);
     BT_CHECK_WIN32(window_ != nullptr);
+    post_window_ = window_;
     graphics_ = std::make_unique<Graphics>(window_);
     const float scale = graphics_->scale();
     const MONITORINFO monitor = [this] {
@@ -231,13 +243,30 @@ void App::construct() {
     if (taskbar_created_ != 0) ChangeWindowMessageFilterEx(window_, taskbar_created_, MSGFLT_ALLOW, nullptr);
     if (show_message_ != 0) ChangeWindowMessageFilterEx(window_, show_message_, MSGFLT_ALLOW, nullptr);
 
-    edit_brush_ = CreateSolidBrush(RGB(0x1f, 0x23, 0x2c));
+    edit_brush_ = CreateSolidBrush(colorref(kRaise));
+    bg_brush_ = CreateSolidBrush(colorref(kBg));
+    card_brush_ = CreateSolidBrush(colorref(kCard));
+    field_brush_ = CreateSolidBrush(colorref(kInk.mix(kBg, 0.05f)));
     search_box_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 10, 10, window_,
                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSearchBoxId)), instance, nullptr);
     edit_box_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 10, 10, window_,
                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kEditBoxId)), instance, nullptr);
+    notes_box_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN, 0, 0,
+                                 10, 10, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kNotesBoxId)), instance,
+                                 nullptr);
+    tag_box_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 10, 10, window_,
+                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(kTagBoxId)), instance, nullptr);
+    settings_search_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 10, 10, window_,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsSearchId)), instance, nullptr);
     SetWindowSubclass(search_box_, edit_subclass, 1, 0);
     SetWindowSubclass(edit_box_, edit_subclass, 1, 0);
+    SetWindowSubclass(tag_box_, edit_subclass, 1, 0);
+    SetWindowSubclass(settings_search_, edit_subclass, 1, 0);
+    SendMessageW(tag_box_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Add tag"));
+    SendMessageW(tag_box_, EM_SETLIMITTEXT, 40, 0);
+    SendMessageW(notes_box_, EM_SETLIMITTEXT, 4000, 0);
+    SendMessageW(settings_search_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Search settings"));
+    SendMessageW(settings_search_, EM_SETLIMITTEXT, 60, 0);
     SendMessageW(search_box_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Search clips"));
     SendMessageW(search_box_, EM_SETLIMITTEXT, 200, 0);
     SendMessageW(edit_box_, EM_SETLIMITTEXT, 200, 0);
@@ -269,7 +298,71 @@ App::~App() {
     release();
 }
 
+void App::worker_main() {
+    // Trims and filmstrips use Media Foundation, which wants COM on the thread.
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    while (true) {
+        std::function<std::function<void()>()> job;
+        {
+            std::unique_lock lock(worker_mutex_);
+            worker_wake_.wait(lock, [this] { return stop_worker_ || !jobs_.empty(); });
+            if (jobs_.empty()) break;  // stopping, and nothing left to finish
+            job = std::move(jobs_.front());
+            jobs_.pop_front();
+        }
+        std::function<void()> then;
+        try {
+            then = job();
+        } catch (const std::exception& e) {
+            log::error("Background job failed: {}", e.what());
+        } catch (...) {
+            log::error("Background job failed");
+        }
+        std::lock_guard lock(worker_mutex_);
+        if (then) ui_tasks_.push_back(std::move(then));
+        const HWND target = post_window_.load();
+        if (target != nullptr && !stop_worker_) PostMessageW(target, kMsgWork, 0, 0);
+    }
+    if (SUCCEEDED(com)) CoUninitialize();
+}
+
+void App::run_in_background(std::function<std::function<void()>()> job) {
+    {
+        std::lock_guard lock(worker_mutex_);
+        if (stop_worker_) return;
+        jobs_.push_back(std::move(job));
+    }
+    worker_wake_.notify_one();
+}
+
+void App::run_ui_tasks() {
+    std::vector<std::function<void()>> tasks;
+    {
+        std::lock_guard lock(worker_mutex_);
+        tasks.swap(ui_tasks_);
+    }
+    for (auto& task : tasks) {
+        if (window_ == nullptr) return;  // closing: what they would update is gone
+        try {
+            task();  // one failing must not drop the others (a trim's "done" resets trimming_)
+        } catch (const std::exception& e) {
+            log::error("Finishing background work failed: {}", e.what());
+        }
+    }
+}
+
 void App::release() {
+    {
+        // A trim that is being written finishes (never a half file); queued jobs are dropped.
+        std::lock_guard lock(worker_mutex_);
+        stop_worker_ = true;
+        jobs_.clear();
+    }
+    worker_wake_.notify_one();
+    if (worker_.joinable()) worker_.join();
+    post_window_ = nullptr;
+    ui_tasks_.clear();
+    clip_view_.reset();  // the player decodes on the window's graphics device
     if (window_ != nullptr && IsWindow(window_)) {
         if (hotkey_registered_) UnregisterHotKey(window_, kHotkeyId);
         hotkey_registered_ = false;
@@ -279,12 +372,21 @@ void App::release() {
     probe_.reset();  // its thread posts to the window; stop it first
     if (window_ != nullptr && IsWindow(window_)) {
         KillTimer(window_, kTickTimer);
+        KillTimer(window_, kPlayerTimer);
         SetWindowLongPtrW(window_, GWLP_USERDATA, 0);  // DestroyWindow below goes to DefWindowProc
         DestroyWindow(window_);
     }
     window_ = nullptr;
     if (edit_font_ != nullptr) DeleteObject(edit_font_);
     if (edit_brush_ != nullptr) DeleteObject(edit_brush_);
+    if (bg_brush_ != nullptr) DeleteObject(bg_brush_);
+    if (card_brush_ != nullptr) DeleteObject(card_brush_);
+    if (field_brush_ != nullptr) DeleteObject(field_brush_);
+    if (title_font_ != nullptr) DeleteObject(title_font_);
+    bg_brush_ = nullptr;
+    card_brush_ = nullptr;
+    field_brush_ = nullptr;
+    title_font_ = nullptr;
     if (icon_big_ != nullptr) DestroyIcon(icon_big_);
     if (icon_small_ != nullptr) DestroyIcon(icon_small_);
     edit_font_ = nullptr;
@@ -292,14 +394,25 @@ void App::release() {
     icon_big_ = nullptr;
     icon_small_ = nullptr;
     UnregisterClassW(kWindowClass, GetModuleHandleW(nullptr));
+    graphics_.reset();
+    // Unwinding (an error): the recorder still finishes the clip it is writing.
+    recorder_.reset();
 }
 
 void App::finish() {
-    // After recorder.stop(): the clip that was still being written when Quit was chosen.
+    if (finished_) return;
+    finished_ = true;
+    if (recorder_->saving()) log::info("Finishing the clip that is being saved...");
+    recorder_->stop();  // §6: every queued clip is written before Backtrack ends
+    // The clip that was still being written when Quit was chosen goes into the library too.
+    take_saved();
+    save_library();
+}
+
+void App::take_saved() {
     for (const SaveResult& result : inbox_.take()) {
         on_saved(result);
     }
-    save_library();
 }
 
 void App::invalidate() {
@@ -309,11 +422,11 @@ void App::invalidate() {
 }
 
 void App::request_missing_info() {
-    if (recorder_.output_dir_is_fallback() || window_ == nullptr) return;
+    if (recorder_->output_dir_is_fallback() || window_ == nullptr) return;
     // Straight over the clips: find() per name would be quadratic with thousands of new clips.
     for (const ClipEntry& clip : library_.clips()) {
         if (clip.duration_s <= 0.0 && probing_.insert(probe_key(clip.file, clip.size_bytes)).second) {
-            probe_->request(recorder_.output_dir(), clip.file, clip.size_bytes, true);
+            probe_->request(recorder_->output_dir(), clip.file, clip.size_bytes, true);
         }
     }
 }
@@ -340,8 +453,14 @@ void App::show(int show_command) {
 }
 
 void App::quit() {
+    if (shell_busy_ || recycling_) {
+        // A folder move or a Recycle Bin call is waiting on this thread: quit once it returns.
+        quit_pending_ = true;
+        return;
+    }
     quitting_ = true;
     if (editing_) end_edit(true);
+    commit_clip_text();
     DestroyWindow(window_);
 }
 
@@ -364,6 +483,9 @@ LRESULT CALLBACK App::window_proc(HWND window, UINT message, WPARAM wparam, LPAR
     } catch (const std::exception& e) {
         // §9: an error in one click must not take the recorder down with it.
         log::error("Window error: {}", e.what());
+        return DefWindowProcW(window, message, wparam, lparam);
+    } catch (...) {
+        log::error("Window error");
         return DefWindowProcW(window, message, wparam, lparam);
     }
 }
@@ -454,6 +576,7 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
             graphics_->resize(LOWORD(lparam), HIWORD(lparam));
             layout_search_box();
             if (editing_) end_edit(true);
+            close_menu();
             invalidate();
             return 0;
         case WM_DPICHANGED: {
@@ -495,27 +618,39 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
             return 0;
         case WM_LBUTTONDOWN:
         case WM_RBUTTONDOWN:
+            cancel_hotkey_capture();  // clicking anywhere ends "press keys" (clicking the button starts it again)
             SetFocus(window_);
-            on_press(dip(GET_X_LPARAM(lparam)), dip(GET_Y_LPARAM(lparam)));
+            on_press(dip(GET_X_LPARAM(lparam)), dip(GET_Y_LPARAM(lparam)), message == WM_RBUTTONDOWN);
             return 0;
         case WM_LBUTTONUP: on_click(dip(GET_X_LPARAM(lparam)), dip(GET_Y_LPARAM(lparam)), false); return 0;
         case WM_RBUTTONUP: on_click(dip(GET_X_LPARAM(lparam)), dip(GET_Y_LPARAM(lparam)), true); return 0;
         case WM_CAPTURECHANGED:
-            if (reinterpret_cast<HWND>(lparam) != window_) pressed_.reset();
-            return 0;
-        case WM_MOUSEWHEEL: {
-            if (page_ == Page::Library) {
-                const float before = scroll_;
-                scroll_ = std::clamp(scroll_ - static_cast<float>(GET_WHEEL_DELTA_WPARAM(wparam)) / WHEEL_DELTA * kWheelStep,
-                                     0.0f, max_scroll_);
-                if (scroll_ != before) {
-                    if (editing_) end_edit(true);
-                    invalidate();
+            if (reinterpret_cast<HWND>(lparam) != window_) {
+                pressed_.reset();
+                if (dragging_) {
+                    const std::string id = *std::exchange(dragging_, std::nullopt);
+                    on_drag(id, -1.0f, true);  // ended without a position: keep where it is
                 }
             }
             return 0;
-        }
+        case WM_MOUSEWHEEL:
+            on_wheel(-static_cast<float>(GET_WHEEL_DELTA_WPARAM(wparam)) / WHEEL_DELTA * kWheelStep);
+            return 0;
+        case WM_SYSKEYDOWN:
+            if (capturing_hotkey_) {
+                capture_hotkey(wparam);  // Alt combinations and F10 arrive here
+                return 0;
+            }
+            break;
+        case WM_SYSCHAR:
+            if (capturing_hotkey_) return 0;  // no menu beep
+            break;
         case WM_KEYDOWN:
+            if (capturing_hotkey_) {
+                capture_hotkey(wparam);
+                return 0;
+            }
+            if (on_key(wparam)) return 0;
             if (wparam == 'K' && GetKeyState(VK_CONTROL) < 0) {
                 SetFocus(search_box_);
                 SendMessageW(search_box_, EM_SETSEL, 0, -1);
@@ -538,6 +673,7 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
         case WM_COMMAND: {
             const int id = LOWORD(wparam);
             const int code = HIWORD(wparam);
+            if (code == EN_SETFOCUS) cancel_hotkey_capture();  // typing goes to the box, not the hotkey
             if (id == kSearchBoxId && (code == EN_SETFOCUS || code == EN_KILLFOCUS)) {
                 invalidate();  // the box border shows focus
             } else if (id == kSearchBoxId && code == EN_CHANGE) {
@@ -553,20 +689,79 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
                 end_edit(code == IDOK);
             } else if (id == kEditBoxId && code == EN_KILLFOCUS) {
                 end_edit(true);
+            } else if (id == kNotesBoxId && code == EN_KILLFOCUS) {
+                commit_clip_text();
+            } else if (id == kTagBoxId && code == IDOK) {
+                run_clip("add-tag", Rect{});
+            } else if (id == kTagBoxId && code == IDCANCEL) {
+                SetWindowTextW(tag_box_, L"");
+                SetFocus(window_);
+            } else if (id == kTagBoxId && (code == EN_SETFOCUS || code == EN_KILLFOCUS)) {
+                invalidate();
+            } else if (id == kSettingsSearchId && code == EN_CHANGE) {
+                settings_query_ = to_utf8(window_text(settings_search_));
+                page_scroll_ = 0;
+                invalidate();
+            } else if (id == kSettingsSearchId && (code == EN_SETFOCUS || code == EN_KILLFOCUS)) {
+                invalidate();
+            } else if (id == kSettingsSearchId && code == IDCANCEL) {
+                SetWindowTextW(settings_search_, L"");
+                SetFocus(window_);
+            } else if (id == kSettingsSearchId && code == IDOK) {
+                SetFocus(window_);
             }
             return 0;
         }
         case WM_CTLCOLOREDIT: {
+            // Each box sits on a drawn background; its own must match it.
             const HDC dc = reinterpret_cast<HDC>(wparam);
-            SetTextColor(dc, RGB(0xe9, 0xec, 0xf2));
-            SetBkColor(dc, RGB(0x1f, 0x23, 0x2c));
-            return reinterpret_cast<LRESULT>(edit_brush_);
+            const HWND control = reinterpret_cast<HWND>(lparam);
+            SetTextColor(dc, colorref(kInk));
+            Color back = kRaise;
+            HBRUSH brush = edit_brush_;
+            if (control == notes_box_) {
+                back = kBg;
+                brush = bg_brush_;
+            } else if (control == tag_box_) {
+                back = kCard;
+                brush = card_brush_;
+            } else if (control == settings_search_) {
+                back = kInk.mix(kBg, 0.05f);
+                brush = field_brush_;
+            } else if (control == edit_box_ && page_ == Page::Clip) {
+                back = kBg;
+                brush = bg_brush_;
+            }
+            SetBkColor(dc, colorref(back));
+            return reinterpret_cast<LRESULT>(brush);
         }
+        case WM_DISPLAYCHANGE:
+            // A display was plugged in or out: the Record and Settings pages list them.
+            try {
+                monitors_ = list_monitors();
+            } catch (const std::exception& e) {
+                log::warn("Could not list the monitors: {}", e.what());
+            }
+            invalidate();
+            break;
         case WM_HOTKEY:
             if (wparam == kHotkeyId) save_clip();
             return 0;
         case WM_TIMER:
+            if (wparam == kPlayerTimer) {
+                tick_player();
+                return 0;
+            }
             if (wparam == kTickTimer) {
+                if (finished_) return 0;  // Windows is shutting down: everything has been stopped
+                // Not during a trim (the new recorder clears unfinished files in the clips folder),
+                // not while a shell operation waits on this thread.
+                if (restart_due_ && !trimming_ && !shell_busy_ && !recycling_ &&
+                    std::chrono::steady_clock::now() >= *restart_due_) {
+                    restart_recorder();
+                }
+                sample_load();
+                if (page_ == Page::Record) invalidate();  // buffer fill, load
                 refresh_status();
                 if (!tray_added_) add_tray_icon();  // NIM_ADD can time out while Explorer starts up
                 if (!notice_.empty() && std::chrono::steady_clock::now() >= notice_until_) {
@@ -587,9 +782,17 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
                 }
             }
             return 0;
-        case kMsgSaved:
-            for (const SaveResult& result : inbox_.take()) {
-                on_saved(result);
+        case kMsgSaved: take_saved(); return 0;
+        case kMsgWork: run_ui_tasks(); return 0;
+        case kMsgPlayer:
+            if (clip_view_ && clip_view_->player && lparam == clip_view_->player_tag &&
+                clip_view_->player->on_event(static_cast<DWORD>(wparam))) {
+                // The file's own length beats the library's rounded one, until a handle was moved.
+                if (!clip_view_->trim_touched && clip_view_->player->duration() > 0) {
+                    clip_view_->out = clip_view_->player->duration();
+                    clip_view_->in = 0;
+                }
+                invalidate();
             }
             return 0;
         case kMsgProbe: apply_media_results(); return 0;
@@ -606,9 +809,16 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
                 default: break;
             }
             return 0;
+        case WM_ACTIVATE:
+            if (LOWORD(wparam) == WA_INACTIVE) cancel_hotkey_capture();  // the key must work in the game
+            break;
         case WM_CLOSE:
             // §: the X hides; Instant Replay keeps running in the tray until "Quit".
+            cancel_hotkey_capture();
             if (editing_) end_edit(true);
+            commit_clip_text();
+            close_menu();
+            if (clip_view_ && clip_view_->player) clip_view_->player->pause();  // no sound from a hidden window
             ShowWindow(window_, SW_HIDE);
             if (!notified_hidden_ && settings_.notification && tray_added_) {
                 notified_hidden_ = true;
@@ -625,7 +835,7 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
             }
             return 0;
         case WM_QUERYENDSESSION:
-            if (recorder_.saving()) {
+            if (recorder_->saving()) {
                 ShutdownBlockReasonCreate(window_, L"Saving a clip");  // shown on the shutdown screen
             } else {
                 ShutdownBlockReasonDestroy(window_);
@@ -635,13 +845,16 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
             if (wparam != FALSE) {
                 log::info("Windows is shutting down or logging off");
                 if (editing_) end_edit(true);
-                recorder_.stop();  // §6: the clip being written is finished, never left half written
-                finish();  // the clip that was being written goes into the library too
+                commit_clip_text();
+                restart_due_.reset();  // already in backtrack.ini; the next start uses it
+                finish();  // §6: the clip being written is finished and goes into the library
             }
             ShutdownBlockReasonDestroy(window_);  // also when cancelled: a stale reason would show next time
             return 0;
         case WM_DESTROY:
             KillTimer(window_, kTickTimer);
+            KillTimer(window_, kPlayerTimer);
+            clip_view_.reset();
             if (hotkey_registered_) {
                 UnregisterHotKey(window_, kHotkeyId);
                 hotkey_registered_ = false;
@@ -656,6 +869,9 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
             window_ = nullptr;
             search_box_ = nullptr;
             edit_box_ = nullptr;
+            notes_box_ = nullptr;
+            tag_box_ = nullptr;
+            settings_search_ = nullptr;
             return DefWindowProcW(window, message, wparam, lparam);
         }
         default: break;
@@ -687,8 +903,8 @@ LRESULT App::hit_test(POINT screen) const {
         if (bottom) return HTBOTTOM;
         if (top) return HTTOP;
     }
-    if (y >= kTitleBar) {
-        return HTCLIENT;
+    if (y >= kTitleBar || menu_) {
+        return HTCLIENT;  // with a menu open, a click on the title bar only closes it
     }
     for (const Hit& hit : hits_) {
         if (hit.rect.y < kTitleBar && hit.rect.contains(x, y)) {
@@ -705,8 +921,9 @@ void App::update_edit_font() {
                                    CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     if (font != nullptr) {
         // The controls switch to the new font before the old one is deleted under them.
-        SendMessageW(search_box_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-        SendMessageW(edit_box_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        for (const HWND control : {search_box_, edit_box_, notes_box_, tag_box_, settings_search_}) {
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        }
         if (edit_font_ != nullptr) DeleteObject(edit_font_);
         edit_font_ = font;
     }
@@ -736,11 +953,11 @@ std::int64_t App::now_unix() const {
 }
 
 fs::path App::clip_path(const std::string& file) const {
-    return recorder_.output_dir() / to_wide(file);
+    return recorder_->output_dir() / to_wide(file);
 }
 
 bool App::clips_folder_available() {
-    if (!recorder_.output_dir_is_fallback()) return true;
+    if (!recorder_->output_dir_is_fallback()) return true;
     show_notice(L"The clips folder is not available (drive unplugged?). Restart Backtrack once it is back.");
     return false;
 }
@@ -837,12 +1054,15 @@ void App::save_library() {
 
 void App::scan_folder() {
     next_scan_ = std::chrono::steady_clock::now() + kScanInterval;
-    if (recorder_.output_dir_is_fallback()) {
+    if (shell_busy_) {
+        return;  // clips are being moved: a scan now would drop the ones already gone from the old folder
+    }
+    if (recorder_->output_dir_is_fallback()) {
         return;  // the real clips folder is not there this run: its library stays as it is
     }
     std::vector<FolderFile> files;
     WIN32_FIND_DATAW found{};
-    const fs::path pattern = recorder_.output_dir() / L"*.mp4";
+    const fs::path pattern = recorder_->output_dir() / L"*.mp4";
     const HANDLE find = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &found, FindExSearchNameMatch, nullptr,
                                          FIND_FIRST_EX_LARGE_FETCH);
     if (find == INVALID_HANDLE_VALUE) {
@@ -851,10 +1071,10 @@ void App::scan_folder() {
         // left alone rather than emptied.
         const DWORD error = GetLastError();
         std::error_code ec;
-        if (error != ERROR_FILE_NOT_FOUND || !fs::is_directory(recorder_.output_dir(), ec)) {
+        if (error != ERROR_FILE_NOT_FOUND || !fs::is_directory(recorder_->output_dir(), ec)) {
             static log::RateLimit limit(std::chrono::minutes(5));
             if (limit.allow()) {
-                log::warn("Cannot list the clips folder {}: {}", path_text(recorder_.output_dir()),
+                log::warn("Cannot list the clips folder {}: {}", path_text(recorder_->output_dir()),
                           hresult_text(HRESULT_FROM_WIN32(error)));
             }
             return;
@@ -879,6 +1099,7 @@ void App::scan_folder() {
     }
     if (library_.sync_with_folder(files)) {
         if (editing_) end_edit(true);  // the cards moved under the rename box
+        if (clip_view_ && library_.find(clip_view_->file) == nullptr) close_clip();  // deleted in Explorer
         save_library();
         request_missing_info();
         invalidate();
@@ -913,19 +1134,27 @@ void App::apply_media_results() {
 void App::run_cleanup() {
     // Never against the Videos fallback (a same-named file there is not the clip), never while
     // the library is not being saved, never while a recycle is already waiting.
-    if (recorder_.output_dir_is_fallback() || !library_writable_ || recycling_) return;
-    const CleanupPolicy policy{};  // the Storage settings page will fill this in
+    if (recorder_->output_dir_is_fallback() || !library_writable_ || recycling_ || shell_busy_) return;
+    const CleanupPolicy policy = cleanup_policy();
     std::vector<std::string> due = library_.due_for_removal(policy, now_unix());
     // A clip that could not be removed (in use, no Recycle Bin, the user said no) waits for the
     // next run instead of a warning or a question every hour.
     std::erase_if(due, [this](const std::string& file) { return cleanup_skipped_.contains(file); });
     if (due.empty()) return;
     if (editing_) end_edit(true);
+    if (clip_view_ && std::find(due.begin(), due.end(), clip_view_->file) != due.end()) {
+        close_clip();  // the player holds the file open
+        if (page_ == Page::Clip) set_page(Page::Library);
+    }
     std::vector<fs::path> paths;
     for (const std::string& file : due) paths.push_back(clip_path(file));
     recycling_ = true;
     const std::vector<fs::path> failed = shell::recycle(paths);
     recycling_ = false;
+    if (quit_pending_) {
+        quit();
+        return;
+    }
     if (editing_) end_edit(true);  // a rename started while waiting: the cards are about to move
     for (const std::string& file : due) {
         const fs::path path = clip_path(file);
@@ -948,7 +1177,7 @@ void App::on_saved(const SaveResult& result) {
     const std::string file = to_utf8(result.path.filename().wstring());
     std::error_code ec;
     const bool in_library =
-        !recorder_.output_dir_is_fallback() && fs::equivalent(result.path.parent_path(), recorder_.output_dir(), ec);
+        !recorder_->output_dir_is_fallback() && fs::equivalent(result.path.parent_path(), recorder_->output_dir(), ec);
     std::int64_t size = static_cast<std::int64_t>(fs::file_size(result.path, ec));
     if (ec) size = 0;
     if (in_library) {
@@ -957,26 +1186,27 @@ void App::on_saved(const SaveResult& result) {
         clip.created = now_unix();
         clip.size_bytes = size;
         clip.duration_s = result.seconds;
-        clip.source = std::format("Display {}", settings_.monitor + 1);
+        clip.source = std::format("Display {}", recorded_display() + 1);
         library_.add_saved_clip(clip);
         new_files_.insert(file);
         save_library();
         // Not after the window is gone (finish() at quit): it would only hold up the exit.
         if (window_ != nullptr && probing_.insert(probe_key(file, size)).second) {
-            probe_->request(recorder_.output_dir(), file, size, true);
+            probe_->request(recorder_->output_dir(), file, size, true);
         }
     } else {
         log::info("The clip went to {} because the clips folder was not available; it is not in the library",
                   path_text(result.path.parent_path()));
     }
     SavedBar bar;
+    bar.headline = "Saved";
     bar.file = in_library ? file : std::string{};
     bar.path = result.path;
     bar.title = in_library ? display_title(*library_.find(file)) : file;
-    bar.detail = std::format("Display {}, {}, {}", settings_.monitor + 1, format_duration(result.seconds),
+    bar.detail = std::format("Display {}, {}, {}", recorded_display() + 1, format_duration(result.seconds),
                              format_size(size));
     bar.at = std::chrono::steady_clock::now();
-    saved_bar_ = bar;
+    if (settings_.saved_bar) saved_bar_ = bar;
     notify_saved(result);
     refresh_status();
     invalidate();
@@ -986,8 +1216,9 @@ void App::on_saved(const SaveResult& result) {
 // Actions
 
 void App::save_clip() {
+    if (finished_) return;
     std::string reason;
-    if (recorder_.save_clip(reason)) {
+    if (recorder_->save_clip(reason)) {
         log::info("Saving the last {} seconds...", settings_.clip_seconds);
     } else {
         log::warn("{}", reason);
@@ -999,16 +1230,16 @@ void App::save_clip() {
 }
 
 void App::toggle_pause() {
-    if (recorder_.paused()) {
-        recorder_.resume();
+    if (recorder_->paused()) {
+        recorder_->resume();
     } else {
-        recorder_.pause();
+        recorder_->pause();
     }
     refresh_status();
 }
 
 void App::refresh_status() {
-    const std::string status = recorder_.status_text();
+    const std::string status = recorder_->status_text();
     if (status != status_) {
         status_ = status;
         if (tray_added_) {
@@ -1030,13 +1261,13 @@ void App::register_hotkey() {
     hotkey_registered_ =
         RegisterHotKey(window_, kHotkeyId, parsed.hotkey->modifiers | MOD_NOREPEAT, parsed.hotkey->virtual_key) != FALSE;
     if (!hotkey_registered_) {
-        log::warn("Cannot use {} as the hotkey: {}. Use the Save button, or pick another key in backtrack.ini",
+        log::warn("Cannot use {} as the hotkey: {}. Use the Save button, or pick another key in Settings > Hotkeys",
                   settings_.save_hotkey, hresult_text(HRESULT_FROM_WIN32(GetLastError())));
     }
 }
 
 void App::set_view(LibraryView view, std::string collection) {
-    page_ = Page::Library;
+    set_page(Page::Library);  // closes the clip page (its player and its file)
     view_ = view;
     view_collection_ = std::move(collection);
     scroll_ = 0;
@@ -1052,6 +1283,14 @@ LibraryQuery App::current_query() const {
     q.sort = sort_;
     q.now = now_unix();
     return q;
+}
+
+int App::recorded_display() const {
+    // An unplugged display records monitor 0 (ScreenCapture's fallback).
+    const int count = static_cast<int>(monitors_.size());
+    // What the running (or just stopped) recorder was made with, not a change still waiting to apply.
+    const int monitor = recorder_settings_.monitor;
+    return count == 0 || (monitor >= 0 && monitor < count) ? std::max(monitor, 0) : 0;
 }
 
 std::wstring App::view_title() const {
@@ -1108,9 +1347,9 @@ void App::tray_menu() {
     AppendMenuW(menu, MF_STRING, kTrayOpen, L"Open Backtrack");
     const std::wstring save = std::format(L"Save last {} s\t{}", settings_.clip_seconds, to_wide(settings_.save_hotkey));
     AppendMenuW(menu, MF_STRING, kTraySave, save.c_str());
-    AppendMenuW(menu, MF_STRING, kTrayPause, recorder_.paused() ? L"Resume Instant Replay" : L"Pause Instant Replay");
+    AppendMenuW(menu, MF_STRING, kTrayPause, recorder_->paused() ? L"Resume Instant Replay" : L"Pause Instant Replay");
     AppendMenuW(menu, MF_STRING, kTrayFolder, L"Open clips folder");
-    AppendMenuW(menu, MF_STRING, kTraySettings, L"Edit settings (backtrack.ini)");
+    AppendMenuW(menu, MF_STRING, kTraySettings, L"Settings");
     AppendMenuW(menu, MF_STRING, kTrayLog, L"Open log");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kTrayQuit, L"Quit Backtrack");
@@ -1129,10 +1368,11 @@ void App::tray_menu() {
             break;
         case kTraySave: save_clip(); break;
         case kTrayPause: toggle_pause(); break;
-        case kTrayFolder: shell::open(recorder_.output_dir()); break;
+        case kTrayFolder: shell::open(recorder_->output_dir()); break;
         case kTraySettings:
-            log::info("Restart Backtrack after editing the settings");
-            shell::open(paths_.ini);
+            show(SW_SHOW);
+            SetForegroundWindow(window_);
+            set_page(Page::Settings);
             break;
         case kTrayLog: shell::open(paths_.log); break;
         case kTrayQuit: quit(); break;
@@ -1159,14 +1399,6 @@ void App::notify_saved(const SaveResult& result) {
 // ---------------------------------------------------------------------------------------------
 // Painting
 
-void App::add_hit(const Rect& rect, Action action, std::string arg) {
-    hits_.push_back(Hit{rect, action, std::move(arg)});
-}
-
-bool App::hovered(Action action, std::string_view arg) const {
-    return hover_ && hover_->action == action && hover_->arg == arg;
-}
-
 void App::paint() {
     if (!graphics_->begin()) return;
     // EndDraw also when something below throws: a frame left open breaks every later one.
@@ -1192,36 +1424,54 @@ void App::paint() {
     }
 
     g.clear(kBg);
+    tracks_.clear();
+    for (auto& [control, place] : controls_) place.second = false;  // pages say again which are shown
     const Rect main{kSidebar, kTitleBar, w - kSidebar, h - kTitleBar};
     switch (page_) {
         case Page::Library: paint_library(main); break;
-        case Page::Record:
-            paint_placeholder_page(main, L"Record",
-                                   L"The Record page (displays, buffer length, performance) comes with the next update. "
-                                   L"Instant Replay is running: use the Save button or the hotkey.");
-            break;
+        case Page::Clip: paint_clip_page(main); break;
+        case Page::Record: paint_record_page(main); break;
         case Page::Uploads:
             paint_placeholder_page(main, L"Uploads",
                                    L"Sharing links and connected accounts are coming later. For now, Share shows the "
                                    L"clip in Explorer so you can drag it into Discord or anywhere else.");
             break;
-        case Page::Settings:
-            paint_placeholder_page(main, L"Settings",
-                                   L"The settings screen comes with the next update. Until then, settings are in "
-                                   L"backtrack.ini next to backtrack.exe (restart Backtrack after editing).");
-            break;
+        case Page::Settings: paint_settings_page(main); break;
     }
     paint_sidebar(h);
     paint_title_bar(w);
+    if (menu_) paint_menu(w, h);
     end_guard.done = true;
     g.end();
 
+    // The page's text boxes follow what was just drawn (they are child windows on top).
+    for (auto& [control, place] : controls_) {
+        const bool show = place.second && place.first.w > 4 && place.first.h > 4;
+        if (show) {
+            const float scale = g.scale();
+            RECT now{};
+            GetWindowRect(control, &now);
+            MapWindowPoints(nullptr, window_, reinterpret_cast<POINT*>(&now), 2);
+            const RECT want{static_cast<LONG>(std::lround(place.first.x * scale)),
+                            static_cast<LONG>(std::lround(place.first.y * scale)),
+                            static_cast<LONG>(std::lround(place.first.right() * scale)),
+                            static_cast<LONG>(std::lround(place.first.bottom() * scale))};
+            if (!EqualRect(&now, &want)) {
+                MoveWindow(control, want.left, want.top, want.right - want.left, want.bottom - want.top, TRUE);
+            }
+        }
+        if ((IsWindowVisible(control) != FALSE) != show) {
+            if (!show && GetFocus() == control) SetFocus(window_);
+            ShowWindow(control, show ? SW_SHOWNA : SW_HIDE);
+        }
+    }
+
     // Thumbnails the cards asked for while drawing, and GPU memory kept in check.
-    if (recorder_.output_dir_is_fallback()) to_request_.clear();
+    if (recorder_->output_dir_is_fallback()) to_request_.clear();
     for (const auto& [file, size] : to_request_) {
         // Also when already queued: on screen goes first (the queue may hold thousands at first start).
         probing_.insert(probe_key(file, size));
-        probe_->request(recorder_.output_dir(), file, size, false, true);
+        probe_->request(recorder_->output_dir(), file, size, false, true);
     }
     to_request_.clear();
     if (bitmap_use_.size() > kMaxBitmaps) {
@@ -1241,8 +1491,7 @@ void App::paint_title_bar(float width) {
     g.fill(Rect{0, kTitleBar - 1, width, 1}, kLine);
 
     // App mark and name.
-    g.fill_round(Rect{14, 12, 16, 16}, 4, kAccent);
-    g.icon(glyph::kAppMark, Rect{14, 12, 16, 16}, 10, kOnAccent);
+    g.logo(Rect{13, 11, 18, 18});
     g.text(L"Backtrack", Rect{38, 0, 120, kTitleBar}, TextStyle{12, Weight::Semibold}, kInk);
 
     // Search box (the edit control is a child window on top of it).
@@ -1273,7 +1522,7 @@ void App::paint_title_bar(float width) {
     add_hit(close_rect, Action::Close);
 
     // Replay pill: what Instant Replay is doing, at a glance. Click pauses or resumes.
-    const bool paused = recorder_.paused();
+    const bool paused = recorder_->paused();
     const bool trouble = !paused && !status_.starts_with("Recording") && !status_.starts_with("Saving");
     const std::wstring pill = paused    ? L"Replay paused"
                               : trouble ? L"Replay starting"
@@ -1287,48 +1536,6 @@ void App::paint_title_bar(float width) {
     g.fill_circle(pill_rect.x + 14, pill_rect.y + 13, 4, paused ? kOff : fg);
     g.text(pill, Rect{pill_rect.x + 25, pill_rect.y, pill_w - 25, pill_rect.h}, pill_style, fg);
     add_hit(pill_rect, Action::TogglePause, "pill");
-}
-
-float App::key_chip(float x, float y, std::wstring_view key) {
-    // kbd: 600 12px, min-width 26, height 24 (20 in small places), border with a 2px bottom.
-    Graphics& g = *graphics_;
-    const TextStyle style{11, Weight::Semibold};
-    const float w = std::max(22.0f, g.text_width(key, style) + 12);
-    const Rect r{x, y, w, 20};
-    g.fill_round(r, 5, kLine);
-    g.fill_round(Rect{r.x, r.y, r.w, r.h - 1.5f}, 5, kCard);
-    g.text(key, Rect{r.x, r.y, r.w, r.h - 1.5f}, style, kInk, Align::Center);
-    return x + w;
-}
-
-void App::nav_item(const Rect& rect, wchar_t glyph, std::wstring_view label, std::size_t count, bool selected,
-                   Action action, std::string arg, std::optional<Color> dot, bool soon) {
-    Graphics& g = *graphics_;
-    const bool hot = hovered(action, arg);
-    if (selected) {
-        g.fill_round(rect, kRadius, kAccent.with_alpha(0.15f));
-    } else if (hot) {
-        g.fill_round(rect, kRadius, kHover);
-    }
-    const Rect icon_rect{rect.x + 10, rect.y, 16, rect.h};
-    if (dot) {
-        g.fill_circle(icon_rect.x + 8, rect.y + rect.h / 2, 4.5f, *dot);
-    } else {
-        g.icon(glyph, icon_rect, 14, selected ? kAccent : kMute);
-    }
-    const Color ink = soon ? kMute : kInk;
-    const float right_w = soon ? 46.0f : 32.0f;
-    g.text(label, Rect{rect.x + 35, rect.y, rect.w - 35 - right_w, rect.h},
-           TextStyle{13, selected ? Weight::Semibold : Weight::Regular}, ink);
-    if (soon) {
-        const Rect badge{rect.right() - 44, rect.y + 8, 36, 16};
-        g.fill_round(badge, 8, kInk.with_alpha(0.07f));
-        g.text(L"Soon", badge, TextStyle{10, Weight::Semibold}, kMute, Align::Center);
-    } else if (count > 0) {
-        g.text(std::to_wstring(count), Rect{rect.right() - 40, rect.y, 30, rect.h}, TextStyle{12, Weight::Regular, false, true},
-               kMute, Align::End);
-    }
-    add_hit(rect, action, std::move(arg));
 }
 
 void App::paint_sidebar(float height) {
@@ -1430,7 +1637,7 @@ void App::paint_sidebar(float height) {
     // Instant Replay card.
     const float card_y = height - 12 - cards_h;
     const Rect replay{x, card_y, w, 66};
-    const bool paused = recorder_.paused();
+    const bool paused = recorder_->paused();
     const bool normal = status_.starts_with("Recording") || status_.starts_with("Saving");
     g.fill_round(replay, 10, kCard);
     g.stroke_round(replay, 10, kLine);
@@ -1458,42 +1665,66 @@ void App::paint_sidebar(float height) {
                                 TextStyle{15, Weight::Bold, false, true}, kInk);
     g.text(L" used", Rect{storage.x + 12 + used_w, storage.y + 10, storage.w - 24 - used_w, 22}, TextStyle{12}, kMute);
     const std::size_t total = counts.all + counts.trash;
-    if (recorder_.output_dir_is_fallback()) {
+    if (recorder_->output_dir_is_fallback()) {
         g.text(L"Clips folder missing: saving to Videos", Rect{storage.x + 12, storage.y + 38, storage.w - 24, 20},
                TextStyle{12}, kWarn);
     } else {
         g.text(std::format(L"{} {} in {}", total, total == 1 ? L"clip" : L"clips",
-                           recorder_.output_dir().filename().wstring()),
+                           recorder_->output_dir().filename().wstring()),
                Rect{storage.x + 12, storage.y + 38, storage.w - 24, 20}, TextStyle{12}, kMute);
     }
 }
 
 void App::paint_placeholder_page(const Rect& area, const wchar_t* title, const wchar_t* text) {
     Graphics& g = *graphics_;
-    g.text(title, Rect{area.x + kPad, area.y + 28, area.w - 2 * kPad, 30}, TextStyle{22, Weight::Semibold, true}, kInk);
-    g.paragraph(text, Rect{area.x + kPad, area.y + 66, std::min(area.w - 2 * kPad, 560.0f), 80}, TextStyle{13}, kMute);
+    g.text(title, Rect{area.x + kPad, area.y + 26, area.w - 2 * kPad, 38}, TextStyle{28, Weight::Bold, true}, kInk);
+    g.paragraph(text, Rect{area.x + kPad, area.y + 72, std::min(area.w - 2 * kPad, 560.0f), 80}, TextStyle{13.5f}, kMute);
 }
 
-void App::button(const Rect& rect, std::wstring_view label, wchar_t glyph, Action action, std::string arg, bool primary,
-                 bool danger) {
-    Graphics& g = *graphics_;
-    const bool hot = hovered(action, arg);
-    if (primary) {
-        g.fill_round(rect, kRadius, hot ? kAccent.mix(Color::hex(0xffffff), 0.9f) : kAccent);
-    } else if (hot) {
-        g.fill_round(rect, kRadius, danger ? kDanger.with_alpha(0.12f) : kHover);
+void App::place_control(HWND control, const Rect& rect, bool show) {
+    // Only when it is fully inside the visible page: a child window cannot be clipped by a drawn edge.
+    const bool inside = rect.y >= page_view_.y && rect.bottom() <= page_view_.bottom() && !menu_;
+    controls_[control] = {rect, show && inside};
+}
+
+void App::hide_page_controls() {
+    for (auto& [control, place] : controls_) {
+        place.second = false;
+        if (GetFocus() == control) SetFocus(window_);
+        ShowWindow(control, SW_HIDE);
     }
-    const Color fg = primary ? kOnAccent : danger ? kDanger : kInk;
-    const TextStyle style{13, Weight::Semibold};
-    const float text_w = label.empty() ? 0 : g.text_width(label, style);
-    const float content = (glyph != 0 ? 16 : 0) + (glyph != 0 && !label.empty() ? 6 : 0) + text_w;
-    float cx = rect.x + (rect.w - content) / 2;
-    if (glyph != 0) {
-        g.icon(glyph, Rect{cx, rect.y, 16, rect.h}, 13, fg);
-        cx += 16 + (label.empty() ? 0 : 6);
+}
+
+Rect App::begin_page(const Rect& area) {
+    page_view_ = area;
+    graphics_->push_clip(area);
+    return Rect{area.x, area.y - page_scroll_, area.w, area.h};
+}
+
+void App::end_page(const Rect& area, float content_bottom) {
+    graphics_->pop_clip();
+    const float content_h = content_bottom + page_scroll_ - area.y;
+    page_max_scroll_ = std::max(0.0f, content_h - area.h);
+    if (page_scroll_ > page_max_scroll_) {
+        page_scroll_ = page_max_scroll_;
+        invalidate();
     }
-    if (!label.empty()) g.text(label, Rect{cx, rect.y, text_w + 2, rect.h}, style, fg);
-    add_hit(rect, action, std::move(arg));
+    if (page_max_scroll_ > 0) {
+        const float track = area.h - 8;
+        const float thumb = std::max(30.0f, track * area.h / content_h);
+        const float pos = area.y + 4 + (track - thumb) * (page_scroll_ / page_max_scroll_);
+        graphics_->fill_round(Rect{area.right() - 6, pos, 3, thumb}, 1.5f, kInk.with_alpha(0.18f));
+    }
+    // Hits scrolled out of the page must not catch clicks through the title bar.
+    std::erase_if(hits_, [&area](const Hit& hit) {
+        return hit.rect.x >= area.x && (hit.rect.bottom() <= area.y || hit.rect.y >= area.bottom());
+    });
+    for (Hit& hit : hits_) {
+        if (hit.rect.x < area.x) continue;  // the sidebar
+        const float top = std::max(hit.rect.y, area.y);
+        const float bottom = std::min(hit.rect.bottom(), area.bottom());
+        hit.rect = Rect{hit.rect.x, top, hit.rect.w, bottom - top};
+    }
 }
 
 void App::paint_library(const Rect& area) {
@@ -1502,7 +1733,7 @@ void App::paint_library(const Rect& area) {
     // Top strip: Instant Replay state and the save shortcut (.st-top).
     const Rect top{area.x, area.y, area.w, kTopStrip};
     g.fill(Rect{top.x, top.bottom() - 1, top.w, 1}, kLine);
-    const bool paused = recorder_.paused();
+    const bool paused = recorder_->paused();
     g.fill_circle(top.x + 22, top.y + top.h / 2, 4, paused ? kOff : kAccent);
     const float status_w = g.text(paused ? L"Instant Replay paused" : L"Instant Replay on",
                                   Rect{top.x + 32, top.y, 200, top.h}, TextStyle{12.5f, Weight::Semibold},
@@ -1740,7 +1971,9 @@ void App::paint_saved_bar(const Rect& area) {
     }
 
     const auto age = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - bar.at).count();
-    const std::wstring saved = age < 60 ? std::format(L"Saved {}s ago", age) : std::format(L"Saved {}m ago", age / 60);
+    const std::wstring headline = to_wide(bar.headline);
+    const std::wstring saved = age < 60 ? std::format(L"{} {}s ago", headline, age)
+                                        : std::format(L"{} {}m ago", headline, age / 60);
     const float tx = thumb.right() + 16;
     // The buttons take what they need; the text gets the rest.
     const float buttons_w = 84 + 118 + 86 + 84 + 32 + 4 * 2;
@@ -1773,10 +2006,17 @@ void App::paint_saved_bar(const Rect& area) {
 void App::on_mouse_move(float x, float y) {
     mouse_x_ = x;
     mouse_y_ = y;
+    if (dragging_) {
+        const auto track = tracks_.find(*dragging_);
+        if (track != tracks_.end() && track->second.w > 0) {
+            on_drag(*dragging_, std::clamp((x - track->second.x) / track->second.w, 0.0f, 1.0f), false);
+        }
+        return;
+    }
     std::optional<Hit> now;
     for (auto it = hits_.rbegin(); it != hits_.rend(); ++it) {
         if (it->rect.contains(x, y)) {
-            if (it->action != Action::None) now = *it;
+            if (it->action != Action::None && it->action != Action::Disabled) now = *it;
             break;
         }
     }
@@ -1795,12 +2035,29 @@ std::optional<App::Hit> App::hit_at(float x, float y) const {
     return std::nullopt;
 }
 
-void App::on_press(float x, float y) {
+void App::on_press(float x, float y, bool right) {
     pressed_ = hit_at(x, y);
     SetCapture(window_);
+    if (pressed_ && pressed_->action == Action::Drag && !right) {
+        // Dragging starts on the press: the value jumps to where the track was pressed.
+        dragging_ = pressed_->arg;
+        pressed_.reset();
+        on_mouse_move(x, y);
+    }
 }
 
 void App::on_click(float x, float y, bool right) {
+    if (dragging_) {
+        const std::string id = *std::exchange(dragging_, std::nullopt);
+        if (GetCapture() == window_) ReleaseCapture();
+        const auto track = tracks_.find(id);
+        const float fraction = track != tracks_.end() && track->second.w > 0
+                                   ? std::clamp((x - track->second.x) / track->second.w, 0.0f, 1.0f)
+                                   : -1.0f;
+        on_drag(id, fraction, true);
+        on_mouse_move(x, y);
+        return;
+    }
     // Only a press and release on the same thing is a click: a release after dragging in from
     // elsewhere (or after a title-bar double-click maximised the window) does nothing.
     const std::optional<Hit> pressed = std::exchange(pressed_, std::nullopt);
@@ -1810,12 +2067,99 @@ void App::on_click(float x, float y, bool right) {
     if (right && editing_) end_edit(true);  // a menu action may move or remove what is being renamed
     POINT screen{static_cast<LONG>(x * graphics_->scale()), static_cast<LONG>(y * graphics_->scale())};
     ClientToScreen(window_, &screen);
+    // Right-click menus open where the mouse is.
+    if (right) {
+        mouse_x_ = x;
+        mouse_y_ = y;
+    }
     run(*hit, right, screen);
 }
 
+void App::on_wheel(float delta) {
+    if (menu_) {
+        menu_->scroll = std::max(0.0f, menu_->scroll + delta / 3);  // paint_menu clamps the end
+        hover_.reset();
+        invalidate();
+        return;
+    }
+    if (page_ == Page::Library) {
+        const float before = scroll_;
+        scroll_ = std::clamp(scroll_ + delta, 0.0f, max_scroll_);
+        if (scroll_ != before) {
+            if (editing_) end_edit(true);
+            invalidate();
+        }
+        return;
+    }
+    const float before = page_scroll_;
+    page_scroll_ = std::clamp(page_scroll_ + delta, 0.0f, page_max_scroll_);
+    if (page_scroll_ != before) {
+        if (editing_) end_edit(true);
+        invalidate();
+    }
+}
+
+bool App::on_key(WPARAM key) {
+    if (menu_) {
+        if (key == VK_ESCAPE) close_menu();
+        return true;  // keys do not reach the page under an open menu
+    }
+    if (page_ == Page::Clip && clip_view_) {
+        switch (key) {
+            case VK_SPACE: run_clip("play", Rect{}); return true;
+            case VK_LEFT: run_clip("back5", Rect{}); return true;
+            case VK_RIGHT: run_clip("fwd5", Rect{}); return true;
+            case 'I': run_clip("set-in", Rect{}); return true;
+            case 'O': run_clip("set-out", Rect{}); return true;
+            case 'M': run_clip("mute", Rect{}); return true;
+            case VK_ESCAPE: run_clip("back", Rect{}); return true;
+            default: break;
+        }
+    }
+    if (key == VK_ESCAPE && (page_ == Page::Settings || page_ == Page::Record || page_ == Page::Uploads)) {
+        set_page(Page::Library);
+        return true;
+    }
+    return false;
+}
+
+void App::set_page(Page page) {
+    if (editing_) end_edit(true);
+    close_menu();
+    if (page_ == Page::Clip && page != Page::Clip) close_clip();
+    if (page != page_) page_scroll_ = 0;
+    if (capturing_hotkey_) {
+        capturing_hotkey_ = false;
+        apply_hotkey();
+    }
+    if (page == Page::Record || page == Page::Settings) {
+        try {
+            monitors_ = list_monitors();
+        } catch (const std::exception& e) {
+            log::warn("Could not list the monitors: {}", e.what());
+        }
+    }
+    page_ = page;
+    invalidate();
+}
+
 void App::run(const Hit& hit, bool right, POINT screen) {
+    const Rect anchor = hit.rect;
     switch (hit.action) {
-        case Action::None: break;
+        case Action::None:
+        case Action::Disabled:
+        case Action::Drag: break;
+        case Action::MenuDismiss: close_menu(); break;
+        case Action::MenuItem: {
+            if (!menu_) break;
+            const std::size_t index = static_cast<std::size_t>(std::stoul(hit.arg));
+            if (index >= menu_->items.size() || !menu_->items[index].enabled || !menu_->items[index].run) break;
+            const std::function<void()> chosen = menu_->items[index].run;  // a copy: closing frees the menu
+            close_menu();
+            chosen();
+            invalidate();
+            break;
+        }
         case Action::Search: SetFocus(search_box_); break;
         case Action::Minimize: ShowWindow(window_, SW_MINIMIZE); break;
         case Action::Maximize: ShowWindow(window_, IsZoomed(window_) ? SW_RESTORE : SW_MAXIMIZE); break;
@@ -1837,26 +2181,20 @@ void App::run(const Hit& hit, bool right, POINT screen) {
             break;
         }
         case Action::Page:
-            if (hit.arg == "record") page_ = Page::Record;
-            else if (hit.arg == "uploads") page_ = Page::Uploads;
-            else if (hit.arg == "settings") page_ = Page::Settings;
-            if (editing_) end_edit(true);
-            invalidate();
+            if (hit.arg == "record") set_page(Page::Record);
+            else if (hit.arg == "uploads") set_page(Page::Uploads);
+            else if (hit.arg == "settings") set_page(Page::Settings);
             break;
         case Action::SaveNow: save_clip(); break;
         case Action::TogglePause: toggle_pause(); break;
-        case Action::Sort: sort_menu(screen); break;
+        case Action::Sort: sort_menu(anchor); break;
         case Action::OpenClip:
             if (right) {
                 clip_menu(hit.arg, screen);
             } else {
-                // The clip page (player, trim, details) comes next; until then the default player.
-                new_files_.erase(hit.arg);
-                if (clips_folder_available()) shell::open(clip_path(hit.arg));
-                invalidate();
+                open_clip(hit.arg);
             }
             break;
-        case Action::ClipMenu: clip_menu(hit.arg, screen); break;
         case Action::ToggleFavorite: {
             const ClipEntry* clip = library_.find(hit.arg);
             if (clip != nullptr) {
@@ -1868,8 +2206,11 @@ void App::run(const Hit& hit, bool right, POINT screen) {
         }
         case Action::SavedOpen:
             if (saved_bar_) {
-                new_files_.erase(saved_bar_->file);
-                shell::open(saved_bar_->path);
+                if (!saved_bar_->file.empty() && library_.find(saved_bar_->file) != nullptr) {
+                    open_clip(saved_bar_->file);
+                } else {
+                    shell::open(saved_bar_->path);
+                }
             }
             break;
         case Action::SavedFolder:
@@ -1877,188 +2218,187 @@ void App::run(const Hit& hit, bool right, POINT screen) {
             break;
         case Action::SavedTrash:
             if (saved_bar_ && !saved_bar_->file.empty()) {
-                library_.move_to_trash(saved_bar_->file, now_unix());
-                new_files_.erase(saved_bar_->file);
-                save_library();
-                saved_bar_.reset();
-                invalidate();
+                move_to_trash(saved_bar_->file);
             }
             break;
         case Action::SavedClose:
             saved_bar_.reset();
             invalidate();
             break;
-        case Action::CollectionMenu: collection_menu(hit.arg, screen); break;
-        case Action::MoreCollections: more_collections_menu(screen); break;
+        case Action::MoreCollections: more_collections_menu(anchor); break;
+        case Action::Clip: run_clip(hit.arg, anchor); break;
+        case Action::Record: run_record(hit.arg, anchor); break;
+        case Action::Setting: run_setting(hit.arg, anchor); break;
     }
 }
 
-void App::sort_menu(POINT screen) {
-    const HMENU menu = CreatePopupMenu();
-    if (menu == nullptr) return;
-    for (const SortName& s : kSortNames) {
-        AppendMenuW(menu, MF_STRING | (s.sort == sort_ ? MF_CHECKED : 0u), kMenuSortBase + static_cast<UINT>(s.sort),
-                    s.label);
-    }
-    const UINT command =
-        static_cast<UINT>(TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, window_, nullptr));
-    DestroyMenu(menu);
-    if (command >= kMenuSortBase && command < kMenuSortBase + std::size(kSortNames)) {
-        sort_ = static_cast<ClipSort>(command - kMenuSortBase);
-        scroll_ = 0;
-        invalidate();
-    }
+void App::move_to_trash(const std::string& file) {
+    if (library_.find(file) == nullptr) return;
+    library_.move_to_trash(file, now_unix());
+    new_files_.erase(file);
+    if (saved_bar_ && saved_bar_->file == file) saved_bar_.reset();
+    save_library();
+    invalidate();
 }
 
-void App::clip_menu(const std::string& file, POINT screen) {
-    const ClipEntry* clip = library_.find(file);
-    if (clip == nullptr) return;
-    const bool trashed = clip->trashed_at.has_value();
-    const HMENU menu = CreatePopupMenu();
-    const HMENU collections = CreatePopupMenu();
-    if (menu == nullptr || collections == nullptr) {
-        if (menu != nullptr) DestroyMenu(menu);
-        if (collections != nullptr) DestroyMenu(collections);
+void App::recycle_now(const std::string& file) {
+    if (!clips_folder_available() || recycling_ || library_.find(file) == nullptr) return;
+    if (clip_view_ && clip_view_->file == file) close_clip();  // the player holds the file open
+    recycling_ = true;
+    const std::vector<fs::path> failed = shell::recycle({clip_path(file)});
+    recycling_ = false;
+    if (quit_pending_) {
+        quit();
         return;
     }
-    AppendMenuW(menu, MF_STRING, kMenuOpen, L"Open");
-    AppendMenuW(menu, MF_STRING, kMenuShowInFolder, L"Show in folder");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    if (!trashed) {
-        AppendMenuW(menu, MF_STRING, kMenuFavorite, clip->favorite ? L"Remove from favorites" : L"Add to favorites");
-        AppendMenuW(menu, MF_STRING, kMenuRename, L"Rename");
-        const auto& all = library_.collections();
-        for (std::size_t i = 0; i < all.size(); ++i) {
-            const bool member =
-                std::find(clip->collections.begin(), clip->collections.end(), all[i].id) != clip->collections.end();
-            AppendMenuW(collections, MF_STRING | (member ? MF_CHECKED : 0u), kMenuCollectionBase + static_cast<UINT>(i),
-                        to_wide(all[i].name.empty() ? std::string("Untitled") : all[i].name).c_str());
-        }
-        if (!all.empty()) AppendMenuW(collections, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(collections, MF_STRING, kMenuNewCollectionFor, L"New collection");
-        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(collections), L"Collections");
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, kMenuTrash, L"Move to Trash");
+    if (editing_) end_edit(true);  // a rename started while waiting: the cards are about to move
+    if (library_.find(file) == nullptr) return;  // gone meanwhile (a scan while waiting)
+    if (failed.empty()) {
+        library_.remove(file);
+        if (saved_bar_ && saved_bar_->file == file) saved_bar_.reset();
+        save_library();
     } else {
-        DestroyMenu(collections);
-        AppendMenuW(menu, MF_STRING, kMenuRestore, L"Restore");
-        AppendMenuW(menu, MF_STRING, kMenuDeleteNow, L"Move to Recycle Bin now");
+        show_notice(L"Could not move the clip to the Recycle Bin. It may be open in a player, or its drive has "
+                    L"no Recycle Bin.");
     }
-    const std::vector<Collection> collections_shown = library_.collections();  // ids behind the menu items
-    const UINT command =
-        static_cast<UINT>(TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, window_, nullptr));
-    DestroyMenu(menu);  // also destroys the attached submenu
-
-    // The menu ran its own message loop: a save or a folder scan may have changed the library
-    // (and moved every clip in memory) meanwhile.
-    clip = library_.find(file);
-    if (clip == nullptr || command == 0) return;
-    const std::int64_t now = now_unix();
-    bool changed = true;
-    switch (command) {
-        case kMenuOpen:
-            new_files_.erase(file);
-            if (clips_folder_available()) shell::open(clip_path(file));
-            changed = false;
-            break;
-        case kMenuShowInFolder:
-            if (clips_folder_available()) shell::show_in_folder(clip_path(file));
-            changed = false;
-            break;
-        case kMenuFavorite: library_.set_favorite(file, !clip->favorite); break;
-        case kMenuRename:
-            begin_edit(Editing{Editing::Kind::ClipTitle, file}, to_wide(display_title(*clip)));
-            changed = false;
-            break;
-        case kMenuTrash:
-            library_.move_to_trash(file, now);
-            new_files_.erase(file);
-            if (saved_bar_ && saved_bar_->file == file) saved_bar_.reset();
-            break;
-        case kMenuRestore: library_.restore(file); break;
-        case kMenuDeleteNow: {
-            if (!clips_folder_available() || recycling_) {
-                changed = false;
-                break;
-            }
-            recycling_ = true;
-            const std::vector<fs::path> failed = shell::recycle({clip_path(file)});
-            recycling_ = false;
-            if (editing_) end_edit(true);  // a rename started while waiting: the cards are about to move
-            if (library_.find(file) == nullptr) break;  // gone meanwhile (a scan while waiting)
-            if (failed.empty()) {
-                library_.remove(file);
-            } else {
-                show_notice(L"Could not move the clip to the Recycle Bin. It may be open in a player, or its drive has "
-                            L"no Recycle Bin.");
-            }
-            break;
-        }
-        case kMenuNewCollectionFor: {
-            const std::string id = library_.create_collection(
-                "New collection", static_cast<int>(library_.collections().size()) % kCollectionColorCount);
-            library_.set_in_collection(file, id, true);
-            save_library();
-            begin_edit(Editing{Editing::Kind::CollectionName, id}, L"New collection");
-            changed = false;
-            break;
-        }
-        default:
-            if (command >= kMenuCollectionBase && command < kMenuCollectionBase + collections_shown.size()) {
-                const Collection& c = collections_shown[command - kMenuCollectionBase];
-                const bool member =
-                    std::find(clip->collections.begin(), clip->collections.end(), c.id) != clip->collections.end();
-                library_.set_in_collection(file, c.id, !member);
-            } else {
-                changed = false;
-            }
-            break;
-    }
-    if (changed) {
-        save_library();
-        invalidate();
-    }
+    invalidate();
 }
 
-void App::collection_menu(const std::string& id, POINT screen) {
-    const Collection* collection = library_.find_collection(id);
-    if (collection == nullptr) return;
-    const HMENU menu = CreatePopupMenu();
-    if (menu == nullptr) return;
-    AppendMenuW(menu, MF_STRING, kMenuRenameCollection, L"Rename");
-    AppendMenuW(menu, MF_STRING, kMenuDeleteCollection, L"Delete collection (keeps the clips)");
-    const UINT command =
-        static_cast<UINT>(TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, window_, nullptr));
-    DestroyMenu(menu);
-    if (command == kMenuRenameCollection) {
-        begin_edit(Editing{Editing::Kind::CollectionName, id}, to_wide(collection->name));
-    } else if (command == kMenuDeleteCollection) {
-        library_.delete_collection(id);
-        if (view_ == LibraryView::Collection && view_collection_ == id) set_view(LibraryView::All);
-        save_library();
-        invalidate();
+void App::sort_menu(const Rect& anchor) {
+    Menu menu;
+    menu.anchor = anchor;
+    menu.min_width = anchor.w;
+    for (const SortName& s : kSortNames) {
+        const ClipSort sort = s.sort;
+        menu.items.push_back(MenuItem{s.label, [this, sort] {
+                                          sort_ = sort;
+                                          scroll_ = 0;
+                                      },
+                                      s.sort == sort_});
     }
+    open_menu(std::move(menu));
 }
 
-void App::more_collections_menu(POINT screen) {
-    const HMENU menu = CreatePopupMenu();
-    if (menu == nullptr) return;
-    const std::vector<std::size_t> hidden = hidden_collections_;
+void App::add_to_collection_menu(const std::string& file, const Rect& anchor) {
+    const ClipEntry* clip = library_.find(file);
+    if (clip == nullptr) return;
+    Menu menu;
+    menu.anchor = anchor;
+    menu.min_width = std::max(anchor.w, 210.0f);
+    for (const Collection& c : library_.collections()) {
+        const bool member = std::find(clip->collections.begin(), clip->collections.end(), c.id) != clip->collections.end();
+        const std::string id = c.id;
+        MenuItem item{to_wide(c.name.empty() ? std::string("Untitled") : c.name), [this, file, id] {
+                          const ClipEntry* now = library_.find(file);
+                          if (now == nullptr || library_.find_collection(id) == nullptr) return;
+                          const bool in = std::find(now->collections.begin(), now->collections.end(), id) !=
+                                          now->collections.end();
+                          library_.set_in_collection(file, id, !in);
+                          save_library();
+                      },
+                      member};
+        item.dot = kCollectionColors[std::clamp(c.color, 0, kCollectionColorCount - 1)];
+        menu.items.push_back(std::move(item));
+    }
+    if (!menu.items.empty()) menu.items.push_back(MenuItem{});
+    menu.items.push_back(MenuItem{L"New collection", [this, file] {
+                                      if (library_.find(file) == nullptr) return;
+                                      const std::string id = library_.create_collection(
+                                          "New collection",
+                                          static_cast<int>(library_.collections().size()) % kCollectionColorCount);
+                                      library_.set_in_collection(file, id, true);
+                                      save_library();
+                                      if (page_ == Page::Clip) set_page(Page::Library);
+                                      begin_edit(Editing{Editing::Kind::CollectionName, id}, L"New collection");
+                                  }});
+    open_menu(std::move(menu));
+}
+
+void App::clip_menu(const std::string& file, POINT) {
+    const ClipEntry* clip = library_.find(file);
+    if (clip == nullptr) return;
+    Menu menu;
+    menu.anchor = Rect{mouse_x_, mouse_y_, 0, 0};
+    menu.at_point = true;
+    menu.items.push_back(MenuItem{L"Open", [this, file] { open_clip(file); }});
+    menu.items.push_back(MenuItem{L"Play in your video player", [this, file] {
+                                      new_files_.erase(file);
+                                      if (clips_folder_available()) shell::open(clip_path(file));
+                                  }});
+    menu.items.push_back(MenuItem{L"Show in folder", [this, file] {
+                                      if (clips_folder_available()) shell::show_in_folder(clip_path(file));
+                                  }});
+    menu.items.push_back(MenuItem{});
+    if (!clip->trashed_at) {
+        menu.items.push_back(MenuItem{clip->favorite ? L"Remove from favorites" : L"Add to favorites", [this, file] {
+                                          if (const ClipEntry* c = library_.find(file)) {
+                                              library_.set_favorite(file, !c->favorite);
+                                              save_library();
+                                          }
+                                      }});
+        menu.items.push_back(MenuItem{L"Rename", [this, file] {
+                                          if (const ClipEntry* c = library_.find(file)) {
+                                              begin_edit(Editing{Editing::Kind::ClipTitle, file}, to_wide(display_title(*c)));
+                                          }
+                                      }});
+        const Rect at{mouse_x_, mouse_y_, 0, 0};
+        menu.items.push_back(MenuItem{L"Add to collection...", [this, file, at] {
+                                          Rect anchor = at;
+                                          anchor.w = 1;
+                                          add_to_collection_menu(file, anchor);
+                                      }});
+        menu.items.push_back(MenuItem{});
+        MenuItem trash{L"Move to Trash", [this, file] { move_to_trash(file); }};
+        trash.danger = true;
+        menu.items.push_back(std::move(trash));
+    } else {
+        menu.items.push_back(MenuItem{L"Restore", [this, file] {
+                                          library_.restore(file);
+                                          save_library();
+                                      }});
+        MenuItem recycle{L"Move to Recycle Bin now", [this, file] { recycle_now(file); }};
+        recycle.danger = true;
+        menu.items.push_back(std::move(recycle));
+    }
+    open_menu(std::move(menu));
+}
+
+void App::collection_menu(const std::string& id, POINT) {
+    if (library_.find_collection(id) == nullptr) return;
+    Menu menu;
+    menu.anchor = Rect{mouse_x_, mouse_y_, 0, 0};
+    menu.at_point = true;
+    menu.items.push_back(MenuItem{L"Rename", [this, id] {
+                                      if (const Collection* c = library_.find_collection(id)) {
+                                          begin_edit(Editing{Editing::Kind::CollectionName, id}, to_wide(c->name));
+                                      }
+                                  }});
+    MenuItem remove{L"Delete collection (keeps the clips)", [this, id] {
+                        library_.delete_collection(id);
+                        if (view_ == LibraryView::Collection && view_collection_ == id) set_view(LibraryView::All);
+                        save_library();
+                    }};
+    remove.danger = true;
+    menu.items.push_back(std::move(remove));
+    open_menu(std::move(menu));
+}
+
+void App::more_collections_menu(const Rect& anchor) {
+    Menu menu;
+    menu.anchor = anchor;
+    menu.min_width = anchor.w;
     const auto& collections = library_.collections();
-    std::vector<std::string> ids;
-    for (std::size_t n = 0; n < hidden.size(); ++n) {
-        const Collection& c = collections[hidden[n]];
-        ids.push_back(c.id);
-        AppendMenuW(menu, MF_STRING, kMenuMoreCollectionsBase + static_cast<UINT>(n),
-                    to_wide(c.name.empty() ? std::string("Untitled") : c.name).c_str());
+    for (const std::size_t index : hidden_collections_) {
+        if (index >= collections.size()) continue;
+        const Collection& c = collections[index];
+        const std::string id = c.id;
+        MenuItem item{to_wide(c.name.empty() ? std::string("Untitled") : c.name), [this, id] {
+                          if (library_.find_collection(id) != nullptr) set_view(LibraryView::Collection, id);
+                      }};
+        item.dot = kCollectionColors[std::clamp(c.color, 0, kCollectionColorCount - 1)];
+        menu.items.push_back(std::move(item));
     }
-    const UINT command =
-        static_cast<UINT>(TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, window_, nullptr));
-    DestroyMenu(menu);
-    if (command >= kMenuMoreCollectionsBase && command < kMenuMoreCollectionsBase + ids.size()) {
-        const std::string& id = ids[command - kMenuMoreCollectionsBase];
-        if (library_.find_collection(id) != nullptr) set_view(LibraryView::Collection, id);
-    }
+    open_menu(std::move(menu));
 }
 
 void App::begin_edit(Editing editing, const std::wstring& text) {

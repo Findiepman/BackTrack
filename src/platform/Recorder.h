@@ -54,6 +54,14 @@ struct SaveResult {
     double seconds = 0.0;
 };
 
+// What the Record page shows about the replay buffer.
+struct BufferStatus {
+    double seconds = 0.0;  // how much of the past the buffer holds now
+    std::uint64_t bytes = 0;  // video and sound together
+    bool hardware_encoder = false;
+    bool encoder_running = false;
+};
+
 class Recorder {
 public:
     using SavedCallback = std::function<void(const SaveResult& result)>;  // called on the writer thread
@@ -80,6 +88,7 @@ public:
     // "Recording 30 s, 60 fps, hardware", "Capture lost, retrying", "Saving clip...", ...
     std::string status_text() const;
     bool saving() const { return saves_pending_ > 0; }
+    BufferStatus buffer_status();
     const std::filesystem::path& output_dir() const { return output_dir_; }
     // The configured clips folder could not be used and clips go to the Videos folder this run.
     bool output_dir_is_fallback() const { return output_dir_fallback_; }

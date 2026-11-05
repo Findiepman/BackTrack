@@ -62,10 +62,14 @@ inline constexpr float kTopStrip = 46;  // .st-top
 inline constexpr float kHeaderBar = 48;  // .st-bar
 inline constexpr float kSavedBar = 74;  // .bar min-height
 inline constexpr float kCaptionButton = 46;  // .tb-w button
+// The pages (Record, Settings, clip page) use the mockup's page tokens.
+inline constexpr float kPageControl = 38;  // --h on the pages
+inline constexpr float kPageRadius = 10;  // --r on the pages
+inline constexpr float kPageTop = 26;  // #page padding-top
+inline constexpr float kPanelRadius = 16;  // .card2, .panel2, .sg
 
 // Glyphs of "Segoe Fluent Icons" / "Segoe MDL2 Assets".
 namespace glyph {
-inline constexpr wchar_t kAppMark = 0xE7A7;  // Undo: a backwards arrow
 inline constexpr wchar_t kAllClips = 0xE80A;  // Tiles
 inline constexpr wchar_t kFavorite = 0xE734;  // FavoriteStar
 inline constexpr wchar_t kFavoriteFill = 0xE735;  // FavoriteStarFill
@@ -89,6 +93,30 @@ inline constexpr wchar_t kMaximize = 0xE922;  // ChromeMaximize
 inline constexpr wchar_t kRestore = 0xE923;  // ChromeRestore
 inline constexpr wchar_t kChromeClose = 0xE8BB;  // ChromeClose
 inline constexpr wchar_t kVideo = 0xE714;  // Video
+inline constexpr wchar_t kChevronLeft = 0xE76B;  // ChevronLeft
+inline constexpr wchar_t kChevronRight = 0xE76C;  // ChevronRight
+inline constexpr wchar_t kVolume = 0xE767;  // Volume
+inline constexpr wchar_t kMute = 0xE74F;  // Mute
+inline constexpr wchar_t kExpand = 0xE740;  // FullScreen
+inline constexpr wchar_t kCollapse = 0xE73F;  // BackToWindow
+inline constexpr wchar_t kCut = 0xE8C6;  // Cut
+inline constexpr wchar_t kDownload = 0xE896;  // Download
+inline constexpr wchar_t kTag = 0xE8EC;  // Tag
+inline constexpr wchar_t kPencil = 0xE70F;  // Edit
+inline constexpr wchar_t kInfo = 0xE946;  // Info
+inline constexpr wchar_t kCamera = 0xE722;  // Camera
+inline constexpr wchar_t kBolt = 0xE945;  // LightningBolt
+inline constexpr wchar_t kMicrophone = 0xE720;  // Microphone
+inline constexpr wchar_t kHeadphones = 0xE7F6;  // Headphone
+inline constexpr wchar_t kKeyboard = 0xE765;  // KeyboardClassic
+inline constexpr wchar_t kDrive = 0xEDA2;  // HardDrive
+inline constexpr wchar_t kBell = 0xEA8F;  // Ringer
+inline constexpr wchar_t kPalette = 0xE790;  // Color
+inline constexpr wchar_t kFilm = 0xE8B2;  // SlideShow / film strip
+inline constexpr wchar_t kRestoreDefaults = 0xE777;  // UpdateRestore
+inline constexpr wchar_t kCopy = 0xE8C8;  // Copy
+inline constexpr wchar_t kDisplay = 0xE7F4;  // TVMonitor
+inline constexpr wchar_t kSpeaker = 0xE7F5;  // Speakers
 }  // namespace glyph
 
 }  // namespace bt::ui::theme

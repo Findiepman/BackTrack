@@ -8,9 +8,9 @@ Built from scratch on what Windows ships with: Desktop Duplication and Direct3D 
 screen, the graphics card's own H.264 encoder through Media Foundation (AMD, NVIDIA or Intel, with
 Windows' software encoder as fallback), WASAPI for sound. No FFmpeg, no OBS, no runtime to install.
 
-> **Status:** the recording engine and the clip library window are done. Still to come: the clip
-> page (player, trim), the Record and Settings screens. Until the Settings screen exists, settings
-> are in `backtrack.ini`.
+> **Status:** the recording engine and the whole window are done: library, clip page (player, trim,
+> tags, notes), Record and Settings. Sharing, long recordings, screenshots and the microphone are
+> shown in the window as "Soon".
 
 ## Using it
 
@@ -20,8 +20,14 @@ Windows' software encoder as fallback), WASAPI for sound. No FFmpeg, no OBS, no 
    "asterisk" sound, the clip appears at the top of the library with a "Saved" bar, and the file is
    in `Videos\Backtrack`. When the window is not in front, Windows shows a small "Saved" message.
 3. In the library:
-   - Click a clip to play it (in your default player for now). Right-click it to show it in its
-     folder, favorite it, rename it, add it to a collection or move it to the Trash.
+   - Click a clip to open its page: play it (Space plays and pauses, the arrow keys jump 5 s), trim it,
+     give it a title, tags and notes. Right-click it to play it in your own video player, show it
+     in its folder, favorite it, rename it, add it to a collection or move it to the Trash.
+   - **Trim:** drag the two handles under the player (or play to a moment and press **Start here** /
+     **End here**, or the keys I and O), then **Save as new clip**. The original stays as it is; the
+     new clip is saved next to it as `<name>_trim.mp4` in a fraction of a second, without losing
+     any quality. Because nothing is re-encoded, the new clip starts on the keyframe at or before
+     the start handle: up to one second earlier. The end is exact.
    - The star on a clip makes it a favorite. Favorites and clips in a collection are never removed
      automatically.
    - **+** next to Collections makes a new collection; right-click a collection to rename or delete
@@ -30,10 +36,23 @@ Windows' software encoder as fallback), WASAPI for sound. No FFmpeg, no OBS, no 
    - Trash: clips you delete wait there for 30 days, then go to the Windows Recycle Bin. The file
      stays in the clips folder until then. Backtrack never deletes anything for good: on a drive
      without a Recycle Bin (USB stick, network share) the clip simply stays where it is.
-4. Clicking the window's **X** hides Backtrack to the tray (the icon next to the clock); Instant
+4. **Record** shows which display Instant Replay records (click another to switch), how full the
+   replay buffer is, Backtrack's own CPU and memory use and your latest clips.
+5. **Settings** changes everything below while Backtrack runs; changes are saved to `backtrack.ini`
+   at once (your comments in that file are kept). Changing the display, frame rate, bitrate,
+   encoder, buffer length, recording game sound or its quality restarts Instant Replay about a
+   second later (the clips folder: at once): the seconds it was holding are lost, nothing else. If
+   it cannot start with the new values, it goes back to the previous ones and says so. Changing the clips folder asks whether to move
+   your clips there (with Windows' own progress window) or leave them; either way a copy of the
+   library is kept as `library.before-folder-change-<date-time>.json`.
+6. Clicking the window's **X** hides Backtrack to the tray (the icon next to the clock); Instant
    Replay keeps running. Click the tray icon to open the window again; right-click it to save a
-   clip, pause, open the clips folder, edit the settings, open the log or **Quit**. Quitting waits
+   clip, pause, open the clips folder, open Settings, open the log or **Quit**. Quitting waits
    for a clip that is still being saved.
+
+Backtrack puts itself in the Start menu the first time it runs, so you can press the Windows key and
+type "backtrack" to start it. If you move `backtrack.exe`, the Start menu entry follows it the next
+time you start it from its new place.
 
 Only one Backtrack runs at a time. Starting it again brings the running window to the front.
 
@@ -72,9 +91,18 @@ file is never overwritten.
 
 ## Settings (`backtrack.ini`)
 
-Written with the defaults the first time Backtrack starts. Restart Backtrack after editing. A
-missing key uses its default; a value that cannot be used is logged with its line number and the
-default is kept. Backtrack never refuses to start because of the settings.
+Everything here can be changed on the Settings page; this file is where it is kept. It is written
+with the defaults the first time Backtrack starts. If you edit it by hand, restart Backtrack
+afterwards. A missing key uses its default; a value that cannot be used is logged with its line
+number and the default is kept. Backtrack never refuses to start because of the settings.
+"Launch when Windows starts" is not in this file: it is the `Backtrack` entry in Windows' own
+startup list (Task Manager > Startup apps).
+
+### `[general]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `start_minimized` | `false` | When Windows starts Backtrack, open it in the tray instead of showing the window. |
 
 ### `[clip]`
 
@@ -85,6 +113,13 @@ default is kept. Backtrack never refuses to start because of the settings.
 | `filename` | `clip_%Y-%m-%d_%H-%M-%S.mp4` | File name. Allowed placeholders: `%Y %y %m %d %H %I %M %S %p %j %a %A %b %B %U %W %w %%`. Two clips in the same second get `_2`, `_3`. |
 
 To use `;` or `#` in a path, put the whole value in double quotes: `output_dir = "D:\Clips #2"`.
+
+### `[storage]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `max_gb` | `0` | When clips take more than this many GB, the oldest go to the Recycle Bin. `0` is no limit. Favorites and clips in a collection are never removed. |
+| `delete_after_days` | `0` | Clips older than this go to the Recycle Bin. `0` is never. Favorites and clips in a collection are kept. |
 
 ### `[hotkey]`
 
@@ -122,12 +157,13 @@ and the tray menu still work.
 |---|---|---|
 | `sound` | `true` | Play the Windows "asterisk" sound when a clip is saved. |
 | `notification` | `true` | Show a Windows message when a clip is saved while the Backtrack window is not in front. |
+| `saved_bar` | `true` | Show the "Saved" bar at the bottom of the window after a save. |
 
 ### `[logging]`
 
 | Key | Default | Meaning |
 |---|---|---|
-| `level` | `info` | `error`, `info` or `debug`. `error` still shows warnings (why a hotkey or a save did not work). `debug` adds counters once a minute: frames, drops, sound corrections, buffer size and memory use. |
+| `level` | `info` | `error`, `warning`, `info` or `debug`. `error` still shows warnings (why a hotkey or a save did not work). `debug` adds counters once a minute: frames, drops, sound corrections, buffer size and memory use. |
 
 The log is `backtrack.log` next to the exe. It rolls over at 5 MB and keeps three files.
 
@@ -176,4 +212,7 @@ comes from one clock, so sound and picture stay in sync however long Backtrack r
 Code layout: `src/core` is plain C++ with unit tests (settings, hotkeys, ring buffer, clip
 planning, the clip library and its JSON file); `src/platform` is everything that talks to Windows;
 `src/platform/Recorder.h` is the engine the window drives; `src/ui` is the window, drawn with
-Direct2D and DirectWrite (part of Windows, nothing to install).
+Direct2D and DirectWrite on a Direct3D 11 swap chain (part of Windows, nothing to install). The
+clip page plays clips with Windows' Media Foundation media engine on the same graphics device, so
+the controls are drawn over the picture. Trimming (`src/platform/Trim.cpp`) copies the compressed
+frames into a new file without decoding them.

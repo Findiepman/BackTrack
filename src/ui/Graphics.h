@@ -4,6 +4,10 @@
 // part of Windows (no runtime to ship). Everything is in DIPs (1/96 inch): the render target is
 // given the window's DPI, so the same layout is sharp at 100 % and 150 % scaling.
 //
+// Direct2D draws through a Direct3D 11 device into a flip-model swap chain (not an HWND render
+// target) so the clip player's video frames, which Media Foundation decodes into textures on the
+// same device, are drawn without a copy through system memory.
+//
 // Icons come from the font Windows uses for its own icons: "Segoe Fluent Icons" on Windows 11,
 // "Segoe MDL2 Assets" on Windows 10 (same code points for the ones used here).
 //
@@ -11,8 +15,10 @@
 
 #include "platform/Com.h"
 
-#include <d2d1.h>
+#include <d2d1_1.h>
+#include <d3d11.h>
 #include <dwrite.h>
+#include <dxgi1_2.h>
 
 #include <cstdint>
 #include <map>
@@ -89,6 +95,8 @@ public:
     void paragraph(std::wstring_view text, const Rect& rect, const TextStyle& style, Color color);
     float text_width(std::wstring_view text, const TextStyle& style);
     void icon(wchar_t glyph, const Rect& rect, float size, Color color);
+    // The Backtrack logo filling the square `rect`.
+    void logo(const Rect& rect);
 
     void push_clip(const Rect& rect);
     // Everything drawn until pop_clip() stays inside the rounded rectangle (card corners).
@@ -101,17 +109,37 @@ public:
     void forget_bitmap(const std::wstring& key);
     // Fills `rect` with the bitmap (cropped to keep its shape), with rounded corners.
     bool draw_bitmap(const std::wstring& key, const Rect& rect, float radius, float opacity = 1.0f);
+    // A BGRA texture on device() (a video frame), fitted inside `rect` (letterboxed), not cropped.
+    bool draw_texture(ID3D11Texture2D* texture, const Rect& rect);
+
+    // The Direct3D device everything is drawn with; null before the first begin(). It is replaced
+    // after a device loss: generation() changes, and anything made on the old one must be remade.
+    ID3D11Device* device() const { return d3d_.Get(); }
+    std::uint64_t generation() const { return generation_; }
+    // Makes the device now (begin() would make it anyway); false when there is none to be had.
+    bool ensure_device();
 
 private:
+    void create_device();
     void create_target();
+    void drop_device();
     IDWriteTextFormat* format(const TextStyle& style, bool icon_font);
     ID2D1SolidColorBrush* brush(Color color);
 
     HWND window_;
     UINT dpi_ = 96;
-    ComPtr<ID2D1Factory> factory_;
+    ComPtr<ID2D1Factory1> factory_;
     ComPtr<IDWriteFactory> write_factory_;
-    ComPtr<ID2D1HwndRenderTarget> target_;
+    ComPtr<ID3D11Device> d3d_;
+    ComPtr<IDXGISwapChain1> swap_chain_;
+    ComPtr<ID2D1Device> d2d_device_;
+    ComPtr<ID2D1DeviceContext> target_;
+    ComPtr<ID2D1Bitmap1> back_buffer_;  // the swap chain's buffer as the target's surface
+    ComPtr<ID3D11Texture2D> video_texture_;  // the texture video_bitmap_ wraps
+    ComPtr<ID2D1Bitmap1> video_bitmap_;
+    std::uint64_t generation_ = 0;
+    UINT width_px_ = 1;
+    UINT height_px_ = 1;
     ComPtr<ID2D1SolidColorBrush> brush_;
     ComPtr<IDWriteInlineObject> ellipsis_;
     std::wstring text_family_;

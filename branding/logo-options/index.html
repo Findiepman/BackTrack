@@ -1,0 +1,604 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Backtrack logo options</title>
+<style>
+:root{color-scheme:light dark;--bg:#f3f3f1;--fg:#16181d;--mut:#5b6068;--card:#fff;--bd:#d9dbe0}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1115;--fg:#eceef2;--mut:#9aa0ab;--card:#181b21;--bd:#2b2f38}}
+*{box-sizing:border-box}body{margin:0;font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--fg);padding:24px 16px 40px}
+main{max-width:1300px;margin:0 auto}h1{margin:0 0 4px;font-size:26px}.sub{color:var(--mut);margin:0 0 20px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:16px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:16px;min-width:0}
+.card header{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.card h2{margin:0;font-size:19px}
+.num{display:inline-grid;place-items:center;width:34px;height:34px;border-radius:50%;background:var(--fg);color:var(--bg);font-weight:800;font-size:18px}
+code{color:var(--mut);font-size:12px;margin-left:auto}.idea{margin:10px 0}
+.sws{display:flex;flex-wrap:wrap;gap:6px 12px;margin-bottom:12px}.sw{font:12px ui-monospace,Consolas,monospace;color:var(--mut);display:inline-flex;align-items:center;gap:5px}
+.sw i{width:16px;height:16px;border-radius:4px;border:1px solid #8884}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.pane{border-radius:10px;padding:10px;min-width:0}.pane b{font-size:11px;text-transform:uppercase;letter-spacing:.06em;opacity:.7}
+.dark{background:#101216;color:#e8e8e8}.light{background:#f7f6f2;color:#222;border:1px solid #e0ddd4}
+.big{display:grid;place-items:center;padding:8px 0}.big svg{width:100%;max-width:200px;height:auto;display:block}
+.big svg[viewBox^="0 0 760"],.big svg[viewBox^="0 0 800"]{max-width:100%}
+.ico{display:flex;gap:14px;align-items:flex-end;padding:10px 0;flex-wrap:wrap}.ico figure{margin:0;text-align:center}.ico svg{display:block;margin:0 auto 4px}
+figcaption{font-size:11px;opacity:.65}
+footer{margin-top:24px;color:var(--mut);border-top:1px solid var(--bd);padding-top:14px}footer strong{color:var(--fg)}
+@media(max-width:420px){.grid{grid-template-columns:1fr}}
+</style></head><body><main>
+<h1>Backtrack logo options</h1><p class="sub">Five directions for the app that keeps the last 30 seconds of screen and sound and saves them with F8.</p>
+<div class="grid"><article class="card"><header><span class="num">1</span><h2>Ring Rewind</h2><code>01-ring-rewind</code></header>
+<p class="idea">Minimal geometric. A buffer ring loops back on itself with a rewind double-chevron inside. Symbol only, app icon.</p><div class="sws"><span class="sw"><i style="background:#0e1014"></i>#0e1014</span><span class="sw"><i style="background:#ffb547"></i>#ffb547</span><span class="sw"><i style="background:#f4efe6"></i>#f4efe6</span></div>
+<div class="pair"><div class="pane dark"><b>On dark</b><div class="big"><svg role="img" aria-label="Backtrack logo" viewBox="0 0 256 256">
+  
+  <rect width="256" height="256" rx="58" fill="#0e1014"/>
+  <path d="M203.3 107.8 A78 78 0 1 1 148.2 52.4" fill="none" stroke="#ffb547" stroke-width="18" stroke-linecap="round"/>
+  <path d="M226.5 101.6 L196.1 80.8 L180.1 114 Z" fill="#ffb547" stroke="#ffb547" stroke-width="8" stroke-linejoin="round"/>
+  <g fill="#f4efe6" stroke="#f4efe6" stroke-width="6" stroke-linejoin="round">
+    <path d="M134 106 V150 L102 128 Z"/>
+    <path d="M168 106 V150 L136 128 Z"/>
+  </g>
+  <circle cx="128" cy="128" r="0" fill="#ff5d66"/>
+</svg></div></div><div class="pane light"><b>On light</b><div class="big"><svg role="img" aria-label="Backtrack logo" viewBox="0 0 256 256">
+  
+  <rect width="256" height="256" rx="58" fill="#0e1014"/>
+  <path d="M203.3 107.8 A78 78 0 1 1 148.2 52.4" fill="none" stroke="#ffb547" stroke-width="18" stroke-linecap="round"/>
+  <path d="M226.5 101.6 L196.1 80.8 L180.1 114 Z" fill="#ffb547" stroke="#ffb547" stroke-width="8" stroke-linejoin="round"/>
+  <g fill="#f4efe6" stroke="#f4efe6" stroke-width="6" stroke-linejoin="round">
+    <path d="M134 106 V150 L102 128 Z"/>
+    <path d="M168 106 V150 L136 128 Z"/>
+  </g>
+  <circle cx="128" cy="128" r="0" fill="#ff5d66"/>
+</svg></div></div></div>
+<div class="pair"><div class="pane dark"><b>Icon sizes</b><div class="ico"><figure><svg role="img" aria-label="Backtrack logo" width="64" height="64" viewBox="0 0 256 256">
+  
+  <rect width="256" height="256" rx="58" fill="#0e1014"/>
+  <path d="M203.3 107.8 A78 78 0 1 1 148.2 52.4" fill="none" stroke="#ffb547" stroke-width="18" stroke-linecap="round"/>
+  <path d="M226.5 101.6 L196.1 80.8 L180.1 114 Z" fill="#ffb547" stroke="#ffb547" stroke-width="8" stroke-linejoin="round"/>
+  <g fill="#f4efe6" stroke="#f4efe6" stroke-width="6" stroke-linejoin="round">
+    <path d="M134 106 V150 L102 128 Z"/>
+    <path d="M168 106 V150 L136 128 Z"/>
+  </g>
+  <circle cx="128" cy="128" r="0" fill="#ff5d66"/>
+</svg><figcaption>64 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="32" height="32" viewBox="0 0 256 256">
+  
+  <rect width="256" height="256" rx="58" fill="#0e1014"/>
+  <path d="M203.3 107.8 A78 78 0 1 1 148.2 52.4" fill="none" stroke="#ffb547" stroke-width="18" stroke-linecap="round"/>
+  <path d="M226.5 101.6 L196.1 80.8 L180.1 114 Z" fill="#ffb547" stroke="#ffb547" stroke-width="8" stroke-linejoin="round"/>
+  <g fill="#f4efe6" stroke="#f4efe6" stroke-width="6" stroke-linejoin="round">
+    <path d="M134 106 V150 L102 128 Z"/>
+    <path d="M168 106 V150 L136 128 Z"/>
+  </g>
+  <circle cx="128" cy="128" r="0" fill="#ff5d66"/>
+</svg><figcaption>32 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="16" height="16" viewBox="0 0 256 256">
+  
+  <rect width="256" height="256" rx="58" fill="#0e1014"/>
+  <path d="M203.3 107.8 A78 78 0 1 1 148.2 52.4" fill="none" stroke="#ffb547" stroke-width="18" stroke-linecap="round"/>
+  <path d="M226.5 101.6 L196.1 80.8 L180.1 114 Z" fill="#ffb547" stroke="#ffb547" stroke-width="8" stroke-linejoin="round"/>
+  <g fill="#f4efe6" stroke="#f4efe6" stroke-width="6" stroke-linejoin="round">
+    <path d="M134 106 V150 L102 128 Z"/>
+    <path d="M168 106 V150 L136 128 Z"/>
+  </g>
+  <circle cx="128" cy="128" r="0" fill="#ff5d66"/>
+</svg><figcaption>16 px</figcaption></figure></div></div><div class="pane light"><b>Icon sizes</b><div class="ico"><figure><svg role="img" aria-label="Backtrack logo" width="64" height="64" viewBox="0 0 256 256">
+  
+  <rect width="256" height="256" rx="58" fill="#0e1014"/>
+  <path d="M203.3 107.8 A78 78 0 1 1 148.2 52.4" fill="none" stroke="#ffb547" stroke-width="18" stroke-linecap="round"/>
+  <path d="M226.5 101.6 L196.1 80.8 L180.1 114 Z" fill="#ffb547" stroke="#ffb547" stroke-width="8" stroke-linejoin="round"/>
+  <g fill="#f4efe6" stroke="#f4efe6" stroke-width="6" stroke-linejoin="round">
+    <path d="M134 106 V150 L102 128 Z"/>
+    <path d="M168 106 V150 L136 128 Z"/>
+  </g>
+  <circle cx="128" cy="128" r="0" fill="#ff5d66"/>
+</svg><figcaption>64 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="32" height="32" viewBox="0 0 256 256">
+  
+  <rect width="256" height="256" rx="58" fill="#0e1014"/>
+  <path d="M203.3 107.8 A78 78 0 1 1 148.2 52.4" fill="none" stroke="#ffb547" stroke-width="18" stroke-linecap="round"/>
+  <path d="M226.5 101.6 L196.1 80.8 L180.1 114 Z" fill="#ffb547" stroke="#ffb547" stroke-width="8" stroke-linejoin="round"/>
+  <g fill="#f4efe6" stroke="#f4efe6" stroke-width="6" stroke-linejoin="round">
+    <path d="M134 106 V150 L102 128 Z"/>
+    <path d="M168 106 V150 L136 128 Z"/>
+  </g>
+  <circle cx="128" cy="128" r="0" fill="#ff5d66"/>
+</svg><figcaption>32 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="16" height="16" viewBox="0 0 256 256">
+  
+  <rect width="256" height="256" rx="58" fill="#0e1014"/>
+  <path d="M203.3 107.8 A78 78 0 1 1 148.2 52.4" fill="none" stroke="#ffb547" stroke-width="18" stroke-linecap="round"/>
+  <path d="M226.5 101.6 L196.1 80.8 L180.1 114 Z" fill="#ffb547" stroke="#ffb547" stroke-width="8" stroke-linejoin="round"/>
+  <g fill="#f4efe6" stroke="#f4efe6" stroke-width="6" stroke-linejoin="round">
+    <path d="M134 106 V150 L102 128 Z"/>
+    <path d="M168 106 V150 L136 128 Z"/>
+  </g>
+  <circle cx="128" cy="128" r="0" fill="#ff5d66"/>
+</svg><figcaption>16 px</figcaption></figure></div></div></div>
+</article>
+<article class="card"><header><span class="num">2</span><h2>VHS Rewind</h2><code>02-vhs-rewind</code></header>
+<p class="idea">Retro VHS. Rewind chevrons and italic wordmark with cyan/magenta misregistration, scanlines, tape counter "REW 00:30". Symbol + wordmark.</p><div class="sws"><span class="sw"><i style="background:#241044"></i>#241044</span><span class="sw"><i style="background:#0a0516"></i>#0a0516</span><span class="sw"><i style="background:#00e5ff"></i>#00e5ff</span><span class="sw"><i style="background:#ff2e93"></i>#ff2e93</span><span class="sw"><i style="background:#ffffff"></i>#ffffff</span><span class="sw"><i style="background:#ff2e3d"></i>#ff2e3d</span></div>
+<div class="pair"><div class="pane dark"><b>On dark</b><div class="big"><svg role="img" aria-label="Backtrack logo" viewBox="0 0 760 300">
+  
+  <defs>
+    <linearGradient id="d2_g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#241044"/><stop offset="1" stop-color="#0a0516"/></linearGradient>
+    <pattern id="d2_sc" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="1.6" fill="#000" opacity=".28"/></pattern>
+    <g id="d2_rew"><path d="M118 95 V205 L40 150 Z"/><path d="M206 95 V205 L128 150 Z"/></g>
+    <g id="d2_wm" font-family="Impact, 'Arial Black', 'Helvetica Neue', Arial, sans-serif" font-size="92" font-style="italic" font-weight="900" letter-spacing="2"><text x="236" y="178">BACKTRACK</text></g>
+  </defs>
+  <rect width="760" height="300" fill="url(#d2_g)"/>
+  <g opacity=".9"><use href="#d2_rew" x="-5" fill="#00e5ff"/><use href="#d2_rew" x="5" fill="#ff2e93"/></g>
+  <use href="#d2_rew" fill="#fff"/>
+  <g opacity=".9"><use href="#d2_wm" x="-4" fill="#00e5ff"/><use href="#d2_wm" x="4" fill="#ff2e93"/></g>
+  <use href="#d2_wm" fill="#fff"/>
+  <g fill="#fff" font-family="'Courier New', Consolas, monospace" font-size="22" font-weight="700">
+    <text x="240" y="218" fill="#00e5ff">REW  00:30</text>
+  </g>
+  <rect x="460" y="205" width="260" height="6" fill="#ff2e93"/>
+  <rect x="460" y="205" width="90" height="6" fill="#fff"/>
+  <rect x="0" y="118" width="170" height="5" fill="#fff" opacity=".55"/>
+  <rect x="580" y="246" width="180" height="4" fill="#00e5ff" opacity=".6"/>
+  <rect x="0" y="262" width="320" height="4" fill="#ff2e93" opacity=".5"/>
+  <circle cx="722" cy="42" r="9" fill="#ff2e3d"/>
+  <rect width="760" height="300" fill="url(#d2_sc)"/>
+</svg></div></div><div class="pane light"><b>On light</b><div class="big"><svg role="img" aria-label="Backtrack logo" viewBox="0 0 760 300">
+  
+  <defs>
+    <linearGradient id="l2_g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#241044"/><stop offset="1" stop-color="#0a0516"/></linearGradient>
+    <pattern id="l2_sc" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="1.6" fill="#000" opacity=".28"/></pattern>
+    <g id="l2_rew"><path d="M118 95 V205 L40 150 Z"/><path d="M206 95 V205 L128 150 Z"/></g>
+    <g id="l2_wm" font-family="Impact, 'Arial Black', 'Helvetica Neue', Arial, sans-serif" font-size="92" font-style="italic" font-weight="900" letter-spacing="2"><text x="236" y="178">BACKTRACK</text></g>
+  </defs>
+  <rect width="760" height="300" fill="url(#l2_g)"/>
+  <g opacity=".9"><use href="#l2_rew" x="-5" fill="#00e5ff"/><use href="#l2_rew" x="5" fill="#ff2e93"/></g>
+  <use href="#l2_rew" fill="#fff"/>
+  <g opacity=".9"><use href="#l2_wm" x="-4" fill="#00e5ff"/><use href="#l2_wm" x="4" fill="#ff2e93"/></g>
+  <use href="#l2_wm" fill="#fff"/>
+  <g fill="#fff" font-family="'Courier New', Consolas, monospace" font-size="22" font-weight="700">
+    <text x="240" y="218" fill="#00e5ff">REW  00:30</text>
+  </g>
+  <rect x="460" y="205" width="260" height="6" fill="#ff2e93"/>
+  <rect x="460" y="205" width="90" height="6" fill="#fff"/>
+  <rect x="0" y="118" width="170" height="5" fill="#fff" opacity=".55"/>
+  <rect x="580" y="246" width="180" height="4" fill="#00e5ff" opacity=".6"/>
+  <rect x="0" y="262" width="320" height="4" fill="#ff2e93" opacity=".5"/>
+  <circle cx="722" cy="42" r="9" fill="#ff2e3d"/>
+  <rect width="760" height="300" fill="url(#l2_sc)"/>
+</svg></div></div></div>
+<div class="pair"><div class="pane dark"><b>Icon sizes</b><div class="ico"><figure><svg role="img" aria-label="Backtrack logo" width="64" height="64" viewBox="0 35 230 230">
+  
+  <defs>
+    <linearGradient id="sd2_64_g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#241044"/><stop offset="1" stop-color="#0a0516"/></linearGradient>
+    <pattern id="sd2_64_sc" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="1.6" fill="#000" opacity=".28"/></pattern>
+    <g id="sd2_64_rew"><path d="M118 95 V205 L40 150 Z"/><path d="M206 95 V205 L128 150 Z"/></g>
+    <g id="sd2_64_wm" font-family="Impact, 'Arial Black', 'Helvetica Neue', Arial, sans-serif" font-size="92" font-style="italic" font-weight="900" letter-spacing="2"><text x="236" y="178">BACKTRACK</text></g>
+  </defs>
+  <rect width="760" height="300" fill="url(#sd2_64_g)"/>
+  <g opacity=".9"><use href="#sd2_64_rew" x="-5" fill="#00e5ff"/><use href="#sd2_64_rew" x="5" fill="#ff2e93"/></g>
+  <use href="#sd2_64_rew" fill="#fff"/>
+  <g opacity=".9"><use href="#sd2_64_wm" x="-4" fill="#00e5ff"/><use href="#sd2_64_wm" x="4" fill="#ff2e93"/></g>
+  <use href="#sd2_64_wm" fill="#fff"/>
+  <g fill="#fff" font-family="'Courier New', Consolas, monospace" font-size="22" font-weight="700">
+    <text x="240" y="218" fill="#00e5ff">REW  00:30</text>
+  </g>
+  <rect x="460" y="205" width="260" height="6" fill="#ff2e93"/>
+  <rect x="460" y="205" width="90" height="6" fill="#fff"/>
+  <rect x="0" y="118" width="170" height="5" fill="#fff" opacity=".55"/>
+  <rect x="580" y="246" width="180" height="4" fill="#00e5ff" opacity=".6"/>
+  <rect x="0" y="262" width="320" height="4" fill="#ff2e93" opacity=".5"/>
+  <circle cx="722" cy="42" r="9" fill="#ff2e3d"/>
+  <rect width="760" height="300" fill="url(#sd2_64_sc)"/>
+</svg><figcaption>64 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="32" height="32" viewBox="0 35 230 230">
+  
+  <defs>
+    <linearGradient id="sd2_32_g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#241044"/><stop offset="1" stop-color="#0a0516"/></linearGradient>
+    <pattern id="sd2_32_sc" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="1.6" fill="#000" opacity=".28"/></pattern>
+    <g id="sd2_32_rew"><path d="M118 95 V205 L40 150 Z"/><path d="M206 95 V205 L128 150 Z"/></g>
+    <g id="sd2_32_wm" font-family="Impact, 'Arial Black', 'Helvetica Neue', Arial, sans-serif" font-size="92" font-style="italic" font-weight="900" letter-spacing="2"><text x="236" y="178">BACKTRACK</text></g>
+  </defs>
+  <rect width="760" height="300" fill="url(#sd2_32_g)"/>
+  <g opacity=".9"><use href="#sd2_32_rew" x="-5" fill="#00e5ff"/><use href="#sd2_32_rew" x="5" fill="#ff2e93"/></g>
+  <use href="#sd2_32_rew" fill="#fff"/>
+  <g opacity=".9"><use href="#sd2_32_wm" x="-4" fill="#00e5ff"/><use href="#sd2_32_wm" x="4" fill="#ff2e93"/></g>
+  <use href="#sd2_32_wm" fill="#fff"/>
+  <g fill="#fff" font-family="'Courier New', Consolas, monospace" font-size="22" font-weight="700">
+    <text x="240" y="218" fill="#00e5ff">REW  00:30</text>
+  </g>
+  <rect x="460" y="205" width="260" height="6" fill="#ff2e93"/>
+  <rect x="460" y="205" width="90" height="6" fill="#fff"/>
+  <rect x="0" y="118" width="170" height="5" fill="#fff" opacity=".55"/>
+  <rect x="580" y="246" width="180" height="4" fill="#00e5ff" opacity=".6"/>
+  <rect x="0" y="262" width="320" height="4" fill="#ff2e93" opacity=".5"/>
+  <circle cx="722" cy="42" r="9" fill="#ff2e3d"/>
+  <rect width="760" height="300" fill="url(#sd2_32_sc)"/>
+</svg><figcaption>32 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="16" height="16" viewBox="0 35 230 230">
+  
+  <defs>
+    <linearGradient id="sd2_16_g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#241044"/><stop offset="1" stop-color="#0a0516"/></linearGradient>
+    <pattern id="sd2_16_sc" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="1.6" fill="#000" opacity=".28"/></pattern>
+    <g id="sd2_16_rew"><path d="M118 95 V205 L40 150 Z"/><path d="M206 95 V205 L128 150 Z"/></g>
+    <g id="sd2_16_wm" font-family="Impact, 'Arial Black', 'Helvetica Neue', Arial, sans-serif" font-size="92" font-style="italic" font-weight="900" letter-spacing="2"><text x="236" y="178">BACKTRACK</text></g>
+  </defs>
+  <rect width="760" height="300" fill="url(#sd2_16_g)"/>
+  <g opacity=".9"><use href="#sd2_16_rew" x="-5" fill="#00e5ff"/><use href="#sd2_16_rew" x="5" fill="#ff2e93"/></g>
+  <use href="#sd2_16_rew" fill="#fff"/>
+  <g opacity=".9"><use href="#sd2_16_wm" x="-4" fill="#00e5ff"/><use href="#sd2_16_wm" x="4" fill="#ff2e93"/></g>
+  <use href="#sd2_16_wm" fill="#fff"/>
+  <g fill="#fff" font-family="'Courier New', Consolas, monospace" font-size="22" font-weight="700">
+    <text x="240" y="218" fill="#00e5ff">REW  00:30</text>
+  </g>
+  <rect x="460" y="205" width="260" height="6" fill="#ff2e93"/>
+  <rect x="460" y="205" width="90" height="6" fill="#fff"/>
+  <rect x="0" y="118" width="170" height="5" fill="#fff" opacity=".55"/>
+  <rect x="580" y="246" width="180" height="4" fill="#00e5ff" opacity=".6"/>
+  <rect x="0" y="262" width="320" height="4" fill="#ff2e93" opacity=".5"/>
+  <circle cx="722" cy="42" r="9" fill="#ff2e3d"/>
+  <rect width="760" height="300" fill="url(#sd2_16_sc)"/>
+</svg><figcaption>16 px</figcaption></figure></div></div><div class="pane light"><b>Icon sizes</b><div class="ico"><figure><svg role="img" aria-label="Backtrack logo" width="64" height="64" viewBox="0 35 230 230">
+  
+  <defs>
+    <linearGradient id="sl2_64_g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#241044"/><stop offset="1" stop-color="#0a0516"/></linearGradient>
+    <pattern id="sl2_64_sc" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="1.6" fill="#000" opacity=".28"/></pattern>
+    <g id="sl2_64_rew"><path d="M118 95 V205 L40 150 Z"/><path d="M206 95 V205 L128 150 Z"/></g>
+    <g id="sl2_64_wm" font-family="Impact, 'Arial Black', 'Helvetica Neue', Arial, sans-serif" font-size="92" font-style="italic" font-weight="900" letter-spacing="2"><text x="236" y="178">BACKTRACK</text></g>
+  </defs>
+  <rect width="760" height="300" fill="url(#sl2_64_g)"/>
+  <g opacity=".9"><use href="#sl2_64_rew" x="-5" fill="#00e5ff"/><use href="#sl2_64_rew" x="5" fill="#ff2e93"/></g>
+  <use href="#sl2_64_rew" fill="#fff"/>
+  <g opacity=".9"><use href="#sl2_64_wm" x="-4" fill="#00e5ff"/><use href="#sl2_64_wm" x="4" fill="#ff2e93"/></g>
+  <use href="#sl2_64_wm" fill="#fff"/>
+  <g fill="#fff" font-family="'Courier New', Consolas, monospace" font-size="22" font-weight="700">
+    <text x="240" y="218" fill="#00e5ff">REW  00:30</text>
+  </g>
+  <rect x="460" y="205" width="260" height="6" fill="#ff2e93"/>
+  <rect x="460" y="205" width="90" height="6" fill="#fff"/>
+  <rect x="0" y="118" width="170" height="5" fill="#fff" opacity=".55"/>
+  <rect x="580" y="246" width="180" height="4" fill="#00e5ff" opacity=".6"/>
+  <rect x="0" y="262" width="320" height="4" fill="#ff2e93" opacity=".5"/>
+  <circle cx="722" cy="42" r="9" fill="#ff2e3d"/>
+  <rect width="760" height="300" fill="url(#sl2_64_sc)"/>
+</svg><figcaption>64 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="32" height="32" viewBox="0 35 230 230">
+  
+  <defs>
+    <linearGradient id="sl2_32_g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#241044"/><stop offset="1" stop-color="#0a0516"/></linearGradient>
+    <pattern id="sl2_32_sc" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="1.6" fill="#000" opacity=".28"/></pattern>
+    <g id="sl2_32_rew"><path d="M118 95 V205 L40 150 Z"/><path d="M206 95 V205 L128 150 Z"/></g>
+    <g id="sl2_32_wm" font-family="Impact, 'Arial Black', 'Helvetica Neue', Arial, sans-serif" font-size="92" font-style="italic" font-weight="900" letter-spacing="2"><text x="236" y="178">BACKTRACK</text></g>
+  </defs>
+  <rect width="760" height="300" fill="url(#sl2_32_g)"/>
+  <g opacity=".9"><use href="#sl2_32_rew" x="-5" fill="#00e5ff"/><use href="#sl2_32_rew" x="5" fill="#ff2e93"/></g>
+  <use href="#sl2_32_rew" fill="#fff"/>
+  <g opacity=".9"><use href="#sl2_32_wm" x="-4" fill="#00e5ff"/><use href="#sl2_32_wm" x="4" fill="#ff2e93"/></g>
+  <use href="#sl2_32_wm" fill="#fff"/>
+  <g fill="#fff" font-family="'Courier New', Consolas, monospace" font-size="22" font-weight="700">
+    <text x="240" y="218" fill="#00e5ff">REW  00:30</text>
+  </g>
+  <rect x="460" y="205" width="260" height="6" fill="#ff2e93"/>
+  <rect x="460" y="205" width="90" height="6" fill="#fff"/>
+  <rect x="0" y="118" width="170" height="5" fill="#fff" opacity=".55"/>
+  <rect x="580" y="246" width="180" height="4" fill="#00e5ff" opacity=".6"/>
+  <rect x="0" y="262" width="320" height="4" fill="#ff2e93" opacity=".5"/>
+  <circle cx="722" cy="42" r="9" fill="#ff2e3d"/>
+  <rect width="760" height="300" fill="url(#sl2_32_sc)"/>
+</svg><figcaption>32 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="16" height="16" viewBox="0 35 230 230">
+  
+  <defs>
+    <linearGradient id="sl2_16_g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#241044"/><stop offset="1" stop-color="#0a0516"/></linearGradient>
+    <pattern id="sl2_16_sc" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="1.6" fill="#000" opacity=".28"/></pattern>
+    <g id="sl2_16_rew"><path d="M118 95 V205 L40 150 Z"/><path d="M206 95 V205 L128 150 Z"/></g>
+    <g id="sl2_16_wm" font-family="Impact, 'Arial Black', 'Helvetica Neue', Arial, sans-serif" font-size="92" font-style="italic" font-weight="900" letter-spacing="2"><text x="236" y="178">BACKTRACK</text></g>
+  </defs>
+  <rect width="760" height="300" fill="url(#sl2_16_g)"/>
+  <g opacity=".9"><use href="#sl2_16_rew" x="-5" fill="#00e5ff"/><use href="#sl2_16_rew" x="5" fill="#ff2e93"/></g>
+  <use href="#sl2_16_rew" fill="#fff"/>
+  <g opacity=".9"><use href="#sl2_16_wm" x="-4" fill="#00e5ff"/><use href="#sl2_16_wm" x="4" fill="#ff2e93"/></g>
+  <use href="#sl2_16_wm" fill="#fff"/>
+  <g fill="#fff" font-family="'Courier New', Consolas, monospace" font-size="22" font-weight="700">
+    <text x="240" y="218" fill="#00e5ff">REW  00:30</text>
+  </g>
+  <rect x="460" y="205" width="260" height="6" fill="#ff2e93"/>
+  <rect x="460" y="205" width="90" height="6" fill="#fff"/>
+  <rect x="0" y="118" width="170" height="5" fill="#fff" opacity=".55"/>
+  <rect x="580" y="246" width="180" height="4" fill="#00e5ff" opacity=".6"/>
+  <rect x="0" y="262" width="320" height="4" fill="#ff2e93" opacity=".5"/>
+  <circle cx="722" cy="42" r="9" fill="#ff2e3d"/>
+  <rect width="760" height="300" fill="url(#sl2_16_sc)"/>
+</svg><figcaption>16 px</figcaption></figure></div></div></div>
+</article>
+<article class="card"><header><span class="num">3</span><h2>Esports Shield</h2><code>03-esports-shield</code></header>
+<p class="idea">Bold gaming badge. Chunky angular B on a shield with an offset hard shadow and a small rewind mark. Symbol only.</p><div class="sws"><span class="sw"><i style="background:#ff2e4d"></i>#ff2e4d</span><span class="sw"><i style="background:#0b0b12"></i>#0b0b12</span><span class="sw"><i style="background:#f5ff3b"></i>#f5ff3b</span></div>
+<div class="pair"><div class="pane dark"><b>On dark</b><div class="big"><svg role="img" aria-label="Backtrack logo" viewBox="0 0 256 256">
+  
+  <path d="M128 8 L236 40 V168 L128 248 L20 168 V40 Z" fill="#ff2e4d"/>
+  <path d="M128 22 L222 49 V162 L128 232 L34 162 V49 Z" fill="#0b0b12"/>
+  <path fill-rule="evenodd" fill="#ff2e4d" transform="translate(9 9)" d="M76 50 H150 L176 70 V104 L160 118 L182 134 V158 L156 174 H76 Z M102 72 V102 H144 L150 96 V78 L144 72 Z M102 124 V152 H148 L156 146 V130 L148 124 Z"/>
+  <path fill-rule="evenodd" fill="#f5ff3b" d="M76 50 H150 L176 70 V104 L160 118 L182 134 V158 L156 174 H76 Z M102 72 V102 H144 L150 96 V78 L144 72 Z M102 124 V152 H148 L156 146 V130 L148 124 Z"/>
+  <g fill="#f5ff3b"><path d="M128 190 V212 L108 201 Z"/><path d="M152 190 V212 L132 201 Z"/></g>
+</svg></div></div><div class="pane light"><b>On light</b><div class="big"><svg role="img" aria-label="Backtrack logo" viewBox="0 0 256 256">
+  
+  <path d="M128 8 L236 40 V168 L128 248 L20 168 V40 Z" fill="#ff2e4d"/>
+  <path d="M128 22 L222 49 V162 L128 232 L34 162 V49 Z" fill="#0b0b12"/>
+  <path fill-rule="evenodd" fill="#ff2e4d" transform="translate(9 9)" d="M76 50 H150 L176 70 V104 L160 118 L182 134 V158 L156 174 H76 Z M102 72 V102 H144 L150 96 V78 L144 72 Z M102 124 V152 H148 L156 146 V130 L148 124 Z"/>
+  <path fill-rule="evenodd" fill="#f5ff3b" d="M76 50 H150 L176 70 V104 L160 118 L182 134 V158 L156 174 H76 Z M102 72 V102 H144 L150 96 V78 L144 72 Z M102 124 V152 H148 L156 146 V130 L148 124 Z"/>
+  <g fill="#f5ff3b"><path d="M128 190 V212 L108 201 Z"/><path d="M152 190 V212 L132 201 Z"/></g>
+</svg></div></div></div>
+<div class="pair"><div class="pane dark"><b>Icon sizes</b><div class="ico"><figure><svg role="img" aria-label="Backtrack logo" width="64" height="64" viewBox="0 0 256 256">
+  
+  <path d="M128 8 L236 40 V168 L128 248 L20 168 V40 Z" fill="#ff2e4d"/>
+  <path d="M128 22 L222 49 V162 L128 232 L34 162 V49 Z" fill="#0b0b12"/>
+  <path fill-rule="evenodd" fill="#ff2e4d" transform="translate(9 9)" d="M76 50 H150 L176 70 V104 L160 118 L182 134 V158 L156 174 H76 Z M102 72 V102 H144 L150 96 V78 L144 72 Z M102 124 V152 H148 L156 146 V130 L148 124 Z"/>
+  <path fill-rule="evenodd" fill="#f5ff3b" d="M76 50 H150 L176 70 V104 L160 118 L182 134 V158 L156 174 H76 Z M102 72 V102 H144 L150 96 V78 L144 72 Z M102 124 V152 H148 L156 146 V130 L148 124 Z"/>
+  <g fill="#f5ff3b"><path d="M128 190 V212 L108 201 Z"/><path d="M152 190 V212 L132 201 Z"/></g>
+</svg><figcaption>64 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="32" height="32" viewBox="0 0 256 256">
+  
+  <path d="M128 8 L236 40 V168 L128 248 L20 168 V40 Z" fill="#ff2e4d"/>
+  <path d="M128 22 L222 49 V162 L128 232 L34 162 V49 Z" fill="#0b0b12"/>
+  <path fill-rule="evenodd" fill="#ff2e4d" transform="translate(9 9)" d="M76 50 H150 L176 70 V104 L160 118 L182 134 V158 L156 174 H76 Z M102 72 V102 H144 L150 96 V78 L144 72 Z M102 124 V152 H148 L156 146 V130 L148 124 Z"/>
+  <path fill-rule="evenodd" fill="#f5ff3b" d="M76 50 H150 L176 70 V104 L160 118 L182 134 V158 L156 174 H76 Z M102 72 V102 H144 L150 96 V78 L144 72 Z M102 124 V152 H148 L156 146 V130 L148 124 Z"/>
+  <g fill="#f5ff3b"><path d="M128 190 V212 L108 201 Z"/><path d="M152 190 V212 L132 201 Z"/></g>
+</svg><figcaption>32 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="16" height="16" viewBox="0 0 256 256">
+  
+  <path d="M128 8 L236 40 V168 L128 248 L20 168 V40 Z" fill="#ff2e4d"/>
+  <path d="M128 22 L222 49 V162 L128 232 L34 162 V49 Z" fill="#0b0b12"/>
+  <path fill-rule="evenodd" fill="#ff2e4d" transform="translate(9 9)" d="M76 50 H150 L176 70 V104 L160 118 L182 134 V158 L156 174 H76 Z M102 72 V102 H144 L150 96 V78 L144 72 Z M102 124 V152 H148 L156 146 V130 L148 124 Z"/>
+  <path fill-rule="evenodd" fill="#f5ff3b" d="M76 50 H150 L176 70 V104 L160 118 L182 134 V158 L156 174 H76 Z M102 72 V102 H144 L150 96 V78 L144 72 Z M102 124 V152 H148 L156 146 V130 L148 124 Z"/>
+  <g fill="#f5ff3b"><path d="M128 190 V212 L108 201 Z"/><path d="M152 190 V212 L132 201 Z"/></g>
+</svg><figcaption>16 px</figcaption></figure></div></div><div class="pane light"><b>Icon sizes</b><div class="ico"><figure><svg role="img" aria-label="Backtrack logo" width="64" height="64" viewBox="0 0 256 256">
+  
+  <path d="M128 8 L236 40 V168 L128 248 L20 168 V40 Z" fill="#ff2e4d"/>
+  <path d="M128 22 L222 49 V162 L128 232 L34 162 V49 Z" fill="#0b0b12"/>
+  <path fill-rule="evenodd" fill="#ff2e4d" transform="translate(9 9)" d="M76 50 H150 L176 70 V104 L160 118 L182 134 V158 L156 174 H76 Z M102 72 V102 H144 L150 96 V78 L144 72 Z M102 124 V152 H148 L156 146 V130 L148 124 Z"/>
+  <path fill-rule="evenodd" fill="#f5ff3b" d="M76 50 H150 L176 70 V104 L160 118 L182 134 V158 L156 174 H76 Z M102 72 V102 H144 L150 96 V78 L144 72 Z M102 124 V152 H148 L156 146 V130 L148 124 Z"/>
+  <g fill="#f5ff3b"><path d="M128 190 V212 L108 201 Z"/><path d="M152 190 V212 L132 201 Z"/></g>
+</svg><figcaption>64 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="32" height="32" viewBox="0 0 256 256">
+  
+  <path d="M128 8 L236 40 V168 L128 248 L20 168 V40 Z" fill="#ff2e4d"/>
+  <path d="M128 22 L222 49 V162 L128 232 L34 162 V49 Z" fill="#0b0b12"/>
+  <path fill-rule="evenodd" fill="#ff2e4d" transform="translate(9 9)" d="M76 50 H150 L176 70 V104 L160 118 L182 134 V158 L156 174 H76 Z M102 72 V102 H144 L150 96 V78 L144 72 Z M102 124 V152 H148 L156 146 V130 L148 124 Z"/>
+  <path fill-rule="evenodd" fill="#f5ff3b" d="M76 50 H150 L176 70 V104 L160 118 L182 134 V158 L156 174 H76 Z M102 72 V102 H144 L150 96 V78 L144 72 Z M102 124 V152 H148 L156 146 V130 L148 124 Z"/>
+  <g fill="#f5ff3b"><path d="M128 190 V212 L108 201 Z"/><path d="M152 190 V212 L132 201 Z"/></g>
+</svg><figcaption>32 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="16" height="16" viewBox="0 0 256 256">
+  
+  <path d="M128 8 L236 40 V168 L128 248 L20 168 V40 Z" fill="#ff2e4d"/>
+  <path d="M128 22 L222 49 V162 L128 232 L34 162 V49 Z" fill="#0b0b12"/>
+  <path fill-rule="evenodd" fill="#ff2e4d" transform="translate(9 9)" d="M76 50 H150 L176 70 V104 L160 118 L182 134 V158 L156 174 H76 Z M102 72 V102 H144 L150 96 V78 L144 72 Z M102 124 V152 H148 L156 146 V130 L148 124 Z"/>
+  <path fill-rule="evenodd" fill="#f5ff3b" d="M76 50 H150 L176 70 V104 L160 118 L182 134 V158 L156 174 H76 Z M102 72 V102 H144 L150 96 V78 L144 72 Z M102 124 V152 H148 L156 146 V130 L148 124 Z"/>
+  <g fill="#f5ff3b"><path d="M128 190 V212 L108 201 Z"/><path d="M152 190 V212 L132 201 Z"/></g>
+</svg><figcaption>16 px</figcaption></figure></div></div></div>
+</article>
+<article class="card"><header><span class="num">4</span><h2>Stopwatch Sticker</h2><code>04-stopwatch-sticker</code></header>
+<p class="idea">Hand-drawn organic sticker. Wobbly stopwatch with the last half filled in and a curl-back arrow. Symbol only.</p><div class="sws"><span class="sw"><i style="background:#ffc94a"></i>#ffc94a</span><span class="sw"><i style="background:#1f3a3d"></i>#1f3a3d</span><span class="sw"><i style="background:#ff7a59"></i>#ff7a59</span><span class="sw"><i style="background:#fff3d6"></i>#fff3d6</span></div>
+<div class="pair"><div class="pane dark"><b>On dark</b><div class="big"><svg role="img" aria-label="Backtrack logo" viewBox="0 0 256 256">
+  
+  <path d="M130 14 C190 10 244 50 242 120 C240 190 196 244 126 242 C58 240 12 196 14 128 C16 62 62 18 130 14 Z" fill="#1f3a3d" transform="translate(6 7)"/>
+  <path d="M130 14 C190 10 244 50 242 120 C240 190 196 244 126 242 C58 240 12 196 14 128 C16 62 62 18 130 14 Z" fill="#ffc94a"/>
+  <g stroke="#1f3a3d" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M128 62 C170 58 200 90 198 130 C196 172 164 198 126 196 C86 194 58 164 60 124 C62 88 90 64 128 62 Z" fill="#fff3d6"/>
+    <path d="M128 128 L128 68 A60 60 0 0 0 128 188 Z" fill="#ff7a59" stroke="none"/>
+    <path d="M112 42 Q128 32 146 43 M128 62 L128 46 M178 72 L188 62" fill="none"/>
+    <path d="M118 172 L136 186 L117 200" fill="none" stroke-width="8"/>
+    <path d="M128 128 L128 72 M128 128 L151 104" fill="none"/>
+  </g>
+  <circle cx="128" cy="128" r="7" fill="#1f3a3d"/>
+</svg></div></div><div class="pane light"><b>On light</b><div class="big"><svg role="img" aria-label="Backtrack logo" viewBox="0 0 256 256">
+  
+  <path d="M130 14 C190 10 244 50 242 120 C240 190 196 244 126 242 C58 240 12 196 14 128 C16 62 62 18 130 14 Z" fill="#1f3a3d" transform="translate(6 7)"/>
+  <path d="M130 14 C190 10 244 50 242 120 C240 190 196 244 126 242 C58 240 12 196 14 128 C16 62 62 18 130 14 Z" fill="#ffc94a"/>
+  <g stroke="#1f3a3d" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M128 62 C170 58 200 90 198 130 C196 172 164 198 126 196 C86 194 58 164 60 124 C62 88 90 64 128 62 Z" fill="#fff3d6"/>
+    <path d="M128 128 L128 68 A60 60 0 0 0 128 188 Z" fill="#ff7a59" stroke="none"/>
+    <path d="M112 42 Q128 32 146 43 M128 62 L128 46 M178 72 L188 62" fill="none"/>
+    <path d="M118 172 L136 186 L117 200" fill="none" stroke-width="8"/>
+    <path d="M128 128 L128 72 M128 128 L151 104" fill="none"/>
+  </g>
+  <circle cx="128" cy="128" r="7" fill="#1f3a3d"/>
+</svg></div></div></div>
+<div class="pair"><div class="pane dark"><b>Icon sizes</b><div class="ico"><figure><svg role="img" aria-label="Backtrack logo" width="64" height="64" viewBox="0 0 256 256">
+  
+  <path d="M130 14 C190 10 244 50 242 120 C240 190 196 244 126 242 C58 240 12 196 14 128 C16 62 62 18 130 14 Z" fill="#1f3a3d" transform="translate(6 7)"/>
+  <path d="M130 14 C190 10 244 50 242 120 C240 190 196 244 126 242 C58 240 12 196 14 128 C16 62 62 18 130 14 Z" fill="#ffc94a"/>
+  <g stroke="#1f3a3d" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M128 62 C170 58 200 90 198 130 C196 172 164 198 126 196 C86 194 58 164 60 124 C62 88 90 64 128 62 Z" fill="#fff3d6"/>
+    <path d="M128 128 L128 68 A60 60 0 0 0 128 188 Z" fill="#ff7a59" stroke="none"/>
+    <path d="M112 42 Q128 32 146 43 M128 62 L128 46 M178 72 L188 62" fill="none"/>
+    <path d="M118 172 L136 186 L117 200" fill="none" stroke-width="8"/>
+    <path d="M128 128 L128 72 M128 128 L151 104" fill="none"/>
+  </g>
+  <circle cx="128" cy="128" r="7" fill="#1f3a3d"/>
+</svg><figcaption>64 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="32" height="32" viewBox="0 0 256 256">
+  
+  <path d="M130 14 C190 10 244 50 242 120 C240 190 196 244 126 242 C58 240 12 196 14 128 C16 62 62 18 130 14 Z" fill="#1f3a3d" transform="translate(6 7)"/>
+  <path d="M130 14 C190 10 244 50 242 120 C240 190 196 244 126 242 C58 240 12 196 14 128 C16 62 62 18 130 14 Z" fill="#ffc94a"/>
+  <g stroke="#1f3a3d" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M128 62 C170 58 200 90 198 130 C196 172 164 198 126 196 C86 194 58 164 60 124 C62 88 90 64 128 62 Z" fill="#fff3d6"/>
+    <path d="M128 128 L128 68 A60 60 0 0 0 128 188 Z" fill="#ff7a59" stroke="none"/>
+    <path d="M112 42 Q128 32 146 43 M128 62 L128 46 M178 72 L188 62" fill="none"/>
+    <path d="M118 172 L136 186 L117 200" fill="none" stroke-width="8"/>
+    <path d="M128 128 L128 72 M128 128 L151 104" fill="none"/>
+  </g>
+  <circle cx="128" cy="128" r="7" fill="#1f3a3d"/>
+</svg><figcaption>32 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="16" height="16" viewBox="0 0 256 256">
+  
+  <path d="M130 14 C190 10 244 50 242 120 C240 190 196 244 126 242 C58 240 12 196 14 128 C16 62 62 18 130 14 Z" fill="#1f3a3d" transform="translate(6 7)"/>
+  <path d="M130 14 C190 10 244 50 242 120 C240 190 196 244 126 242 C58 240 12 196 14 128 C16 62 62 18 130 14 Z" fill="#ffc94a"/>
+  <g stroke="#1f3a3d" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M128 62 C170 58 200 90 198 130 C196 172 164 198 126 196 C86 194 58 164 60 124 C62 88 90 64 128 62 Z" fill="#fff3d6"/>
+    <path d="M128 128 L128 68 A60 60 0 0 0 128 188 Z" fill="#ff7a59" stroke="none"/>
+    <path d="M112 42 Q128 32 146 43 M128 62 L128 46 M178 72 L188 62" fill="none"/>
+    <path d="M118 172 L136 186 L117 200" fill="none" stroke-width="8"/>
+    <path d="M128 128 L128 72 M128 128 L151 104" fill="none"/>
+  </g>
+  <circle cx="128" cy="128" r="7" fill="#1f3a3d"/>
+</svg><figcaption>16 px</figcaption></figure></div></div><div class="pane light"><b>Icon sizes</b><div class="ico"><figure><svg role="img" aria-label="Backtrack logo" width="64" height="64" viewBox="0 0 256 256">
+  
+  <path d="M130 14 C190 10 244 50 242 120 C240 190 196 244 126 242 C58 240 12 196 14 128 C16 62 62 18 130 14 Z" fill="#1f3a3d" transform="translate(6 7)"/>
+  <path d="M130 14 C190 10 244 50 242 120 C240 190 196 244 126 242 C58 240 12 196 14 128 C16 62 62 18 130 14 Z" fill="#ffc94a"/>
+  <g stroke="#1f3a3d" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M128 62 C170 58 200 90 198 130 C196 172 164 198 126 196 C86 194 58 164 60 124 C62 88 90 64 128 62 Z" fill="#fff3d6"/>
+    <path d="M128 128 L128 68 A60 60 0 0 0 128 188 Z" fill="#ff7a59" stroke="none"/>
+    <path d="M112 42 Q128 32 146 43 M128 62 L128 46 M178 72 L188 62" fill="none"/>
+    <path d="M118 172 L136 186 L117 200" fill="none" stroke-width="8"/>
+    <path d="M128 128 L128 72 M128 128 L151 104" fill="none"/>
+  </g>
+  <circle cx="128" cy="128" r="7" fill="#1f3a3d"/>
+</svg><figcaption>64 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="32" height="32" viewBox="0 0 256 256">
+  
+  <path d="M130 14 C190 10 244 50 242 120 C240 190 196 244 126 242 C58 240 12 196 14 128 C16 62 62 18 130 14 Z" fill="#1f3a3d" transform="translate(6 7)"/>
+  <path d="M130 14 C190 10 244 50 242 120 C240 190 196 244 126 242 C58 240 12 196 14 128 C16 62 62 18 130 14 Z" fill="#ffc94a"/>
+  <g stroke="#1f3a3d" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M128 62 C170 58 200 90 198 130 C196 172 164 198 126 196 C86 194 58 164 60 124 C62 88 90 64 128 62 Z" fill="#fff3d6"/>
+    <path d="M128 128 L128 68 A60 60 0 0 0 128 188 Z" fill="#ff7a59" stroke="none"/>
+    <path d="M112 42 Q128 32 146 43 M128 62 L128 46 M178 72 L188 62" fill="none"/>
+    <path d="M118 172 L136 186 L117 200" fill="none" stroke-width="8"/>
+    <path d="M128 128 L128 72 M128 128 L151 104" fill="none"/>
+  </g>
+  <circle cx="128" cy="128" r="7" fill="#1f3a3d"/>
+</svg><figcaption>32 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="16" height="16" viewBox="0 0 256 256">
+  
+  <path d="M130 14 C190 10 244 50 242 120 C240 190 196 244 126 242 C58 240 12 196 14 128 C16 62 62 18 130 14 Z" fill="#1f3a3d" transform="translate(6 7)"/>
+  <path d="M130 14 C190 10 244 50 242 120 C240 190 196 244 126 242 C58 240 12 196 14 128 C16 62 62 18 130 14 Z" fill="#ffc94a"/>
+  <g stroke="#1f3a3d" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M128 62 C170 58 200 90 198 130 C196 172 164 198 126 196 C86 194 58 164 60 124 C62 88 90 64 128 62 Z" fill="#fff3d6"/>
+    <path d="M128 128 L128 68 A60 60 0 0 0 128 188 Z" fill="#ff7a59" stroke="none"/>
+    <path d="M112 42 Q128 32 146 43 M128 62 L128 46 M178 72 L188 62" fill="none"/>
+    <path d="M118 172 L136 186 L117 200" fill="none" stroke-width="8"/>
+    <path d="M128 128 L128 72 M128 128 L151 104" fill="none"/>
+  </g>
+  <circle cx="128" cy="128" r="7" fill="#1f3a3d"/>
+</svg><figcaption>16 px</figcaption></figure></div></div></div>
+</article>
+<article class="card"><header><span class="num">5</span><h2>Swiss Timeline</h2><code>05-swiss-timeline</code></header>
+<p class="idea">Swiss typographic. Black square with a ruler timeline, red playhead and an arrow jumping back, tight Helvetica wordmark. Symbol + wordmark.</p><div class="sws"><span class="sw"><i style="background:#111111"></i>#111111</span><span class="sw"><i style="background:#f6f5f1"></i>#f6f5f1</span><span class="sw"><i style="background:#ff3b1f"></i>#ff3b1f</span></div>
+<div class="pair"><div class="pane dark"><b>On dark</b><div class="big"><svg role="img" aria-label="Backtrack logo" viewBox="0 0 800 240">
+  
+  <rect width="800" height="240" fill="#f6f5f1"/>
+  <rect x="20" y="20" width="200" height="200" fill="#111"/>
+  <g fill="#f6f5f1">
+    <rect x="42" y="148" width="3" height="22"/><rect x="73" y="156" width="3" height="14"/><rect x="104" y="156" width="3" height="14"/>
+    <rect x="135" y="156" width="3" height="14"/><rect x="166" y="156" width="3" height="14"/><rect x="195" y="148" width="3" height="22"/>
+    <rect x="57" y="162" width="3" height="8"/><rect x="88" y="162" width="3" height="8"/><rect x="119" y="162" width="3" height="8"/><rect x="150" y="162" width="3" height="8"/><rect x="181" y="162" width="3" height="8"/>
+  </g>
+  <path d="M196 132 C196 60 150 56 92 76" fill="none" stroke="#f6f5f1" stroke-width="9"/>
+  <path d="M96 56 L58 84 L98 98 Z" fill="#f6f5f1"/>
+  <rect x="40.5" y="92" width="7" height="78" fill="#ff3b1f"/>
+  <rect x="31" y="96" width="26" height="12" fill="#ff3b1f"/>
+  <g font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" fill="#111">
+    <text x="252" y="148" font-size="104" font-weight="700" letter-spacing="-5">Backtrack</text>
+    <text x="256" y="190" font-size="24" font-weight="400" letter-spacing=".5">The last 30 seconds, saved with F8.</text>
+  </g>
+</svg></div></div><div class="pane light"><b>On light</b><div class="big"><svg role="img" aria-label="Backtrack logo" viewBox="0 0 800 240">
+  
+  <rect width="800" height="240" fill="#f6f5f1"/>
+  <rect x="20" y="20" width="200" height="200" fill="#111"/>
+  <g fill="#f6f5f1">
+    <rect x="42" y="148" width="3" height="22"/><rect x="73" y="156" width="3" height="14"/><rect x="104" y="156" width="3" height="14"/>
+    <rect x="135" y="156" width="3" height="14"/><rect x="166" y="156" width="3" height="14"/><rect x="195" y="148" width="3" height="22"/>
+    <rect x="57" y="162" width="3" height="8"/><rect x="88" y="162" width="3" height="8"/><rect x="119" y="162" width="3" height="8"/><rect x="150" y="162" width="3" height="8"/><rect x="181" y="162" width="3" height="8"/>
+  </g>
+  <path d="M196 132 C196 60 150 56 92 76" fill="none" stroke="#f6f5f1" stroke-width="9"/>
+  <path d="M96 56 L58 84 L98 98 Z" fill="#f6f5f1"/>
+  <rect x="40.5" y="92" width="7" height="78" fill="#ff3b1f"/>
+  <rect x="31" y="96" width="26" height="12" fill="#ff3b1f"/>
+  <g font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" fill="#111">
+    <text x="252" y="148" font-size="104" font-weight="700" letter-spacing="-5">Backtrack</text>
+    <text x="256" y="190" font-size="24" font-weight="400" letter-spacing=".5">The last 30 seconds, saved with F8.</text>
+  </g>
+</svg></div></div></div>
+<div class="pair"><div class="pane dark"><b>Icon sizes</b><div class="ico"><figure><svg role="img" aria-label="Backtrack logo" width="64" height="64" viewBox="20 20 200 200">
+  
+  <rect width="800" height="240" fill="#f6f5f1"/>
+  <rect x="20" y="20" width="200" height="200" fill="#111"/>
+  <g fill="#f6f5f1">
+    <rect x="42" y="148" width="3" height="22"/><rect x="73" y="156" width="3" height="14"/><rect x="104" y="156" width="3" height="14"/>
+    <rect x="135" y="156" width="3" height="14"/><rect x="166" y="156" width="3" height="14"/><rect x="195" y="148" width="3" height="22"/>
+    <rect x="57" y="162" width="3" height="8"/><rect x="88" y="162" width="3" height="8"/><rect x="119" y="162" width="3" height="8"/><rect x="150" y="162" width="3" height="8"/><rect x="181" y="162" width="3" height="8"/>
+  </g>
+  <path d="M196 132 C196 60 150 56 92 76" fill="none" stroke="#f6f5f1" stroke-width="9"/>
+  <path d="M96 56 L58 84 L98 98 Z" fill="#f6f5f1"/>
+  <rect x="40.5" y="92" width="7" height="78" fill="#ff3b1f"/>
+  <rect x="31" y="96" width="26" height="12" fill="#ff3b1f"/>
+  <g font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" fill="#111">
+    <text x="252" y="148" font-size="104" font-weight="700" letter-spacing="-5">Backtrack</text>
+    <text x="256" y="190" font-size="24" font-weight="400" letter-spacing=".5">The last 30 seconds, saved with F8.</text>
+  </g>
+</svg><figcaption>64 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="32" height="32" viewBox="20 20 200 200">
+  
+  <rect width="800" height="240" fill="#f6f5f1"/>
+  <rect x="20" y="20" width="200" height="200" fill="#111"/>
+  <g fill="#f6f5f1">
+    <rect x="42" y="148" width="3" height="22"/><rect x="73" y="156" width="3" height="14"/><rect x="104" y="156" width="3" height="14"/>
+    <rect x="135" y="156" width="3" height="14"/><rect x="166" y="156" width="3" height="14"/><rect x="195" y="148" width="3" height="22"/>
+    <rect x="57" y="162" width="3" height="8"/><rect x="88" y="162" width="3" height="8"/><rect x="119" y="162" width="3" height="8"/><rect x="150" y="162" width="3" height="8"/><rect x="181" y="162" width="3" height="8"/>
+  </g>
+  <path d="M196 132 C196 60 150 56 92 76" fill="none" stroke="#f6f5f1" stroke-width="9"/>
+  <path d="M96 56 L58 84 L98 98 Z" fill="#f6f5f1"/>
+  <rect x="40.5" y="92" width="7" height="78" fill="#ff3b1f"/>
+  <rect x="31" y="96" width="26" height="12" fill="#ff3b1f"/>
+  <g font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" fill="#111">
+    <text x="252" y="148" font-size="104" font-weight="700" letter-spacing="-5">Backtrack</text>
+    <text x="256" y="190" font-size="24" font-weight="400" letter-spacing=".5">The last 30 seconds, saved with F8.</text>
+  </g>
+</svg><figcaption>32 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="16" height="16" viewBox="20 20 200 200">
+  
+  <rect width="800" height="240" fill="#f6f5f1"/>
+  <rect x="20" y="20" width="200" height="200" fill="#111"/>
+  <g fill="#f6f5f1">
+    <rect x="42" y="148" width="3" height="22"/><rect x="73" y="156" width="3" height="14"/><rect x="104" y="156" width="3" height="14"/>
+    <rect x="135" y="156" width="3" height="14"/><rect x="166" y="156" width="3" height="14"/><rect x="195" y="148" width="3" height="22"/>
+    <rect x="57" y="162" width="3" height="8"/><rect x="88" y="162" width="3" height="8"/><rect x="119" y="162" width="3" height="8"/><rect x="150" y="162" width="3" height="8"/><rect x="181" y="162" width="3" height="8"/>
+  </g>
+  <path d="M196 132 C196 60 150 56 92 76" fill="none" stroke="#f6f5f1" stroke-width="9"/>
+  <path d="M96 56 L58 84 L98 98 Z" fill="#f6f5f1"/>
+  <rect x="40.5" y="92" width="7" height="78" fill="#ff3b1f"/>
+  <rect x="31" y="96" width="26" height="12" fill="#ff3b1f"/>
+  <g font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" fill="#111">
+    <text x="252" y="148" font-size="104" font-weight="700" letter-spacing="-5">Backtrack</text>
+    <text x="256" y="190" font-size="24" font-weight="400" letter-spacing=".5">The last 30 seconds, saved with F8.</text>
+  </g>
+</svg><figcaption>16 px</figcaption></figure></div></div><div class="pane light"><b>Icon sizes</b><div class="ico"><figure><svg role="img" aria-label="Backtrack logo" width="64" height="64" viewBox="20 20 200 200">
+  
+  <rect width="800" height="240" fill="#f6f5f1"/>
+  <rect x="20" y="20" width="200" height="200" fill="#111"/>
+  <g fill="#f6f5f1">
+    <rect x="42" y="148" width="3" height="22"/><rect x="73" y="156" width="3" height="14"/><rect x="104" y="156" width="3" height="14"/>
+    <rect x="135" y="156" width="3" height="14"/><rect x="166" y="156" width="3" height="14"/><rect x="195" y="148" width="3" height="22"/>
+    <rect x="57" y="162" width="3" height="8"/><rect x="88" y="162" width="3" height="8"/><rect x="119" y="162" width="3" height="8"/><rect x="150" y="162" width="3" height="8"/><rect x="181" y="162" width="3" height="8"/>
+  </g>
+  <path d="M196 132 C196 60 150 56 92 76" fill="none" stroke="#f6f5f1" stroke-width="9"/>
+  <path d="M96 56 L58 84 L98 98 Z" fill="#f6f5f1"/>
+  <rect x="40.5" y="92" width="7" height="78" fill="#ff3b1f"/>
+  <rect x="31" y="96" width="26" height="12" fill="#ff3b1f"/>
+  <g font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" fill="#111">
+    <text x="252" y="148" font-size="104" font-weight="700" letter-spacing="-5">Backtrack</text>
+    <text x="256" y="190" font-size="24" font-weight="400" letter-spacing=".5">The last 30 seconds, saved with F8.</text>
+  </g>
+</svg><figcaption>64 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="32" height="32" viewBox="20 20 200 200">
+  
+  <rect width="800" height="240" fill="#f6f5f1"/>
+  <rect x="20" y="20" width="200" height="200" fill="#111"/>
+  <g fill="#f6f5f1">
+    <rect x="42" y="148" width="3" height="22"/><rect x="73" y="156" width="3" height="14"/><rect x="104" y="156" width="3" height="14"/>
+    <rect x="135" y="156" width="3" height="14"/><rect x="166" y="156" width="3" height="14"/><rect x="195" y="148" width="3" height="22"/>
+    <rect x="57" y="162" width="3" height="8"/><rect x="88" y="162" width="3" height="8"/><rect x="119" y="162" width="3" height="8"/><rect x="150" y="162" width="3" height="8"/><rect x="181" y="162" width="3" height="8"/>
+  </g>
+  <path d="M196 132 C196 60 150 56 92 76" fill="none" stroke="#f6f5f1" stroke-width="9"/>
+  <path d="M96 56 L58 84 L98 98 Z" fill="#f6f5f1"/>
+  <rect x="40.5" y="92" width="7" height="78" fill="#ff3b1f"/>
+  <rect x="31" y="96" width="26" height="12" fill="#ff3b1f"/>
+  <g font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" fill="#111">
+    <text x="252" y="148" font-size="104" font-weight="700" letter-spacing="-5">Backtrack</text>
+    <text x="256" y="190" font-size="24" font-weight="400" letter-spacing=".5">The last 30 seconds, saved with F8.</text>
+  </g>
+</svg><figcaption>32 px</figcaption></figure><figure><svg role="img" aria-label="Backtrack logo" width="16" height="16" viewBox="20 20 200 200">
+  
+  <rect width="800" height="240" fill="#f6f5f1"/>
+  <rect x="20" y="20" width="200" height="200" fill="#111"/>
+  <g fill="#f6f5f1">
+    <rect x="42" y="148" width="3" height="22"/><rect x="73" y="156" width="3" height="14"/><rect x="104" y="156" width="3" height="14"/>
+    <rect x="135" y="156" width="3" height="14"/><rect x="166" y="156" width="3" height="14"/><rect x="195" y="148" width="3" height="22"/>
+    <rect x="57" y="162" width="3" height="8"/><rect x="88" y="162" width="3" height="8"/><rect x="119" y="162" width="3" height="8"/><rect x="150" y="162" width="3" height="8"/><rect x="181" y="162" width="3" height="8"/>
+  </g>
+  <path d="M196 132 C196 60 150 56 92 76" fill="none" stroke="#f6f5f1" stroke-width="9"/>
+  <path d="M96 56 L58 84 L98 98 Z" fill="#f6f5f1"/>
+  <rect x="40.5" y="92" width="7" height="78" fill="#ff3b1f"/>
+  <rect x="31" y="96" width="26" height="12" fill="#ff3b1f"/>
+  <g font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" fill="#111">
+    <text x="252" y="148" font-size="104" font-weight="700" letter-spacing="-5">Backtrack</text>
+    <text x="256" y="190" font-size="24" font-weight="400" letter-spacing=".5">The last 30 seconds, saved with F8.</text>
+  </g>
+</svg><figcaption>16 px</figcaption></figure></div></div></div>
+</article></div>
+<footer><p><strong>Pick a number and tell the crew in #backtrack.</strong></p>
+<p>Note: the 02 and 05 wordmarks use system fonts (Impact / Helvetica stacks), so they can look different on other machines. Whichever is picked will get its text outlined into shapes. The 02 and 05 lockups carry their own background plate, so the "on dark / on light" panels show the same plate; icon sizes use the symbol only.</p></footer>
+</main></body></html>

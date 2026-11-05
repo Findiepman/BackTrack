@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" width="760" height="300">
+  <title>Backtrack - VHS rewind</title>
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#241044"/><stop offset="1" stop-color="#0a0516"/></linearGradient>
+    <pattern id="sc" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="1.6" fill="#000" opacity=".28"/></pattern>
+    <g id="rew"><path d="M118 95 V205 L40 150 Z"/><path d="M206 95 V205 L128 150 Z"/></g>
+    <g id="wm" font-family="Impact, 'Arial Black', 'Helvetica Neue', Arial, sans-serif" font-size="92" font-style="italic" font-weight="900" letter-spacing="2"><text x="236" y="178">BACKTRACK</text></g>
+  </defs>
+  <rect width="760" height="300" fill="url(#g)"/>
+  <g opacity=".9"><use href="#rew" x="-5" fill="#00e5ff"/><use href="#rew" x="5" fill="#ff2e93"/></g>
+  <use href="#rew" fill="#fff"/>
+  <g opacity=".9"><use href="#wm" x="-4" fill="#00e5ff"/><use href="#wm" x="4" fill="#ff2e93"/></g>
+  <use href="#wm" fill="#fff"/>
+  <g fill="#fff" font-family="'Courier New', Consolas, monospace" font-size="22" font-weight="700">
+    <text x="240" y="218" fill="#00e5ff">REW  00:30</text>
+  </g>
+  <rect x="460" y="205" width="260" height="6" fill="#ff2e93"/>
+  <rect x="460" y="205" width="90" height="6" fill="#fff"/>
+  <rect x="0" y="118" width="170" height="5" fill="#fff" opacity=".55"/>
+  <rect x="580" y="246" width="180" height="4" fill="#00e5ff" opacity=".6"/>
+  <rect x="0" y="262" width="320" height="4" fill="#ff2e93" opacity=".5"/>
+  <circle cx="722" cy="42" r="9" fill="#ff2e3d"/>
+  <rect width="760" height="300" fill="url(#sc)"/>
+</svg>

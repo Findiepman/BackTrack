@@ -20,3 +20,4 @@ frames/
 # Private notes and agent instructions, not part of the program
 superprompt.md
 claude.md
+.claude/

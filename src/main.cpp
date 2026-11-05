@@ -6,6 +6,7 @@
 
 #include "core/Config.h"
 #include "platform/Com.h"
+#include "platform/IniFile.h"
 #include "platform/Log.h"
 #include "platform/Recorder.h"
 #include "platform/Shell.h"
@@ -15,6 +16,7 @@
 #include <mfapi.h>
 #include <mmsystem.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 
 #include <cstdio>
 #include <filesystem>
@@ -31,6 +33,8 @@ namespace fs = std::filesystem;
 // §8: a second copy shows the running window instead of recording twice. Per session, so two
 // users can each run one.
 constexpr wchar_t kInstanceMutexName[] = L"Local\\Backtrack.SingleInstance";
+// The taskbar and Start group the window and the Start menu shortcut under this one name.
+constexpr wchar_t kAppUserModelId[] = L"Backtrack.Backtrack";
 constexpr UINT kMillisecondsPerSecond = 1000;
 constexpr unsigned kShellWaitMs = 2000;
 
@@ -38,60 +42,21 @@ std::string path_text(const fs::path& path) {
     return bt::to_utf8(path.wstring());  // path::string() throws for names outside the ANSI code page
 }
 
-fs::path exe_directory() {
+fs::path exe_path() {
     std::wstring buffer(MAX_PATH, L'\0');
     while (true) {
         const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
         BT_CHECK_WIN32(length != 0);
         if (length < buffer.size()) {
             buffer.resize(length);
-            return fs::path(buffer).parent_path();
+            return fs::path(buffer);
         }
         buffer.resize(buffer.size() * 2);
     }
 }
 
-std::optional<std::string> read_file(const fs::path& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        return std::nullopt;
-    }
-    std::stringstream text;
-    text << file.rdbuf();
-    if (file.bad()) {
-        return std::nullopt;
-    }
-    return text.str();
-}
-
-// Notepad saves as UTF-8, "Unicode" (UTF-16 LE), "Unicode big endian" or ANSI. The parser wants
-// UTF-8, so the others are converted here instead of failing on every line.
-std::string ini_text_as_utf8(const std::string& bytes) {
-    const bool utf16le = bytes.size() >= 2 && static_cast<unsigned char>(bytes[0]) == 0xFF &&
-                         static_cast<unsigned char>(bytes[1]) == 0xFE;
-    const bool utf16be = bytes.size() >= 2 && static_cast<unsigned char>(bytes[0]) == 0xFE &&
-                         static_cast<unsigned char>(bytes[1]) == 0xFF;
-    if (utf16le || utf16be) {
-        std::wstring wide;
-        for (std::size_t i = 2; i + 1 < bytes.size(); i += 2) {
-            const auto lo = static_cast<unsigned char>(bytes[utf16le ? i : i + 1]);
-            const auto hi = static_cast<unsigned char>(bytes[utf16le ? i + 1 : i]);
-            wide.push_back(static_cast<wchar_t>(lo | (hi << 8)));
-        }
-        bt::log::info("backtrack.ini is saved as UTF-16, reading it as such");
-        return bt::to_utf8(wide);
-    }
-    const int valid_utf8 = bytes.empty() ? 1
-        : MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
-    if (valid_utf8 == 0) {
-        // Not UTF-8: an "ANSI" save with an accented path. Read it in the system code page.
-        const int length = MultiByteToWideChar(CP_ACP, 0, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
-        std::wstring wide(static_cast<std::size_t>(length), L'\0');
-        MultiByteToWideChar(CP_ACP, 0, bytes.data(), static_cast<int>(bytes.size()), wide.data(), length);
-        bt::log::info("backtrack.ini is not UTF-8, reading it in the system code page");
-        return bt::to_utf8(wide);
-    }
-    return bytes;
+fs::path exe_directory() {
+    return exe_path().parent_path();
 }
 
 // §5.1: written with defaults when missing; never refuses to start because of the config.
@@ -107,8 +72,8 @@ bt::Settings load_config(const fs::path& ini_path) {
             bt::log::warn("Could not write default settings to {}, using built-in defaults", path_text(ini_path));
         }
         text = std::string(bt::default_ini_text());
-    } else if (const auto bytes = read_file(ini_path)) {
-        text = ini_text_as_utf8(*bytes);
+    } else if (const auto read = bt::read_ini_file(ini_path)) {
+        text = *read;
     } else {
         // Never overwrite a file we merely failed to read (locked by a sync tool, no permission).
         bt::log::warn("Could not read {}, using built-in defaults for this run", path_text(ini_path));
@@ -139,10 +104,9 @@ struct Options {
 // dragged runs its own message loop, which calls these but would drop plain timer messages.
 Options* g_options = nullptr;
 bt::ui::App* g_app = nullptr;
-bt::Recorder* g_recorder = nullptr;
 
 void CALLBACK on_scheduled(HWND, UINT, UINT_PTR timer, DWORD) {
-    if (g_options == nullptr || g_app == nullptr || g_recorder == nullptr) return;
+    if (g_options == nullptr || g_app == nullptr) return;
     for (const ScheduledCommand& item : g_options->schedule) {
         if (item.timer == 0 || timer != item.timer) continue;
         if (!item.repeat) KillTimer(nullptr, item.timer);
@@ -150,14 +114,14 @@ void CALLBACK on_scheduled(HWND, UINT, UINT_PTR timer, DWORD) {
             switch (item.command) {
                 case Command::Save: g_app->save_clip(); break;
                 case Command::Pause:
-                    if (!g_recorder->paused()) g_app->toggle_pause();
+                    if (!g_app->recorder().paused()) g_app->toggle_pause();
                     break;
                 case Command::Resume:
-                    if (g_recorder->paused()) g_app->toggle_pause();
+                    if (g_app->recorder().paused()) g_app->toggle_pause();
                     break;
                 case Command::LoseCapture:
                     bt::log::info("Simulating a lost capture");
-                    g_recorder->simulate_capture_loss();
+                    g_app->recorder().simulate_capture_loss();
                     break;
                 case Command::Quit: g_app->quit(); break;
             }
@@ -222,18 +186,11 @@ Options parse_options() {
     return options;
 }
 
-// Without a window in front of a fullscreen game, sound is the only feedback: the "asterisk" for a
-// saved clip, the "critical stop" for a failed one (a refused save plays it in App::save_clip).
-void play_feedback(const bt::Settings& settings, bool ok) {
-    if (settings.sound) {
-        PlaySoundW(ok ? L"SystemAsterisk" : L"SystemHand", nullptr, SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
-    }
-}
-
 int run(int show_command) {
     // DuplicateOutput1 refuses processes that are not per-monitor DPI aware, and DPI virtualisation
     // would report scaled monitor sizes. The manifest says the same; this covers a stripped one.
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    SetCurrentProcessExplicitAppUserModelID(kAppUserModelId);
 
     const bt::UniqueHandle instance(CreateMutexW(nullptr, FALSE, kInstanceMutexName));
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -273,30 +230,32 @@ int run(int show_command) {
         }
     } mf_shutdown;
 
+    // Found by searching after pressing the Windows key.
+    bt::shell::ensure_start_menu_shortcut(exe_path(), kAppUserModelId);
+
     bt::ui::SavedInbox inbox;
-    bt::Recorder recorder(settings, exe_dir, [&settings, &inbox](const bt::SaveResult& result) {
-        // Writer thread. §8: a sound either way and the log line (the writer logs failures itself).
-        if (result.ok) {
-            bt::log::info("{}", result.message);
-        }
-        play_feedback(settings, result.ok);
-        inbox.push(result);
-    });
-    recorder.start();
+    // The window owns the recorder and makes a new one when a setting needs a new pipeline.
+    const bt::ui::RecorderFactory make_recorder = [&exe_dir, &inbox](const bt::Settings& current) {
+        return std::make_unique<bt::Recorder>(current, exe_dir, [&inbox](const bt::SaveResult& result) {
+            // Writer thread. §8: the log line here, the sound in the inbox (the writer logs failures).
+            if (result.ok) {
+                bt::log::info("{}", result.message);
+            }
+            inbox.push(result);
+        });
+    };
 
     int code = 0;
     {
-        bt::ui::App app(settings, paths, recorder, inbox);
+        bt::ui::App app(settings, paths, make_recorder, inbox);
         app.show(options.hidden ? SW_HIDE : show_command);
 
         g_options = &options;
         g_app = &app;
-        g_recorder = &recorder;
         struct ClearGlobals {
             ~ClearGlobals() {
                 g_options = nullptr;
                 g_app = nullptr;
-                g_recorder = nullptr;
             }
         } clear_globals;
         for (ScheduledCommand& item : options.schedule) {
@@ -312,11 +271,7 @@ int run(int show_command) {
             bt::log::error("The message loop failed: {}", bt::hresult_text(HRESULT_FROM_WIN32(GetLastError())));
             code = 1;
         }
-        if (recorder.saving()) {
-            bt::log::info("Finishing the clip that is being saved...");
-        }
-        recorder.stop();  // §6: every queued clip is written before Backtrack ends
-        app.finish();  // and the one finished meanwhile goes into the library
+        app.finish();  // §6: every queued clip is written before Backtrack ends, and goes into the library
     }
     // An Explorer window still opening must not log into a log that is being torn down.
     bt::shell::wait_for_pending(kShellWaitMs);

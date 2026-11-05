@@ -1,5 +1,5 @@
-cmake_minimum_required(VERSION 3.25)
-project(Backtrack VERSION 0.1.0 LANGUAGES CXX)
+﻿cmake_minimum_required(VERSION 3.25)
+project(Backtrack VERSION 0.2.0 LANGUAGES CXX)
 
 if(NOT MSVC)
     message(FATAL_ERROR "Backtrack is built with MSVC (Visual Studio 2022 Build Tools).")
@@ -52,13 +52,34 @@ add_executable(backtrack WIN32
     src/platform/Filmstrip.cpp
     src/platform/Trim.cpp
     src/platform/Shell.cpp
+    src/platform/VideoPlayer.cpp
+    src/platform/IniFile.cpp
     src/ui/App.cpp
+    src/ui/Widgets.cpp
+    src/ui/ClipPage.cpp
+    src/ui/RecordPage.cpp
+    src/ui/SettingsPage.cpp
     src/ui/Graphics.cpp
     src/ui/Icon.cpp
+    src/ui/Logo.cpp
+    src/backtrack.rc
 )
 target_include_directories(backtrack PRIVATE src)
+target_compile_definitions(backtrack PRIVATE BT_VERSION="${PROJECT_VERSION}")
 target_link_libraries(backtrack PRIVATE backtrack_core d3d11 dxgi mfplat mfuuid mfreadwrite winmm avrt wmcodecdspuuid
-                      shell32 ole32 d2d1 dwrite dwmapi comctl32 windowscodecs propsys)
+                      shell32 ole32 d2d1 dwrite dxguid dwmapi comctl32 windowscodecs propsys)
+
+# The icon file built into the exe, drawn by the same code as the window's logo.
+add_executable(make_icon tools/make_icon.cpp src/ui/Icon.cpp src/ui/Logo.cpp)
+target_include_directories(make_icon PRIVATE src)
+target_link_libraries(make_icon PRIVATE bt_options d2d1 windowscodecs ole32)
+set(BT_ICON ${CMAKE_CURRENT_BINARY_DIR}/backtrack.ico)
+add_custom_command(OUTPUT ${BT_ICON} COMMAND make_icon ${BT_ICON} DEPENDS make_icon
+                   COMMENT "Drawing backtrack.ico from the logo")
+add_custom_target(backtrack_icon DEPENDS ${BT_ICON})
+add_dependencies(backtrack backtrack_icon)
+set_source_files_properties(src/backtrack.rc PROPERTIES OBJECT_DEPENDS ${BT_ICON})
+target_include_directories(backtrack PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 # Development tool for the audio/video sync check (tools/check_sync.ps1). Not shipped.
 add_executable(sync_beacon tools/sync_beacon.cpp)

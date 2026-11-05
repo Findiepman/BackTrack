@@ -1,10 +1,9 @@
 #include "ui/Icon.h"
 
 #include "platform/Com.h"
-#include "ui/Theme.h"
+#include "ui/Logo.h"
 
 #include <d2d1.h>
-#include <dwrite.h>
 #include <wincodec.h>
 
 #include <algorithm>
@@ -13,77 +12,54 @@
 
 namespace bt::ui {
 
-HICON make_app_icon(int size_px) {
-    if (size_px <= 0) {
-        return nullptr;
+std::vector<std::uint8_t> render_logo_pixels(int size_px) {
+    if (size_px <= 0 || size_px > 1024) {
+        return {};
     }
     const auto size = static_cast<UINT>(size_px);
     ComPtr<IWICImagingFactory> wic;
     ComPtr<IWICBitmap> bitmap;
     ComPtr<ID2D1Factory> d2d;
-    ComPtr<IDWriteFactory> dwrite;
     ComPtr<ID2D1RenderTarget> target;
     if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) ||
         FAILED(wic->CreateBitmap(size, size, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &bitmap)) ||
         FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, d2d.GetAddressOf())) ||
-        FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
-                                   reinterpret_cast<IUnknown**>(dwrite.GetAddressOf()))) ||
         FAILED(d2d->CreateWicBitmapRenderTarget(
             bitmap.Get(),
             D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
                                          D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)),
             &target))) {
-        return nullptr;
+        return {};
     }
-
-    const float s = static_cast<float>(size);
-    ComPtr<ID2D1SolidColorBrush> fill;
-    ComPtr<ID2D1SolidColorBrush> ink;
-    target->CreateSolidColorBrush(D2D1::ColorF(theme::kAccent.r, theme::kAccent.g, theme::kAccent.b), &fill);
-    target->CreateSolidColorBrush(D2D1::ColorF(theme::kOnAccent.r, theme::kOnAccent.g, theme::kOnAccent.b), &ink);
-    ComPtr<IDWriteTextFormat> glyph_format;
-    const wchar_t* family = L"Segoe Fluent Icons";
-    {
-        ComPtr<IDWriteFontCollection> fonts;
-        UINT32 index = 0;
-        BOOL exists = FALSE;
-        if (SUCCEEDED(dwrite->GetSystemFontCollection(&fonts, FALSE)) &&
-            (FAILED(fonts->FindFamilyName(family, &index, &exists)) || !exists)) {
-            family = L"Segoe MDL2 Assets";
-        }
-    }
-    if (!fill || !ink ||
-        FAILED(dwrite->CreateTextFormat(family, nullptr, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL,
-                                        DWRITE_FONT_STRETCH_NORMAL, s * 0.62f, L"", &glyph_format))) {
-        return nullptr;
-    }
-    glyph_format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-    glyph_format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
     target->BeginDraw();
     target->Clear(D2D1::ColorF(0, 0, 0, 0));
-    const float radius = s * 0.24f;
-    target->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(0, 0, s, s), radius, radius), fill.Get());
-    constexpr wchar_t kRewind = theme::glyph::kAppMark;
-    target->DrawText(&kRewind, 1, glyph_format.Get(), D2D1::RectF(0, 0, s, s), ink.Get());
+    draw_logo(target.Get(), d2d.Get(), D2D1::RectF(0, 0, static_cast<float>(size), static_cast<float>(size)));
     if (FAILED(target->EndDraw())) {
-        return nullptr;
+        return {};
     }
-
-    std::vector<BYTE> pixels(static_cast<std::size_t>(size) * size * 4);
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(size) * size * 4);
     if (FAILED(bitmap->CopyPixels(nullptr, size * 4, static_cast<UINT>(pixels.size()), pixels.data()))) {
-        return nullptr;
+        return {};
     }
     // Icons take straight alpha; Direct2D drew premultiplied. Divide it out so the anti-aliased
     // rim is not darkened.
     for (std::size_t i = 0; i < pixels.size(); i += 4) {
-        const BYTE a = pixels[i + 3];
+        const std::uint8_t a = pixels[i + 3];
         if (a != 0 && a != 0xFF) {
             for (int c = 0; c < 3; ++c) {
-                pixels[i + c] = static_cast<BYTE>(std::min(255u, pixels[i + c] * 255u / a));
+                pixels[i + c] = static_cast<std::uint8_t>(std::min(255u, pixels[i + c] * 255u / a));
             }
         }
     }
+    return pixels;
+}
+
+HICON make_app_icon(int size_px) {
+    const std::vector<std::uint8_t> pixels = render_logo_pixels(size_px);
+    if (pixels.empty()) {
+        return nullptr;
+    }
+    const auto size = static_cast<UINT>(size_px);
     BITMAPV5HEADER header{};
     header.bV5Size = sizeof(header);
     header.bV5Width = size_px;
