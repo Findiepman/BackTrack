@@ -62,6 +62,8 @@ constexpr Time100ns kPushToTalkRelease = 200 * kTicksPerMillisecond;
 // was mixed, so sound that starts playing is never stamped before the filled part ends.
 constexpr Time100ns kQuietLag = 50 * kTicksPerMillisecond;
 constexpr Time100ns kQuietStep = 10 * kTicksPerMillisecond;
+// More than this behind at once (the loop was held up): filled like a gap, not at voice pace.
+constexpr Time100ns kQuietCatchUp = 200 * kTicksPerMillisecond;
 constexpr int kPercent = 100;
 constexpr int kMaxVolumePercent = 200;  // the settings' limit
 
@@ -544,14 +546,19 @@ void AudioCapture::keep_mic_flowing() {
     // so nothing would take the microphone out of its FIFO: the voice would wait and then be lost
     // when the FIFO is full. So the quiet time is filled here as it passes, from the clock, a
     // little behind real time so that sound which starts playing is never overtaken.
+    // UNVERIFIED: how late a loopback packet can be read after it was mixed. The fill stays behind
+    // real time by the device's measured latency plus two polls (at least kQuietLag), so a sound
+    // that starts playing lands after the fill instead of being trimmed as "ahead".
     const Time100ns now = qpc_now() - clock_offset_;
+    const Time100ns lag =
+        std::max(kQuietLag, device_latency_.value().value_or(0) + 2 * kPollIntervalMs * kTicksPerMillisecond);
     if (!anchored_) {
         anchored_ = true;
-        anchor_ = now - kQuietLag;
+        anchor_ = now - lag;
         segment_base_ = 0;
         segment_frames_ = 0;
     }
-    const Time100ns behind = now - kQuietLag - timeline();
+    const Time100ns behind = now - lag - timeline();
     if (behind < kQuietStep) {
         return;
     }
@@ -560,7 +567,27 @@ void AudioCapture::keep_mic_flowing() {
         log::info("No silent keep-alive stream on this device: quiet moments are filled from the clock so the "
                   "microphone keeps recording");
     }
-    encode_pcm(nullptr, static_cast<UINT32>(static_cast<std::uint64_t>(behind) * device_rate_ / kTicksPerSecond));
+    if (behind > max_gap_fill_) {
+        // The loop stood still (sleep, a long hang): as in handle_packet, only the last
+        // max_gap_fill_ is filled and the timeline jumps over the rest; the voice queued before it
+        // would land minutes away from when it was said, so it goes.
+        log::info("Sound was not read for {:.1f} s", static_cast<double>(behind) / kTicksPerSecond);
+        BT_CHECK_HR(resampler_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0));
+        BT_CHECK_HR(aac_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0));
+        segment_base_ += behind - max_gap_fill_;
+        aac_expected_after_flush_ = timeline();
+        check_aac_after_flush_ = true;
+        if (mic_fifo_) mic_fifo_->reset_consumer();
+        fill_gap(static_cast<UINT32>(static_cast<std::uint64_t>(max_gap_fill_) * device_rate_ / kTicksPerSecond));
+        counters_.silence_inserted_ms += static_cast<std::uint64_t>(max_gap_fill_ / kTicksPerMillisecond);
+        return;
+    }
+    const auto frames = static_cast<UINT32>(static_cast<std::uint64_t>(behind) * device_rate_ / kTicksPerSecond);
+    if (behind > kQuietCatchUp) {
+        fill_gap(frames);  // more than a few polls at once: the voice must not be squeezed into it
+    } else {
+        encode_pcm(nullptr, frames);  // the normal steps, at the pace the voice arrives
+    }
     counters_.silence_inserted_ms += static_cast<std::uint64_t>(behind / kTicksPerMillisecond);
 }
 

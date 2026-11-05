@@ -299,10 +299,18 @@ void App::paint_record_page(const Rect& area) {
                                         : std::format(L"Muted ({} unmutes)", to_wide(settings_.mic_mute_hotkey))) +
                                    L" \u00b7 " + name;
                         mic_color = kWarn;
+                    } else if (settings_.push_to_talk && levels.ptt_blocked) {
+                        // Windows hides keys pressed in an admin program from normal programs.
+                        mic_text = L"Push-to-talk can't see keys while an admin program is in front";
+                        mic_color = kWarn;
                     } else if (settings_.push_to_talk) {
                         mic_text = (levels.mic_gate_open ? std::wstring(L"Talking")
                                                          : std::format(L"Hold {} to talk", to_wide(settings_.push_to_talk_key))) +
-                                   L" \u00b7 " + name;
+                                   L" \u00b7 " + (levels.mic_fallback ? L"chosen mic not connected, using " : L"") + name;
+                        if (levels.mic_fallback) mic_color = kWarn;
+                    } else if (levels.mic_fallback) {
+                        mic_text = L"Your chosen mic is not connected: using " + name;
+                        mic_color = kWarn;
                     } else {
                         mic_text = name + (settings_.noise_suppression ? L" \u00b7 Noise suppression on" : L"");
                     }

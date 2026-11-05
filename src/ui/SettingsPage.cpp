@@ -1102,6 +1102,7 @@ std::vector<App::SettingRow> App::setting_rows() {
         row.full = true;
         row.keywords = L"changelog release notes";
         static const wchar_t* const kNews[] = {
+            L"Your microphone in every clip, with noise suppression, a mute key and push-to-talk",
             L"A page for every clip: play it, trim it without losing quality, add tags and notes",
             L"Record and Settings pages: change everything here instead of in backtrack.ini",
             L"Collections, favorites and a Trash that keeps clips for 30 days",
