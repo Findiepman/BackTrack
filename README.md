@@ -192,6 +192,24 @@ and the tray menu still work.
 
 The log is `backtrack.log` next to the exe. It rolls over at 5 MB and keeps three files.
 
+## Installing on another PC
+
+Send `Backtrack-Setup-<version>.exe`. It installs for the current Windows user only (no administrator
+rights), into `%LOCALAPPDATA%\Programs\Backtrack`, adds Backtrack to the Start menu and to Windows'
+Apps list (where it is uninstalled), and can start it with Windows (ticked by default) and put a
+shortcut on the desktop. Running a newer setup over an older one updates it and keeps the settings
+and the library; a running Backtrack is asked to close first and finishes the clip it is saving.
+Uninstalling removes the program, its settings, library and thumbnails, but never the clips in
+`Videos\Backtrack`.
+
+The setup file is not signed, so Windows SmartScreen says "Windows protected your PC" the first
+time: click **More info**, then **Run anyway**.
+
+To make it: install Inno Setup 6 once (`winget install JRSoftware.InnoSetup`), then run
+`powershell -ExecutionPolicy Bypass -File installer\make-installer.ps1`. It builds Backtrack, runs the
+tests and writes `build\installer\Backtrack-Setup-<version>.exe` (the version comes from
+`CMakeLists.txt`).
+
 ## Building
 
 Needs Visual Studio 2022 (or its Build Tools) with the C++ workload, and CMake 3.25 or newer

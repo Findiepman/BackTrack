@@ -873,13 +873,25 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
             return TRUE;
         case WM_ENDSESSION:
             if (wparam != FALSE) {
-                log::info("Windows is shutting down or logging off");
+                // ENDSESSION_CLOSEAPP: an installer or update asks (through the Restart Manager) to
+                // close Backtrack, not a logoff.
+                const bool close_app = (static_cast<DWORD>(lparam) & ENDSESSION_CLOSEAPP) != 0;
+                if (close_app) {
+                    log::info("Asked to close (an update or installer)");
+                } else {
+                    log::info("Windows is shutting down or logging off");
+                }
                 if (editing_) end_edit(true);
                 commit_clip_text();
                 restart_due_.reset();  // already in backtrack.ini; the next start uses it
                 finish();  // §6: the clip being written is finished and goes into the library
+                ShutdownBlockReasonDestroy(window_);
+                // Then really end, so the installer can replace the exe without killing it.
+                quitting_ = true;
+                DestroyWindow(window_);
+                return 0;
             }
-            ShutdownBlockReasonDestroy(window_);  // also when cancelled: a stale reason would show next time
+            ShutdownBlockReasonDestroy(window_);  // cancelled: a stale reason would show next time
             return 0;
         case WM_DESTROY:
             KillTimer(window_, kTickTimer);
