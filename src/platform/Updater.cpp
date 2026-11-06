@@ -170,24 +170,35 @@ fs::path default_folder() {
     return folder;
 }
 
-// Whether `exe` sits in the folder Inno Setup installed Backtrack into for this Windows user.
-bool runs_from_install_folder(const fs::path& exe) {
+}  // namespace
+
+std::optional<fs::path> install_location() {
     DWORD bytes = 0;
     if (RegGetValueW(HKEY_CURRENT_USER, kUninstallKey, L"InstallLocation", RRF_RT_REG_SZ, nullptr, nullptr, &bytes) !=
             ERROR_SUCCESS ||
         bytes < sizeof(wchar_t)) {
-        return false;
+        return std::nullopt;
     }
     std::wstring location(bytes / sizeof(wchar_t), L'\0');
     if (RegGetValueW(HKEY_CURRENT_USER, kUninstallKey, L"InstallLocation", RRF_RT_REG_SZ, nullptr, location.data(),
                      &bytes) != ERROR_SUCCESS) {
-        return false;
+        return std::nullopt;
     }
     location.resize(wcsnlen(location.c_str(), location.size()));
-    if (location.empty()) return false;
+    std::error_code ec;
+    if (location.empty() || !fs::exists(fs::path(location) / L"backtrack.exe", ec)) return std::nullopt;
+    return fs::path(location);
+}
+
+namespace {
+
+// Whether `exe` sits in the folder Inno Setup installed Backtrack into for this Windows user.
+bool runs_from_install_folder(const fs::path& exe) {
+    const std::optional<fs::path> location = install_location();
+    if (!location) return false;
     std::error_code ec;
     // equivalent() compares the folders themselves: case, a trailing backslash and 8.3 names do not matter.
-    return fs::equivalent(exe.parent_path(), fs::path(location), ec) && !ec;
+    return fs::equivalent(exe.parent_path(), *location, ec) && !ec;
 }
 
 bool write_file_atomically(const fs::path& path, const std::string& text) {

@@ -230,8 +230,13 @@ int run(int show_command) {
         }
     } mf_shutdown;
 
-    // Found by searching after pressing the Windows key.
-    bt::shell::ensure_start_menu_shortcut(exe_path(), kAppUserModelId);
+    // Found by searching after pressing the Windows key. A copy run from elsewhere (a developer
+    // build) leaves the shortcut alone when Backtrack is installed: it belongs to the installed one.
+    std::error_code same_ec;
+    if (const auto installed = bt::install_location();
+        !installed || fs::equivalent(exe_path().parent_path(), *installed, same_ec)) {
+        bt::shell::ensure_start_menu_shortcut(exe_path(), kAppUserModelId);
+    }
 
     // Before the recorder and the window: an update downloaded before a logoff installs now (the
     // installer starts Backtrack again), and this copy ends.

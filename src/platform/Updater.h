@@ -157,4 +157,7 @@ private:
 // The SHA-256 of a file as 64 lower-case hex digits, or nullopt when it cannot be read.
 std::optional<std::string> sha256_of_file(const std::filesystem::path& file);
 
+// The folder the installer put Backtrack in for this Windows user; empty when it is not installed.
+std::optional<std::filesystem::path> install_location();
+
 }  // namespace bt
