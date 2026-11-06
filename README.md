@@ -210,6 +210,33 @@ To make it: install Inno Setup 6 once (`winget install JRSoftware.InnoSetup`), t
 tests and writes `build\installer\Backtrack-Setup-<version>.exe` (the version comes from
 `CMakeLists.txt`).
 
+### Updates
+
+Settings > General > **Install updates automatically** (`auto_update = true`, the default): a
+minute and a half after Backtrack starts, and then once a day (also across restarts), it asks
+GitHub for the newest release of `Findiepman/BackTrack`. A newer version's
+`Backtrack-Setup-<version>.exe` is downloaded in the background to
+`%LOCALAPPDATA%\Backtrack\updates` and checked against its size and the SHA-256 checksum GitHub
+publishes for it; a file that does not match is deleted, never run. It is installed when you
+**Quit** from the tray, never in the middle of a game. If Windows logs off or shuts down first, it
+is installed the next time Backtrack starts, before it starts recording. The install is silent,
+keeps your settings, library and startup choice, and waits until Backtrack has finished saving.
+**Check for updates** asks GitHub right away; **Install now** installs and starts Backtrack again.
+With the setting off, Backtrack only checks when you press the button.
+
+Only the installed Backtrack updates itself. A copy run from anywhere else (a build from source)
+says that a new version exists and links to its page. The check sends nothing but
+`Backtrack-Updater/<version>` as its name, over HTTPS; the download is only taken from github.com
+and GitHub's own download servers. The last installer run's log is
+`%LOCALAPPDATA%\Backtrack\updates\install.log`; if an update fails twice, it is no longer started
+automatically.
+
+Publishing a release (the owner): bump the version in `CMakeLists.txt`, commit and push, then
+`powershell -ExecutionPolicy Bypass -File tools\publish-release.ps1` (`-DryRun` first to see what
+it would do, `-Notes "..."` for the text shown in Backtrack; without it the commit subjects since
+the last release are used). It builds the installer and creates the GitHub release `V<version>`
+with it. `build\Release\update_check.exe` runs a check against GitHub from the command line.
+
 ## Building
 
 Needs Visual Studio 2022 (or its Build Tools) with the C++ workload, and CMake 3.25 or newer
