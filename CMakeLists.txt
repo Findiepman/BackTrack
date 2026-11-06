@@ -36,6 +36,7 @@ add_library(backtrack_core STATIC
     src/core/AudioMix.cpp
     src/core/Fft.cpp
     src/core/NoiseSuppressor.cpp
+    src/core/ThemeColors.cpp
 )
 target_include_directories(backtrack_core PUBLIC src)
 target_link_libraries(backtrack_core PUBLIC bt_options)
@@ -65,6 +66,7 @@ add_executable(backtrack WIN32
     src/ui/RecordPage.cpp
     src/ui/SettingsPage.cpp
     src/ui/Graphics.cpp
+    src/ui/Overlay.cpp
     src/ui/Icon.cpp
     src/ui/Logo.cpp
     src/backtrack.rc
@@ -72,7 +74,7 @@ add_executable(backtrack WIN32
 target_include_directories(backtrack PRIVATE src)
 target_compile_definitions(backtrack PRIVATE BT_VERSION="${PROJECT_VERSION}")
 target_link_libraries(backtrack PRIVATE backtrack_core d3d11 dxgi mfplat mfuuid mfreadwrite winmm avrt wmcodecdspuuid
-                      shell32 ole32 d2d1 dwrite dxguid dwmapi comctl32 windowscodecs propsys)
+                      shell32 ole32 d2d1 dwrite dxguid dwmapi comctl32 windowscodecs propsys shcore)
 
 # The icon file built into the exe, drawn by the same code as the window's logo.
 add_executable(make_icon tools/make_icon.cpp src/ui/Icon.cpp src/ui/Logo.cpp)
@@ -106,7 +108,7 @@ target_link_libraries(record_check PRIVATE backtrack_core d3d11 dxgi mfplat mfuu
                       wmcodecdspuuid shell32 ole32 propsys)
 
 enable_testing()
-foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests TrimPlanTests AudioFifoTests AudioMixTests NoiseSuppressorTests)
+foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests TrimPlanTests AudioFifoTests AudioMixTests NoiseSuppressorTests ThemeColorsTests)
     add_executable(${test_name} tests/${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE backtrack_core)
     target_compile_definitions(${test_name} PRIVATE BT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

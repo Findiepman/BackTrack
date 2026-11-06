@@ -250,6 +250,12 @@ void App::run_clip(const std::string& what, const Rect& anchor) {
             if (at < view.in - 0.05 || at >= out - 0.05) player->seek(view.in);  // from the start of the trim
             player->play();
         }
+    } else if (what.starts_with("bookmark:")) {
+        const auto index = static_cast<std::size_t>(std::atoi(what.c_str() + 9));
+        if (player != nullptr && player->ready() && index < clip->bookmarks.size()) {
+            // A moment before the mark: the bookmark key is pressed just after the thing happened.
+            player->seek(std::clamp(clip->bookmarks[index] - 2.0, 0.0, length));
+        }
     } else if (what == "back5" || what == "fwd5") {
         if (player != nullptr) {
             player->seek(std::clamp(player->position() + (what == "back5" ? -5.0 : 5.0), view.in, out));
@@ -390,10 +396,11 @@ void App::save_trim() {
     }
     const std::string title = display_title(*clip) + " (trimmed)";
     const std::vector<std::string> tags = clip->tags;
+    const std::vector<double> marks = clip->bookmarks;
     const double in = view.in;
     trimming_ = true;
     log::info("Trimming {} from {:.1f} s to {:.1f} s", view.file, in, out);
-    run_in_background([this, source, destination, in, out, title, tags]() -> std::function<void()> {
+    run_in_background([this, source, destination, in, out, title, tags, marks]() -> std::function<void()> {
         TrimResult result;
         try {
             result = trim_clip(TrimRequest{source, destination, in, out});
@@ -404,7 +411,7 @@ void App::save_trim() {
             result.ok = false;
             result.error = "an unexpected error";
         }
-        return [this, result, destination, title, tags] {
+        return [this, result, destination, title, tags, marks] {
             trimming_ = false;
             if (!result.ok) {
                 log::warn("Trimming failed: {}", result.error);
@@ -417,6 +424,8 @@ void App::save_trim() {
             if (library_.find(file) != nullptr) {
                 library_.set_title(file, title);
                 for (const std::string& tag : tags) library_.add_tag(file, tag);
+                // The cut starts at the keyframe before the in handle (start_s), so that is time 0.
+                library_.set_bookmarks(file, bookmarks_within(marks, result.start_s, result.seconds));
                 new_files_.insert(file);
                 save_library();
             }
@@ -537,6 +546,14 @@ void App::paint_player(const ClipEntry& clip, const Rect& rect) {
     g.fill_circle(track.x + track.w * fraction, track.y + 9, 6, white);
     tracks_["clip:seek"] = track;
     add_hit(track, Action::Drag, "clip:seek");
+    // Bookmarks: a small flag above the bar; clicking one jumps there (hits after the bar's win).
+    for (std::size_t i = 0; i < clip.bookmarks.size() && length > 0; ++i) {
+        const float bx = track.x + track.w * static_cast<float>(std::clamp(clip.bookmarks[i] / length, 0.0, 1.0));
+        const std::string arg = std::format("bookmark:{}", i);
+        const bool hot = hovered(Action::Clip, arg);
+        g.fill_round(Rect{bx - 1.5f, track.y - 3, 3, 12}, 1.5f, hot ? white : kAccent);
+        add_hit(Rect{bx - 6, track.y - 8, 12, 14}, Action::Clip, arg);
+    }
 
     const float row = track.bottom() + 6;
     const Color hover = white.with_alpha(0.18f);
@@ -626,6 +643,12 @@ void App::paint_trim(const ClipEntry& clip, const Rect& rect) {
         g.fill_round(handle, 6, hot ? kAccent.mix(Color::hex(0xffffff), 0.88f) : kAccent);
         g.fill_round(Rect{hx - 1, handle.y + (handle.h - 20) / 2, 2, 20}, 1, kOnAccent.with_alpha(0.7f));
         add_hit(handle.inset(-4, 0), can_trim ? Action::Drag : Action::Disabled, id);
+    }
+    for (const double mark : clip.bookmarks) {
+        // Bookmarks on the strip too, so a trim can be placed around them.
+        const float mx = pos(mark);
+        g.fill(Rect{mx - 1, tl.y, 2, tl.h}, kAccent.with_alpha(0.85f));
+        g.fill_circle(mx, tl.bottom() + 5, 3, kAccent);
     }
     if (player != nullptr) {
         // .ph: the playhead.

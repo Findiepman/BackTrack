@@ -1,29 +1,60 @@
 #pragma once
 
-// Colours, sizes and icons of the "Night shift" look from the mockup (backtrack.html, :root
+// Colours, sizes and icons of the look from the mockup (backtrack.html, :root
 // tokens). Sizes are DIPs. Names follow the mockup's CSS variables so the two can be compared.
 
+#include "core/ThemeColors.h"
 #include "ui/Graphics.h"
 
 namespace bt::ui::theme {
 
-inline constexpr Color kBg = Color::hex(0x0e1014);  // --bg
-inline constexpr Color kSide = Color::hex(0x12151b);  // --side
-inline constexpr Color kCard = Color::hex(0x171a21);  // --card
-inline constexpr Color kInk = Color::hex(0xe9ecf2);  // --ink
-inline constexpr Color kMute = Color::hex(0xa3aab8);  // --mute
-inline constexpr Color kLine = Color::hex(0x2a2f3a);  // --line
-inline constexpr Color kRaise = Color::hex(0x1f232c);  // --raise
-inline constexpr Color kPop = Color::hex(0x1d212a);  // --pop
-inline constexpr Color kAccent = Color::hex(0xffb547);  // --accent
-inline constexpr Color kOnAccent = Color::hex(0x1a1200);  // --onacc
-inline constexpr Color kDanger = Color::hex(0xff7a6e);  // --danger
-inline constexpr Color kRec = Color::hex(0xff5d66);  // --rec
-inline constexpr Color kWarn = Color::hex(0xf5b84a);  // --warn
-inline constexpr Color kOk = Color::hex(0x6fdc9f);  // --ok
-inline constexpr Color kOff = Color::hex(0x4a5160);  // --off
-inline constexpr Color kSoft = kAccent.mix(kBg, 0.15f);  // --soft
-inline constexpr Color kHover = kInk.with_alpha(0.08f);  // --hov
+// The colour tokens follow the chosen theme (Settings > Appearance): apply_theme() sets them, on
+// the UI thread only, before the next paint. They start as Night shift.
+inline Color kBg = Color::hex(0x0e1014);  // --bg
+inline Color kSide = Color::hex(0x12151b);  // --side
+inline Color kCard = Color::hex(0x171a21);  // --card
+inline Color kInk = Color::hex(0xe9ecf2);  // --ink
+inline Color kMute = Color::hex(0xa3aab8);  // --mute
+inline Color kLine = Color::hex(0x2a2f3a);  // --line
+inline Color kRaise = Color::hex(0x1f232c);  // --raise
+inline Color kPop = Color::hex(0x1d212a);  // --pop
+inline Color kAccent = Color::hex(0xffb547);  // --accent
+inline Color kOnAccent = Color::hex(0x1a1200);  // --onacc
+inline Color kDanger = Color::hex(0xff7a6e);  // --danger
+inline Color kRec = Color::hex(0xff5d66);  // --rec
+inline Color kWarn = Color::hex(0xf5b84a);  // --warn
+inline Color kOk = Color::hex(0x6fdc9f);  // --ok
+inline Color kOff = Color::hex(0x4a5160);  // --off
+inline Color kSoft = kAccent.mix(kBg, 0.15f);  // --soft
+inline Color kHover = kInk.with_alpha(0.08f);  // --hov
+inline bool kLightTheme = false;  // Daylight: lighter shadows and scrims
+
+inline Color to_color(Rgb c) {
+    return Color::hex(c.value());
+}
+
+inline void apply_theme(ThemeId id) {
+    const ThemeColors c = theme_colors(id);
+    kBg = to_color(c.bg);
+    kSide = to_color(c.side);
+    kCard = to_color(c.card);
+    kInk = to_color(c.ink);
+    kMute = to_color(c.mute);
+    kLine = to_color(c.line);
+    kRaise = to_color(c.raise);
+    kPop = to_color(c.pop);
+    kAccent = to_color(c.accent);
+    kOnAccent = to_color(c.on_accent);
+    kDanger = to_color(c.danger);
+    kRec = to_color(c.rec);
+    kWarn = to_color(c.warn);
+    kOk = to_color(c.ok);
+    kOff = to_color(c.off);
+    kSoft = kAccent.mix(kBg, 0.15f);
+    kHover = kInk.with_alpha(0.08f);
+    kLightTheme = c.light;
+}
+
 inline constexpr Color kStar = Color::hex(0xffd466);  // .st-tb.fav
 
 // Collection dots, by Collection::color.
@@ -52,10 +83,17 @@ inline constexpr float kNavHeight = 32;  // .nav
 inline constexpr float kRadius = 8;  // --r
 inline constexpr float kControl = 32;  // --h
 inline constexpr float kPad = 40;  // --pad
-inline constexpr float kCardMin = 228;  // --gm
-inline constexpr float kGridGap = 12;  // .st-grid gap
-inline constexpr float kGridPadX = 14;
-inline constexpr float kGridPadY = 12;
+// .st-grid: "gap: 30px 28px; padding: 26px var(--pad) 28px", compact "gap: 20px 18px", --pad 28px.
+// Cards never get narrower than kCardMin; a narrow window shows fewer per row.
+inline constexpr float kCardMin = 200;
+inline constexpr float kGridGapX = 28;
+inline constexpr float kGridGapY = 30;
+inline constexpr float kGridGapCompactX = 18;
+inline constexpr float kGridGapCompactY = 20;
+inline constexpr float kGridPadX = 40;
+inline constexpr float kGridPadCompactX = 28;
+inline constexpr float kGridPadY = 26;
+inline constexpr float kGridPadBottom = 28;
 inline constexpr float kCardRadius = 10;  // .st-card
 inline constexpr float kCardInfo = 52;  // .st-info: 8 + 18 title + 3 + 16 meta + 7
 inline constexpr float kTopStrip = 46;  // .st-top

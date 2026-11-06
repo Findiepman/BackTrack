@@ -132,6 +132,7 @@ void Library::add_saved_clip(const ClipEntry& clip) {
         existing->width = clip.width;
         existing->height = clip.height;
         existing->source = clip.source;
+        existing->bookmarks = clip.bookmarks;
         return;
     }
     clips_.push_back(clip);
@@ -425,6 +426,11 @@ Json Library::to_json() const {
         item.set("height", Json(clip.height));
         if (!clip.source.empty()) item.set("source", Json(clip.source));
         if (clip.trashed_at) item.set("trashed_at", Json(*clip.trashed_at));
+        if (!clip.bookmarks.empty()) {
+            Json marks{Json::Array{}};
+            for (const double b : clip.bookmarks) marks.push(Json(b));
+            item.set("bookmarks", std::move(marks));
+        }
         clips.push(std::move(item));
     }
     root.set("clips", std::move(clips));
@@ -480,9 +486,41 @@ Library Library::from_json(const Json& json) {
         clip.height = static_cast<int>(std::clamp<std::int64_t>(item["height"].as_int(), 0, kMaxVideoDimension));
         clip.source = item["source"].as_string();
         if (item["trashed_at"].is_number()) clip.trashed_at = item["trashed_at"].as_int();
+        std::vector<double> marks;
+        for (const Json& mark : item["bookmarks"].as_array()) {
+            if (mark.is_number()) marks.push_back(mark.as_number());
+        }
+        clip.bookmarks = clean_bookmarks(std::move(marks), clip.duration_s);
         library.clips_.push_back(std::move(clip));
     }
     return library;
+}
+
+bool Library::set_bookmarks(std::string_view file, std::vector<double> seconds) {
+    ClipEntry* clip = find(file);
+    if (clip == nullptr) return false;
+    clip->bookmarks = clean_bookmarks(std::move(seconds), clip->duration_s);
+    return true;
+}
+
+std::vector<double> clean_bookmarks(std::vector<double> seconds, double length) {
+    std::erase_if(seconds, [length](double s) { return !std::isfinite(s) || s < 0.0 || (length > 0.0 && s > length); });
+    std::sort(seconds.begin(), seconds.end());
+    std::vector<double> out;
+    for (const double s : seconds) {
+        if (!out.empty() && s - out.back() < 0.1) continue;
+        out.push_back(s);
+        if (out.size() == kMaxBookmarks) break;
+    }
+    return out;
+}
+
+std::vector<double> bookmarks_within(const std::vector<double>& marks, double start, double length) {
+    std::vector<double> out;
+    for (const double m : marks) {
+        if (std::isfinite(m) && m >= start && m < start + length) out.push_back(m - start);
+    }
+    return clean_bookmarks(std::move(out), length);
 }
 
 std::string display_title(const ClipEntry& clip) {

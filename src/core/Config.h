@@ -88,6 +88,11 @@ struct IniDocument {
     std::vector<std::string> warnings;  // "line N: ..." for lines that are not valid INI
 };
 
+// What the save hotkey keeps: save_seconds, or the whole buffer when that is 0 or longer.
+inline int saved_seconds(const Settings& s) {
+    return s.save_seconds > 0 && s.save_seconds < s.clip_seconds ? s.save_seconds : s.clip_seconds;
+}
+
 IniDocument parse_ini(std::string_view text);
 
 struct LoadedSettings {

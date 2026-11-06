@@ -383,7 +383,54 @@ void formatting() {
 
 }  // namespace
 
+bool same_marks(const std::vector<double>& a, const std::vector<double>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (std::abs(a[i] - b[i]) > 1e-9) return false;
+    }
+    return true;
+}
+
+void bookmarks() {
+    // Cleaning: sorted, NaN and out-of-range gone, a double press merged.
+    const std::vector<double> clean =
+        clean_bookmarks({5.0, std::nan(""), -1.0, 2.0, 2.04, 31.0, 30.0}, 30.0);
+    CHECK(clean == (std::vector<double>{2.0, 5.0, 30.0}));
+    CHECK(clean_bookmarks({100.0}, 0.0).size() == 1);  // length unknown: no upper bound
+    std::vector<double> many;
+    for (int i = 0; i < 1000; ++i) many.push_back(i);
+    CHECK_EQ(clean_bookmarks(many, 0.0).size(), kMaxBookmarks);
+
+    // A saved clip covering 100..130 s of the buffer gets the marks inside it as offsets.
+    CHECK(same_marks(bookmarks_within({90.0, 101.5, 129.9, 130.0, 140.0}, 100.0, 30.0), {1.5, 29.9}));
+    CHECK(bookmarks_within({}, 0.0, 30.0).empty());
+    // A trim starting at 4 s (its keyframe) keeps 5 s as 1 s.
+    CHECK(bookmarks_within({1.0, 5.0}, 4.0, 10.0) == (std::vector<double>{1.0}));
+
+    Library lib = sample();
+    CHECK(lib.set_bookmarks("a.mp4", {3.0, 1.0}));
+    CHECK(!lib.set_bookmarks("nope.mp4", {1.0}));
+    CHECK(lib.find("a.mp4")->bookmarks == (std::vector<double>{1.0, 3.0}));
+    // Kept through library.json; a damaged entry is dropped, not the clip.
+    const Library back = Library::from_json(*parse_json(lib.to_json().dump()).value);
+    CHECK(back.find("a.mp4")->bookmarks == (std::vector<double>{1.0, 3.0}));
+    const Library damaged =
+        Library::from_json(*parse_json(R"({"clips":[{"file":"x.mp4","duration":10,"bookmarks":[1,"two",50,null,2]}]})").value);
+    CHECK(damaged.find("x.mp4") != nullptr && damaged.find("x.mp4")->bookmarks == (std::vector<double>{1.0, 2.0}));
+    // A clip without bookmarks writes no "bookmarks" key (older versions read the file unchanged).
+    CHECK(sample().to_json().dump().find("bookmarks") == std::string::npos);
+    // The recorder's saved clip carries them in, also when a folder sync saw the file first.
+    Library sync;
+    sync.sync_with_folder({FolderFile{"new.mp4", 10, kNow}});
+    ClipEntry saved;
+    saved.file = "new.mp4";
+    saved.bookmarks = {2.5};
+    sync.add_saved_clip(saved);
+    CHECK(sync.find("new.mp4")->bookmarks == (std::vector<double>{2.5}));
+}
+
 int main() {
+    bookmarks();
     folder_sync();
     saved_clip_merges_with_folder_sync();
     media_info_is_sanitised();

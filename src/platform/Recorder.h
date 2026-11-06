@@ -55,6 +55,7 @@ struct SaveResult {
     std::filesystem::path path;
     std::string message;  // one line for the user: what was saved, or why not
     double seconds = 0.0;
+    Time100ns start = 0;  // the clip's first frame on the recording clock (see recording_time)
 };
 
 // The sound meters and the microphone's state for the UI. MicStatus is in platform/MicCapture.h
@@ -99,9 +100,14 @@ public:
     void resume();
     bool paused() const { return paused_; }
 
+    // Now on the recording clock (QPC minus the time spent paused), the clock SaveResult::start is on.
+    Time100ns recording_time() const { return recording_now(); }
+
     // §3.8: takes the last `seconds` out of the buffers (shared bytes, microseconds) and queues
     // them for the writer thread; returns at once. False with a reason when nothing can be saved.
-    bool save_clip(std::string& reason);
+    // 0 or more than the buffer holds: all of it. Passed in rather than part of Settings because
+    // the save length changes live, without a new pipeline (that would empty the buffer).
+    bool save_clip(std::string& reason, int seconds = 0);
 
     // "Recording 30 s, 60 fps, hardware", "Capture lost, retrying", "Saving clip...", ...
     std::string status_text() const;
@@ -126,6 +132,7 @@ public:
 private:
     struct SaveJob {
         std::chrono::system_clock::time_point requested;
+        Time100ns start = 0;
         ComPtr<IMFMediaType> video_type;
         ComPtr<IMFMediaType> audio_type;
         std::vector<Packet> video;

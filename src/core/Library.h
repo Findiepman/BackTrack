@@ -32,6 +32,7 @@ struct ClipEntry {
     int height = 0;
     std::string source;  // what was recorded, e.g. "Display 1"; empty for clips found on disk
     std::optional<std::int64_t> trashed_at;  // Unix seconds; set while the clip is in the Trash
+    std::vector<double> bookmarks;  // seconds from the clip's start, sorted (the bookmark hotkey)
 };
 
 struct Collection {
@@ -66,6 +67,8 @@ inline constexpr std::int64_t kTrashDays = 30;
 inline constexpr std::int64_t kSecondsPerDay = 24 * 60 * 60;
 // The "version" written in library.json. A file with a higher one comes from a newer Backtrack.
 inline constexpr int kLibraryFileVersion = 1;
+// More bookmarks than this in one clip are damage (or a stuck key): the rest are dropped.
+inline constexpr std::size_t kMaxBookmarks = 200;
 // Larger sizes in library.json are damage; clamped so adding them up cannot overflow.
 inline constexpr std::int64_t kMaxClipBytes = 1'000'000'000'000;  // 1 TB
 inline constexpr int kMaxVideoDimension = 100'000;
@@ -109,6 +112,7 @@ public:
     bool set_favorite(std::string_view file, bool favorite);
     bool set_title(std::string_view file, std::string_view title);
     bool set_notes(std::string_view file, std::string_view notes);
+    bool set_bookmarks(std::string_view file, std::vector<double> seconds);  // cleaned up by clean_bookmarks
     bool add_tag(std::string_view file, std::string_view tag);  // trimmed; empty or duplicate ignored
     bool remove_tag(std::string_view file, std::string_view tag);
     bool move_to_trash(std::string_view file, std::int64_t now);
@@ -162,5 +166,13 @@ std::string format_age(std::int64_t seconds_ago);
 std::string format_resolution(int width, int height);
 // ASCII case-insensitive substring search (UTF-8 bytes beyond ASCII compare exactly).
 bool contains_ignoring_case(std::string_view haystack, std::string_view needle);
+
+// Sorted, inside 0..length (length 0: not known, no upper bound), not NaN, marks closer than
+// 0.1 s merged (one press seen twice), at most kMaxBookmarks.
+std::vector<double> clean_bookmarks(std::vector<double> seconds, double length);
+
+// The bookmarks that fall inside a piece [start, start + length) of a longer timeline, as offsets
+// from its start: a saved clip out of the replay buffer, a trimmed clip out of its original.
+std::vector<double> bookmarks_within(const std::vector<double>& marks, double start, double length);
 
 }  // namespace bt

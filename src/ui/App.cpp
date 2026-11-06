@@ -27,8 +27,6 @@ namespace fs = std::filesystem;
 using namespace theme;
 
 using namespace ids;
-constexpr int kHotkeyId = 1;
-constexpr int kMuteHotkeyId = 2;
 constexpr UINT_PTR kMeterTimer = 3;
 constexpr UINT kMeterMs = 66;  // the Record page's sound meters, about 15 times a second
 constexpr UINT kTrayId = 1;
@@ -236,21 +234,14 @@ void App::construct() {
     // Our own title bar: keep the DWM shadow, rounded corners on Windows 11 and a dark border.
     const MARGINS shadow{1, 1, 1, 1};
     DwmExtendFrameIntoClientArea(window_, &shadow);
-    const BOOL dark = TRUE;
-    DwmSetWindowAttribute(window_, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
     const DWM_WINDOW_CORNER_PREFERENCE corners = DWMWCP_ROUND;
     DwmSetWindowAttribute(window_, DWMWA_WINDOW_CORNER_PREFERENCE, &corners, sizeof(corners));
-    const COLORREF border = RGB(0x2a, 0x2f, 0x3a);
-    DwmSetWindowAttribute(window_, DWMWA_BORDER_COLOR, &border, sizeof(border));
     // Explorer's "taskbar is back" broadcast and the second copy's "show yourself" must get through
     // even when Backtrack runs elevated (UIPI would drop them).
     if (taskbar_created_ != 0) ChangeWindowMessageFilterEx(window_, taskbar_created_, MSGFLT_ALLOW, nullptr);
     if (show_message_ != 0) ChangeWindowMessageFilterEx(window_, show_message_, MSGFLT_ALLOW, nullptr);
 
-    edit_brush_ = CreateSolidBrush(colorref(kRaise));
-    bg_brush_ = CreateSolidBrush(colorref(kBg));
-    card_brush_ = CreateSolidBrush(colorref(kCard));
-    field_brush_ = CreateSolidBrush(colorref(kInk.mix(kBg, 0.05f)));
+    apply_look();
     search_box_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 10, 10, window_,
                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSearchBoxId)), instance, nullptr);
     edit_box_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 10, 10, window_,
@@ -285,8 +276,23 @@ void App::construct() {
     next_cleanup_ = std::chrono::steady_clock::now() + kCleanupInterval;
 
     register_hotkey();
+    {
+        // INPUTSINK: also while another window (a game) is in front.
+        RAWINPUTDEVICE keyboard{};
+        keyboard.usUsagePage = 0x01;  // generic desktop
+        keyboard.usUsage = 0x06;  // keyboard
+        keyboard.dwFlags = RIDEV_INPUTSINK;
+        keyboard.hwndTarget = window_;
+        if (!RegisterRawInputDevices(&keyboard, 1, sizeof(keyboard))) {
+            log::warn("Cannot read the keyboard directly ({}); the save key may not work in some games",
+                      hresult_text(HRESULT_FROM_WIN32(GetLastError())));
+        }
+    }
     add_tray_icon();
+    if (monitors_.empty()) refresh_devices();  // the overlay sits on the recorded display
+    overlay_ = std::make_unique<Overlay>();
     refresh_status();
+    refresh_overlay();
     inbox_.attach(window_);
     SetTimer(window_, kTickTimer, kTickMs, nullptr);
     // A clip saved before the inbox knew the window (the recorder starts first) is picked up now.
@@ -300,6 +306,27 @@ App::~App() {
         save_library();
     }
     release();
+}
+
+void App::apply_look() {
+    theme::apply_theme(settings_.theme);
+    // The edit boxes paint with GDI brushes in the theme's colours (WM_CTLCOLOREDIT).
+    for (HBRUSH* brush : {&edit_brush_, &bg_brush_, &card_brush_, &field_brush_}) {
+        if (*brush != nullptr) DeleteObject(*brush);
+    }
+    edit_brush_ = CreateSolidBrush(colorref(kRaise));
+    bg_brush_ = CreateSolidBrush(colorref(kBg));
+    card_brush_ = CreateSolidBrush(colorref(kCard));
+    field_brush_ = CreateSolidBrush(colorref(kInk.mix(kBg, 0.05f)));
+    // The frame Windows draws around our title bar: dark or light, with the theme's line colour.
+    const BOOL dark = kLightTheme ? FALSE : TRUE;
+    DwmSetWindowAttribute(window_, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    const COLORREF border = colorref(kLine);
+    DwmSetWindowAttribute(window_, DWMWA_BORDER_COLOR, &border, sizeof(border));
+    for (HWND box : {search_box_, edit_box_, notes_box_, tag_box_, settings_search_}) {
+        if (box != nullptr) InvalidateRect(box, nullptr, TRUE);
+    }
+    invalidate();
 }
 
 void App::worker_main() {
@@ -368,13 +395,14 @@ void App::release() {
     ui_tasks_.clear();
     clip_view_.reset();  // the player decodes on the window's graphics device
     if (window_ != nullptr && IsWindow(window_)) {
-        if (hotkey_registered_) UnregisterHotKey(window_, kHotkeyId);
-        if (mute_hotkey_registered_) UnregisterHotKey(window_, kMuteHotkeyId);
-        mute_hotkey_registered_ = false;
-        hotkey_registered_ = false;
+        unregister_hotkeys();
+        // The raw keyboard registration points at this window; let it go with it.
+        RAWINPUTDEVICE keyboard{0x01, 0x06, RIDEV_REMOVE, nullptr};
+        RegisterRawInputDevices(&keyboard, 1, sizeof(keyboard));
         remove_tray_icon();
     }
     inbox_.attach(nullptr);
+    overlay_.reset();
     probe_.reset();  // its thread posts to the window; stop it first
     if (window_ != nullptr && IsWindow(window_)) {
         KillTimer(window_, kTickTimer);
@@ -413,6 +441,7 @@ void App::finish() {
     // The clip that was still being written when Quit was chosen goes into the library too.
     take_saved();
     save_library();
+    refresh_overlay();  // Instant Replay is off now: the chip goes
 }
 
 void App::take_saved() {
@@ -744,6 +773,7 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
         case WM_DISPLAYCHANGE:
             // A display was plugged in or out: the Record and Settings pages list them.
             refresh_devices();
+            refresh_overlay();
             invalidate();
             break;
         case WM_DEVICECHANGE:
@@ -767,9 +797,19 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
             }
             break;
         case WM_HOTKEY:
-            if (wparam == kHotkeyId) save_clip();
-            if (wparam == kMuteHotkeyId) toggle_mic_mute();
+            on_shortcut(static_cast<int>(wparam));
             return 0;
+        case WM_INPUT: {
+            // The keyboard as the hardware sends it, also while a game holds it exclusively.
+            RAWINPUT raw{};
+            UINT size = sizeof(raw);
+            if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lparam), RID_INPUT, &raw, &size, sizeof(RAWINPUTHEADER)) !=
+                    static_cast<UINT>(-1) &&
+                raw.header.dwType == RIM_TYPEKEYBOARD) {
+                on_raw_key(raw.data.keyboard);
+            }
+            break;  // DefWindowProc frees the input
+        }
         case WM_TIMER:
             if (wparam == kPlayerTimer) {
                 tick_player();
@@ -841,6 +881,7 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
             return 0;
         case WM_ACTIVATE:
             if (LOWORD(wparam) == WA_INACTIVE) cancel_hotkey_capture();  // the key must work in the game
+            refresh_overlay();  // hidden while Backtrack itself is in front
             break;
         case WM_CLOSE:
             // §: the X hides; Instant Replay keeps running in the tray until "Quit".
@@ -898,14 +939,7 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
             KillTimer(window_, kPlayerTimer);
             clip_view_.reset();
             KillTimer(window_, kMeterTimer);
-            if (hotkey_registered_) {
-                UnregisterHotKey(window_, kHotkeyId);
-                hotkey_registered_ = false;
-            }
-            if (mute_hotkey_registered_) {
-                UnregisterHotKey(window_, kMuteHotkeyId);
-                mute_hotkey_registered_ = false;
-            }
+            unregister_hotkeys();
             remove_tray_icon();
             save_library();
             PostQuitMessage(0);
@@ -1217,6 +1251,7 @@ void App::run_cleanup() {
 
 void App::on_saved(const SaveResult& result) {
     if (!result.ok) {
+        flash_overlay(L"Could not save the clip", kDanger);
         refresh_status();
         return;  // the sound and the log already said why
     }
@@ -1234,6 +1269,9 @@ void App::on_saved(const SaveResult& result) {
         clip.size_bytes = size;
         clip.duration_s = result.seconds;
         clip.source = std::format("Display {}", recorded_display() + 1);
+        std::vector<double> marks;
+        for (const Time100ns b : bookmarks_) marks.push_back(static_cast<double>(b) / kTicksPerSecond);
+        clip.bookmarks = bookmarks_within(marks, static_cast<double>(result.start) / kTicksPerSecond, result.seconds);
         library_.add_saved_clip(clip);
         new_files_.insert(file);
         save_library();
@@ -1254,6 +1292,7 @@ void App::on_saved(const SaveResult& result) {
                              format_size(size));
     bar.at = std::chrono::steady_clock::now();
     if (settings_.saved_bar) saved_bar_ = bar;
+    flash_overlay(std::format(L"Clip saved \u00b7 {}", to_wide(format_duration(result.seconds))), kOk);
     notify_saved(result);
     refresh_status();
     invalidate();
@@ -1265,8 +1304,8 @@ void App::on_saved(const SaveResult& result) {
 void App::save_clip() {
     if (finished_) return;
     std::string reason;
-    if (recorder_->save_clip(reason)) {
-        log::info("Saving the last {} seconds...", settings_.clip_seconds);
+    if (recorder_->save_clip(reason, saved_seconds(settings_))) {
+        log::info("Saving the last {} seconds...", saved_seconds(settings_));
     } else {
         log::warn("{}", reason);
         if (settings_.sound) {
@@ -1286,6 +1325,7 @@ void App::toggle_pause() {
 }
 
 void App::refresh_status() {
+    refresh_overlay();
     const std::string status = recorder_->status_text();
     if (status != status_) {
         status_ = status;
@@ -1302,31 +1342,77 @@ void App::refresh_status() {
     }
 }
 
-void App::register_hotkey() {
-    if (const auto parsed = parse_hotkey(settings_.save_hotkey); parsed.hotkey) {
-        hotkey_registered_ = RegisterHotKey(window_, kHotkeyId, parsed.hotkey->modifiers | MOD_NOREPEAT,
-                                            parsed.hotkey->virtual_key) != FALSE;
-        if (!hotkey_registered_) {
-            log::warn("Cannot use {} as the hotkey: {}. Use the Save button, or pick another key in Settings > Hotkeys",
-                      settings_.save_hotkey, hresult_text(HRESULT_FROM_WIN32(GetLastError())));
-        }
+std::string& App::hotkey_text(Settings& s, HotkeyTarget target) {
+    switch (target) {
+        case HotkeyTarget::MicMute: return s.mic_mute_hotkey;
+        case HotkeyTarget::Overlay: return s.overlay_hotkey;
+        case HotkeyTarget::Bookmark: return s.bookmark_hotkey;
+        case HotkeyTarget::PushToTalk: return s.push_to_talk_key;
+        case HotkeyTarget::Save: break;
     }
-    // The microphone's mute key; none when it is empty or the same as the save key (one key cannot do both).
-    if (!settings_.mic_mute_hotkey.empty() && settings_.mic_mute_hotkey == settings_.save_hotkey) {
-        log::warn("The mute key {} is also the save key; it only saves clips", settings_.mic_mute_hotkey);
-    } else if (!settings_.mic_mute_hotkey.empty()) {
-        if (const auto parsed = parse_hotkey(settings_.mic_mute_hotkey); parsed.hotkey) {
-            mute_hotkey_registered_ = RegisterHotKey(window_, kMuteHotkeyId, parsed.hotkey->modifiers | MOD_NOREPEAT,
-                                                     parsed.hotkey->virtual_key) != FALSE;
-            if (!mute_hotkey_registered_) {
-                log::warn("Cannot use {} to mute the microphone: {}", settings_.mic_mute_hotkey,
-                          hresult_text(HRESULT_FROM_WIN32(GetLastError())));
-            }
+    return s.save_hotkey;
+}
+
+const std::string& App::hotkey_text(const Settings& s, HotkeyTarget target) {
+    return hotkey_text(const_cast<Settings&>(s), target);
+}
+
+void App::register_hotkey() {
+    // In order: a key already taken by an earlier one (the save key first) only does that one.
+    static constexpr const char* kWhat[] = {"save clips", "mute the microphone", "show the overlay", "add bookmarks"};
+    for (int i = 0; i < kGlobalHotkeys; ++i) {
+        const auto target = static_cast<HotkeyTarget>(i);
+        const std::string& text = hotkey_text(settings_, target);
+        hotkey_ok_[i] = false;
+        if (text.empty()) continue;  // only the save key cannot be empty
+        bool taken = false;
+        for (int j = 0; j < i; ++j) taken = taken || text == hotkey_text(settings_, static_cast<HotkeyTarget>(j));
+        if (taken) {
+            log::warn("{} is set for two shortcuts; it does not {}", text, kWhat[i]);
+            continue;
+        }
+        const auto parsed = parse_hotkey(text);
+        if (!parsed.hotkey) continue;
+        hotkey_ok_[i] = RegisterHotKey(window_, i + 1, parsed.hotkey->modifiers | MOD_NOREPEAT,
+                                       parsed.hotkey->virtual_key) != FALSE;
+        if (!hotkey_ok_[i]) {
+            log::warn("Cannot use {} to {}: {}. Pick another key in Settings > Hotkeys", text, kWhat[i],
+                      hresult_text(HRESULT_FROM_WIN32(GetLastError())));
         }
     }
 }
 
+void App::unregister_hotkeys() {
+    for (int i = 0; i < kGlobalHotkeys; ++i) {
+        if (hotkey_ok_[i]) UnregisterHotKey(window_, i + 1);
+        hotkey_ok_[i] = false;
+    }
+}
+
 namespace {
+
+// Mono 16-bit PCM as a WAV file in memory, for PlaySound(SND_MEMORY).
+std::vector<std::uint8_t> wav_from_pcm(const std::vector<std::int16_t>& pcm, int rate) {
+    const auto data_bytes = static_cast<std::uint32_t>(pcm.size() * 2);
+    std::vector<std::uint8_t> wav;
+    const auto put = [&wav](std::uint32_t v, int bytes) {
+        for (int b = 0; b < bytes; ++b) wav.push_back(static_cast<std::uint8_t>((v >> (8 * b)) & 0xFF));
+    };
+    for (const char c : std::string_view("RIFF")) wav.push_back(static_cast<std::uint8_t>(c));
+    put(36 + data_bytes, 4);
+    for (const char c : std::string_view("WAVEfmt ")) wav.push_back(static_cast<std::uint8_t>(c));
+    put(16, 4);
+    put(1, 2);  // PCM
+    put(1, 2);  // mono
+    put(static_cast<std::uint32_t>(rate), 4);
+    put(static_cast<std::uint32_t>(rate) * 2, 4);
+    put(2, 2);
+    put(16, 2);
+    for (const char c : std::string_view("data")) wav.push_back(static_cast<std::uint8_t>(c));
+    put(data_bytes, 4);
+    for (const std::int16_t s : pcm) put(static_cast<std::uint16_t>(s), 2);
+    return wav;
+}
 
 // Two short tones as a WAV in memory: rising for "mic on", falling for "mic muted". Heard in a
 // fullscreen game where the window is not visible (and recorded like any other sound).
@@ -1344,42 +1430,178 @@ const std::vector<std::uint8_t>& mute_tone(bool muted) {
                 pcm.push_back(static_cast<std::int16_t>(std::sin(2 * 3.14159265358979 * hz * i / kRate) * 6000 * fade));
             }
         }
-        const auto data_bytes = static_cast<std::uint32_t>(pcm.size() * 2);
-        std::vector<std::uint8_t> wav;
-        const auto put = [&wav](std::uint32_t v, int bytes) {
-            for (int b = 0; b < bytes; ++b) wav.push_back(static_cast<std::uint8_t>((v >> (8 * b)) & 0xFF));
-        };
-        for (const char c : std::string_view("RIFF")) wav.push_back(static_cast<std::uint8_t>(c));
-        put(36 + data_bytes, 4);
-        for (const char c : std::string_view("WAVEfmt ")) wav.push_back(static_cast<std::uint8_t>(c));
-        put(16, 4);
-        put(1, 2);
-        put(1, 2);
-        put(kRate, 4);
-        put(kRate * 2, 4);
-        put(2, 2);
-        put(16, 2);
-        for (const char c : std::string_view("data")) wav.push_back(static_cast<std::uint8_t>(c));
-        put(data_bytes, 4);
-        for (const std::int16_t s : pcm) put(static_cast<std::uint16_t>(s), 2);
-        return wav;
+        return wav_from_pcm(pcm, kRate);
     };
     static const std::vector<std::uint8_t> muted_tone = make(true);
     static const std::vector<std::uint8_t> unmuted_tone = make(false);
     return muted ? muted_tone : unmuted_tone;
 }
 
+// One short high blip: "marked". Different from the save sound and the mute tones.
+const std::vector<std::uint8_t>& bookmark_tone() {
+    static const std::vector<std::uint8_t> tone = [] {
+        constexpr int kRate = 44100;
+        constexpr int kSamples = kRate * 60 / 1000;
+        std::vector<std::int16_t> pcm;
+        for (int i = 0; i < kSamples; ++i) {
+            const double fade = std::min({1.0, i / 220.0, (kSamples - i) / 600.0});
+            pcm.push_back(static_cast<std::int16_t>(std::sin(2 * 3.14159265358979 * 1318.5 * i / kRate) * 5000 * fade));
+        }
+        return wav_from_pcm(pcm, kRate);
+    }();
+    return tone;
+}
+
 }  // namespace
+
+void App::on_shortcut(int id) {
+    if (id < 1 || id > kGlobalHotkeys) return;
+    // UNVERIFIED: how far apart WM_HOTKEY and WM_INPUT of one press arrive; measured both within
+    // the same message batch here, 250 ms leaves room and is shorter than any deliberate double press.
+    constexpr auto kSamePress = std::chrono::milliseconds(250);
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_shortcut_[id] < kSamePress) return;
+    last_shortcut_[id] = now;
+    switch (static_cast<HotkeyTarget>(id - 1)) {
+        case HotkeyTarget::Save: save_clip(); break;
+        case HotkeyTarget::MicMute: toggle_mic_mute(); break;
+        case HotkeyTarget::Overlay: toggle_overlay(); break;
+        case HotkeyTarget::Bookmark: add_bookmark(); break;
+        case HotkeyTarget::PushToTalk: break;
+    }
+}
+
+void App::on_raw_key(const RAWKEYBOARD& key) {
+    const UINT vk = key.VKey;
+    if (vk == 0 || vk == 0xFF) return;  // part of an escape sequence, not a key
+    const bool down = (key.Flags & RI_KEY_BREAK) == 0;
+    switch (vk) {
+        case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL: case VK_MENU: case VK_LMENU: case VK_RMENU:
+        case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT: case VK_LWIN: case VK_RWIN:
+            return;  // modifiers are read from Windows when the key itself goes down
+        default: break;
+    }
+    if (!down) {
+        raw_keys_down_.erase(vk);
+        return;
+    }
+    // Held down, Windows repeats the key every ~30 ms after a short delay: a "press" of a key that
+    // went down moments ago is a repeat. By time, not by remembering releases: a release lost
+    // (lock screen, UAC) must not make the next real press look like a repeat. Keys are never logged.
+    constexpr auto kRepeat = std::chrono::milliseconds(600);
+    const auto now = std::chrono::steady_clock::now();
+    const auto last = raw_keys_down_.find(vk);
+    const bool repeat = last != raw_keys_down_.end() && now - last->second < kRepeat;
+    raw_keys_down_[vk] = now;
+    if (repeat) return;
+    if (capturing_hotkey_ || finished_) return;  // Settings is listening for a new key
+    std::uint32_t modifiers = 0;
+    if (GetAsyncKeyState(VK_CONTROL) < 0) modifiers |= hotkey_mod::kCtrl;
+    if (GetAsyncKeyState(VK_MENU) < 0) modifiers |= hotkey_mod::kAlt;
+    if (GetAsyncKeyState(VK_SHIFT) < 0) modifiers |= hotkey_mod::kShift;
+    if (GetAsyncKeyState(VK_LWIN) < 0 || GetAsyncKeyState(VK_RWIN) < 0) modifiers |= hotkey_mod::kWin;
+    const Hotkey pressed{modifiers, vk};
+    for (int i = 0; i < kGlobalHotkeys; ++i) {
+        const std::string& text = hotkey_text(settings_, static_cast<HotkeyTarget>(i));
+        if (text.empty()) continue;
+        if (const auto parsed = parse_hotkey(text); parsed.hotkey && *parsed.hotkey == pressed) {
+            on_shortcut(i + 1);  // the first one with this key, as register_hotkey decides
+            return;
+        }
+    }
+}
 
 void App::toggle_mic_mute() {
     if (finished_ || !settings_.mic_enabled) return;  // no microphone recorded: nothing to mute
     recorder_->set_mic_muted(!recorder_->mic_muted());
     const bool muted = recorder_->mic_muted();  // what the recorder really did (no sound engine: never muted)
     log::info("Microphone {}", muted ? "muted" : "unmuted");
+    flash_overlay(muted ? L"Mic muted" : L"Mic on", muted ? kDanger : kOk);
     if (settings_.sound) {
         PlaySoundW(reinterpret_cast<LPCWSTR>(mute_tone(muted).data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
     }
     invalidate();
+}
+
+void App::toggle_overlay() {
+    if (finished_) return;
+    change_settings([](Settings& s) { s.overlay = !s.overlay; });
+}
+
+void App::add_bookmark() {
+    if (finished_ || recorder_->paused()) {
+        // Nothing is being recorded: there is no moment to mark.
+        if (settings_.sound) PlaySoundW(L"SystemHand", nullptr, SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
+        return;
+    }
+    const Time100ns now = recorder_->recording_time();
+    // Older than the buffer reaches back: no clip can contain them any more.
+    const Time100ns keep = static_cast<Time100ns>(settings_.clip_seconds + 10) * kTicksPerSecond;
+    while (!bookmarks_.empty() && (bookmarks_.front() < now - keep || bookmarks_.size() >= kMaxBookmarks)) {
+        bookmarks_.pop_front();
+    }
+    bookmarks_.push_back(now);
+    log::info("Bookmark added");
+    if (settings_.sound) {
+        PlaySoundW(reinterpret_cast<LPCWSTR>(bookmark_tone().data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+    }
+    flash_overlay(L"Bookmark added", kAccent);
+}
+
+RECT App::recorded_monitor_rect() const {
+    // By the device name: monitors_ is in DXGI order, EnumDisplayMonitors in its own.
+    struct Search {
+        std::wstring name;
+        RECT rect{};
+        bool found = false;
+    } search;
+    const int index = recorded_display();
+    if (index >= 0 && static_cast<std::size_t>(index) < monitors_.size()) search.name = monitors_[static_cast<std::size_t>(index)].device_name;
+    EnumDisplayMonitors(
+        nullptr, nullptr,
+        [](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
+            auto& s = *reinterpret_cast<Search*>(data);
+            MONITORINFOEXW info{};
+            info.cbSize = sizeof(info);
+            if (!GetMonitorInfoW(monitor, &info)) return TRUE;
+            if ((!s.name.empty() && s.name == info.szDevice) || (s.name.empty() && (info.dwFlags & MONITORINFOF_PRIMARY))) {
+                s.rect = info.rcMonitor;
+                s.found = true;
+                return FALSE;
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&search));
+    if (!search.found) {
+        MONITORINFO info{sizeof(MONITORINFO)};
+        GetMonitorInfoW(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), &info);
+        search.rect = info.rcMonitor;
+    }
+    return search.rect;
+}
+
+void App::refresh_overlay() {
+    if (!overlay_) return;
+    OverlayState state;
+    // Not over Backtrack's own window (it would sit on the caption buttons), not after Quit.
+    state.visible = settings_.overlay && !finished_ && window_ != nullptr && GetForegroundWindow() != window_;
+    const bool paused = recorder_->paused();
+    const bool normal = status_.starts_with("Recording") || status_.starts_with("Saving");
+    state.text = paused ? L"Replay paused" : normal ? L"Replay on" : L"Replay has a problem";
+    if (!paused && recorder_->mic_muted() && settings_.mic_enabled) state.text += L" \u00b7 Mic muted";
+    state.dot = paused ? kOff : normal ? kAccent : kWarn;
+    state.monitor = recorded_monitor_rect();
+    state.corner = static_cast<int>(settings_.overlay_corner);
+    state.opacity = static_cast<float>(settings_.overlay_opacity) / 100.0f;
+    state.reduce_motion = settings_.reduce_motion;
+    state.light = kLightTheme;
+    state.chip = kPop.with_alpha(0.94f);
+    state.ink = kInk;
+    overlay_->update(state);
+}
+
+void App::flash_overlay(std::wstring text, Color dot) {
+    if (overlay_ && settings_.overlay && !finished_) overlay_->flash(std::move(text), dot);
 }
 
 void App::apply_audio_live() {
@@ -1791,9 +2013,9 @@ void App::paint_sidebar(float height) {
            TextStyle{13, Weight::Semibold}, state_color);
     std::wstring hint = !normal && !paused ? to_wide(status_)
                                            : std::format(L"{} saves the last {} s", to_wide(settings_.save_hotkey),
-                                                         settings_.clip_seconds);
+                                                         saved_seconds(settings_));
     Color hint_color = kMute;
-    if (!hotkey_registered_) {
+    if (!hotkey_ok_[0]) {
         // Another program has the key: say so instead of promising it.
         hint = std::format(L"{} is taken by another program", to_wide(settings_.save_hotkey));
         hint_color = kWarn;
@@ -1885,7 +2107,7 @@ void App::paint_library(const Rect& area) {
     float bx = top.x + 32 + status_w + 14;
     {
         // Save chip: [F8] Save last 30 s
-        const std::wstring label = std::format(L"Save last {} s", settings_.clip_seconds);
+        const std::wstring label = std::format(L"Save last {} s", saved_seconds(settings_));
         const TextStyle style{12.5f, Weight::Semibold};
         std::vector<std::wstring> keys;
         std::wstring hotkey = to_wide(settings_.save_hotkey);
@@ -1955,7 +2177,7 @@ void App::paint_library(const Rect& area) {
         switch (view_) {
             case LibraryView::All:
                 text = std::format(L"Press {} to save the last {} seconds. Your clips show up here.",
-                                   to_wide(settings_.save_hotkey), settings_.clip_seconds);
+                                   to_wide(settings_.save_hotkey), saved_seconds(settings_));
                 break;
             case LibraryView::Favorites: text = L"Click the star on a clip to keep it here."; break;
             case LibraryView::Recent: text = std::format(L"Clips from the last {} days show up here.", kRecentDays); break;
@@ -1971,20 +2193,30 @@ void App::paint_library(const Rect& area) {
         max_scroll_ = 0;
         scroll_ = 0;
     } else {
-        const float inner_w = grid_area_.w - 2 * kGridPadX;
-        const int columns = std::max(1, static_cast<int>((inner_w + kGridGap) / (kCardMin + kGridGap)));
-        const float card_w = (inner_w - kGridGap * static_cast<float>(columns - 1)) / static_cast<float>(columns);
+        // .st-grid: the thumbnail size sets how many cards share a row (fewer when the window is
+        // narrow), density the room between them.
+        const bool compact = settings_.density == Density::Compact;
+        const float gap_x = compact ? kGridGapCompactX : kGridGapX;
+        const float gap_y = compact ? kGridGapCompactY : kGridGapY;
+        const float pad_x = compact ? kGridPadCompactX : kGridPadX;
+        const int max_columns = settings_.thumbnail_size == ThumbnailSize::Small   ? 5
+                                : settings_.thumbnail_size == ThumbnailSize::Large ? 3
+                                                                                   : 4;
+        const float inner_w = grid_area_.w - 2 * pad_x;
+        const int columns =
+            std::clamp(static_cast<int>((inner_w + gap_x) / (kCardMin + gap_x)), 1, max_columns);
+        const float card_w = (inner_w - gap_x * static_cast<float>(columns - 1)) / static_cast<float>(columns);
         const float card_h = card_w * 9.0f / 16.0f + kCardInfo;
         const auto rows = static_cast<int>((shown.size() + static_cast<std::size_t>(columns) - 1) /
                                            static_cast<std::size_t>(columns));
-        const float content_h = kGridPadY + static_cast<float>(rows) * (card_h + kGridGap) - kGridGap + 22;
+        const float content_h = kGridPadY + static_cast<float>(rows) * (card_h + gap_y) - gap_y + kGridPadBottom;
         max_scroll_ = std::max(0.0f, content_h - grid_area_.h);
         scroll_ = std::clamp(scroll_, 0.0f, max_scroll_);
         for (std::size_t i = 0; i < shown.size(); ++i) {
             const int row = static_cast<int>(i / static_cast<std::size_t>(columns));
             const int column = static_cast<int>(i % static_cast<std::size_t>(columns));
-            const Rect card{grid_area_.x + kGridPadX + static_cast<float>(column) * (card_w + kGridGap),
-                            grid_area_.y + kGridPadY + static_cast<float>(row) * (card_h + kGridGap) - scroll_, card_w,
+            const Rect card{grid_area_.x + pad_x + static_cast<float>(column) * (card_w + gap_x),
+                            grid_area_.y + kGridPadY + static_cast<float>(row) * (card_h + gap_y) - scroll_, card_w,
                             card_h};
             if (card.bottom() < grid_area_.y || card.y > grid_area_.bottom()) continue;  // not visible
             paint_card(library_.clips()[shown[i]], card);

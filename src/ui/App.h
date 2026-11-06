@@ -26,6 +26,7 @@
 #include "platform/Recorder.h"
 #include "platform/VideoPlayer.h"
 #include "ui/Graphics.h"
+#include "ui/Overlay.h"
 
 #include <atomic>
 #include <chrono>
@@ -70,6 +71,11 @@ private:
     std::atomic<bool> sound_{true};
 };
 
+// Which key the Hotkeys page is changing. The first kGlobalHotkeys are global hotkeys
+// (RegisterHotKey id = index + 1); push-to-talk is a held key the recorder reads itself.
+enum class HotkeyTarget { Save, MicMute, Overlay, Bookmark, PushToTalk };
+inline constexpr int kGlobalHotkeys = 4;
+
 // Makes a recorder for the given settings (not started yet).
 using RecorderFactory = std::function<std::unique_ptr<Recorder>(const Settings& settings)>;
 
@@ -104,7 +110,6 @@ public:
 
 private:
     enum class Page { Library, Clip, Record, Uploads, Settings };
-    enum class HotkeyTarget { Save, MicMute, PushToTalk };  // which key the Hotkeys page is changing
 
     enum class Action {
         None,
@@ -190,6 +195,7 @@ private:
     void construct();
     void release();  // everything the window owns; also when construct() failed halfway
     void invalidate();
+    void apply_look();  // the colour theme from settings_, into the drawing tokens and the GDI brushes
     void show_notice(std::wstring text);
     void request_missing_info();
     void keep_copy_of_library(const wchar_t* why);
@@ -321,6 +327,19 @@ private:
     void cancel_hotkey_capture();
     void sample_load();  // Backtrack's own CPU and memory use, for the Record page
     void toggle_mic_mute();
+    // Save and mute keys arrive two ways: as WM_HOTKEY, and from the raw keyboard input, which a
+    // game that grabs the keyboard (DirectInput exclusive, e.g. GTA V borderless) cannot switch
+    // off. The first of the two acts; the other, within a moment, is the same press.
+    void on_shortcut(int id);
+    void on_raw_key(const RAWKEYBOARD& key);
+    void unregister_hotkeys();
+    static std::string& hotkey_text(Settings& s, HotkeyTarget target);
+    static const std::string& hotkey_text(const Settings& s, HotkeyTarget target);
+    void toggle_overlay();
+    void add_bookmark();
+    void refresh_overlay();  // what the in-screen chip shows, and where
+    void flash_overlay(std::wstring text, Color dot);
+    RECT recorded_monitor_rect() const;  // in screen pixels
     void apply_audio_live();  // volumes, noise suppression, push-to-talk: no restart needed
     void refresh_devices();  // monitors_ and microphones_
     float hotkey_row(float x, float y, float w, HotkeyTarget target, const wchar_t* label, const wchar_t* description,
@@ -364,7 +383,7 @@ private:
     UINT taskbar_created_ = 0;
     UINT show_message_ = 0;
     bool tray_added_ = false;
-    bool hotkey_registered_ = false;
+    bool hotkey_ok_[kGlobalHotkeys]{};  // by HotkeyTarget: Windows accepted the key
     bool quitting_ = false;
     bool finished_ = false;
     bool tracking_mouse_ = false;
@@ -373,6 +392,9 @@ private:
 
     std::unique_ptr<Graphics> graphics_;
     std::unique_ptr<MediaProbe> probe_;
+    std::unique_ptr<Overlay> overlay_;
+    // Bookmark presses on the recording clock, kept as long as the replay buffer reaches back.
+    std::deque<Time100ns> bookmarks_;
 
     Library library_;
     std::set<std::string> new_files_;  // saved during this run and not opened yet: "New" badge
@@ -435,7 +457,8 @@ private:
     bool capturing_hotkey_ = false;
     HotkeyTarget capture_target_ = HotkeyTarget::Save;  // which key "press keys" is listening for
     HotkeyTarget message_target_ = HotkeyTarget::Save;  // the row hotkey_message_ belongs to
-    bool mute_hotkey_registered_ = false;
+    std::map<UINT, std::chrono::steady_clock::time_point> raw_keys_down_;  // key -> its last raw "down" (auto-repeat)
+    std::chrono::steady_clock::time_point last_shortcut_[kGlobalHotkeys + 1]{};  // by hotkey id: a press seen both ways acts once
     std::vector<MicDevice> microphones_;  // refreshed when the Record or Settings page opens
     std::wstring hotkey_message_;  // why the last pressed combination cannot be used
     std::optional<std::chrono::steady_clock::time_point> restart_due_;  // settings wait a moment, then restart once

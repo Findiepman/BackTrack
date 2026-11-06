@@ -330,7 +330,7 @@ Time100ns Recorder::recording_now() const {
     return (paused_ ? pause_started_ : qpc_now()) - paused_total_;
 }
 
-bool Recorder::save_clip(std::string& reason) {
+bool Recorder::save_clip(std::string& reason, int seconds) {
     if (!writer_.joinable() || writer_dead_) {
         reason = writer_dead_ ? "Cannot save: the clip writer stopped (details in backtrack.log)"
                               : "Backtrack is not recording";
@@ -343,7 +343,8 @@ bool Recorder::save_clip(std::string& reason) {
         // §3.8: only pointers to the shared packet bytes are copied, so the lock is held for
         // microseconds even for a 300 s clip.
         std::lock_guard lock(stream_mutex_);
-        job.video = video_buffer_.extract(now - seconds_to_100ns(settings_.clip_seconds), now);
+        const int length = seconds > 0 && seconds < settings_.clip_seconds ? seconds : settings_.clip_seconds;
+        job.video = video_buffer_.extract(now - seconds_to_100ns(length), now);
         job.video_type = video_type_;
         if (!job.video.empty() && audio_type_) {
             // §6: audio from the first video frame on; the writer drops the packet that starts before it.
@@ -358,6 +359,7 @@ bool Recorder::save_clip(std::string& reason) {
         reason = "Nothing to save yet: there is no video in the buffer";
         return false;
     }
+    job.start = job.video.front().pts;
     const Time100ns length = job.video.back().pts + job.video.back().duration - job.video.front().pts;
     if (length < kMinimumClip) {
         reason = "Nothing to save yet: less than a second has been recorded";
@@ -815,6 +817,7 @@ void Recorder::writer_main() {
                 jobs_.pop_front();
             }
             SaveResult result;
+            result.start = job.start;
             try {
                 ClipWriteRequest request{next_clip_path(job.requested), job.video_type, job.audio_type,
                                          std::move(job.video), std::move(job.audio)};

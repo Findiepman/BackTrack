@@ -108,13 +108,20 @@ void copy_pipeline(const Settings& from, Settings& to) {
     to.audio_bitrate_kbps = from.audio_bitrate_kbps;
     to.mic_enabled = from.mic_enabled;
     to.mic_device = from.mic_device;
+    to.resolution = from.resolution;
+    to.quality = from.quality;
+    to.capture_cursor = from.capture_cursor;
+    to.system_device = from.system_device;
+    to.separate_tracks = from.separate_tracks;
 }
 
 bool needs_new_pipeline(const Settings& a, const Settings& b) {
     return a.clip_seconds != b.clip_seconds || a.output_dir != b.output_dir || a.filename != b.filename ||
            a.monitor != b.monitor || a.fps != b.fps || a.video_bitrate_kbps != b.video_bitrate_kbps ||
            a.encoder != b.encoder || a.audio_enabled != b.audio_enabled || a.audio_bitrate_kbps != b.audio_bitrate_kbps ||
-           a.mic_enabled != b.mic_enabled || a.mic_device != b.mic_device;
+           a.mic_enabled != b.mic_enabled || a.mic_device != b.mic_device || a.resolution != b.resolution ||
+           a.quality != b.quality || a.capture_cursor != b.capture_cursor || a.system_device != b.system_device ||
+           a.separate_tracks != b.separate_tracks;
 }
 
 std::wstring exe_path() {
@@ -141,6 +148,41 @@ std::int64_t folder_bytes(const fs::path& folder) {
     return total;
 }
 
+// The Hotkeys page rows that are settings, in the order they are shown.
+constexpr HotkeyTarget kHotkeyRows[] = {HotkeyTarget::Save, HotkeyTarget::MicMute, HotkeyTarget::PushToTalk,
+                                         HotkeyTarget::Overlay, HotkeyTarget::Bookmark};
+
+// "save", "mute", ...: the Hotkeys page's hit names are "hotkey-<this>" and "hotkey-<this>-reset".
+const char* hotkey_arg(HotkeyTarget target) {
+    switch (target) {
+        case HotkeyTarget::MicMute: return "mute";
+        case HotkeyTarget::Overlay: return "overlay";
+        case HotkeyTarget::Bookmark: return "bookmark";
+        case HotkeyTarget::PushToTalk: return "ptt";
+        case HotkeyTarget::Save: break;
+    }
+    return "save";
+}
+
+std::optional<HotkeyTarget> hotkey_target_of(std::string_view what, std::string_view suffix) {
+    for (const HotkeyTarget t : kHotkeyRows) {
+        if (what == std::string("hotkey-") + hotkey_arg(t) + std::string(suffix)) return t;
+    }
+    return std::nullopt;
+}
+
+// "saves clips": completes "That key already ...".
+const wchar_t* hotkey_does(HotkeyTarget target) {
+    switch (target) {
+        case HotkeyTarget::MicMute: return L"mutes the mic";
+        case HotkeyTarget::Overlay: return L"shows the overlay";
+        case HotkeyTarget::Bookmark: return L"adds bookmarks";
+        case HotkeyTarget::PushToTalk: return L"is the push-to-talk key";
+        case HotkeyTarget::Save: break;
+    }
+    return L"saves clips";
+}
+
 std::wstring lower(std::wstring text) {
     if (!text.empty()) {
         CharLowerBuffW(text.data(), static_cast<DWORD>(text.size()));
@@ -162,7 +204,10 @@ void App::change_settings(const std::function<void(Settings&)>& edit) {
     write_ini();
     inbox_.set_sound(settings_.sound);
     if (before.log_level != settings_.log_level) log::set_level(settings_.log_level);
-    if (before.save_hotkey != settings_.save_hotkey || before.mic_mute_hotkey != settings_.mic_mute_hotkey) apply_hotkey();
+    if (before.save_hotkey != settings_.save_hotkey || before.mic_mute_hotkey != settings_.mic_mute_hotkey ||
+        before.overlay_hotkey != settings_.overlay_hotkey || before.bookmark_hotkey != settings_.bookmark_hotkey) {
+        apply_hotkey();
+    }
     if (before.system_volume != settings_.system_volume || before.mic_volume != settings_.mic_volume ||
         before.noise_suppression != settings_.noise_suppression || before.push_to_talk != settings_.push_to_talk ||
         before.push_to_talk_key != settings_.push_to_talk_key) {
@@ -170,6 +215,12 @@ void App::change_settings(const std::function<void(Settings&)>& edit) {
     }
     if (before.start_minimized != settings_.start_minimized && launch_at_startup()) set_launch_at_startup(true);
     if (!settings_.saved_bar) saved_bar_.reset();
+    if (before.theme != settings_.theme) apply_look();
+    if (before.overlay != settings_.overlay || before.overlay_corner != settings_.overlay_corner ||
+        before.overlay_opacity != settings_.overlay_opacity || before.reduce_motion != settings_.reduce_motion ||
+        before.theme != settings_.theme || before.monitor != settings_.monitor) {
+        refresh_overlay();
+    }
     if (needs_new_pipeline(before, settings_)) {
         // Waits a moment so several quick changes restart Instant Replay once.
         restart_due_ = std::chrono::steady_clock::now() + kRestartDelay;
@@ -211,6 +262,7 @@ void App::restart_recorder() {
     const HCURSOR previous = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
     recorder_->stop();  // §6: a clip being written is finished first
     take_saved();
+    bookmarks_.clear();  // the new recorder starts with an empty buffer, on a clock of its own
     // The old recorder (stopped) stays until a new one runs, so there is never no recorder.
     // Tried in order: the new settings; the previous ones in the new clips folder (the clips may
     // just have been moved there); the previous ones exactly.
@@ -252,14 +304,7 @@ void App::restart_recorder() {
 }
 
 void App::apply_hotkey() {
-    if (hotkey_registered_) {
-        UnregisterHotKey(window_, 1);
-        hotkey_registered_ = false;
-    }
-    if (mute_hotkey_registered_) {
-        UnregisterHotKey(window_, 2);
-        mute_hotkey_registered_ = false;
-    }
+    unregister_hotkeys();
     register_hotkey();
     invalidate();
 }
@@ -409,12 +454,13 @@ void App::capture_hotkey(WPARAM key) {
         apply_hotkey();
         return;
     }
-    if (key == VK_BACK && capture_target_ == HotkeyTarget::MicMute) {
-        // Backspace: no mute key at all.
+    if (key == VK_BACK && capture_target_ != HotkeyTarget::Save && capture_target_ != HotkeyTarget::PushToTalk) {
+        // Backspace: no key for this one at all (saving always has one).
         capturing_hotkey_ = false;
         hotkey_message_.clear();
-        if (settings_.mic_mute_hotkey.empty()) apply_hotkey();
-        else change_settings([](Settings& s) { s.mic_mute_hotkey.clear(); });
+        const HotkeyTarget target = capture_target_;
+        if (hotkey_text(settings_, target).empty()) apply_hotkey();
+        else change_settings([target](Settings& s) { hotkey_text(s, target).clear(); });
         return;
     }
     if (key == VK_SHIFT || key == VK_CONTROL || key == VK_MENU || key == VK_LWIN || key == VK_RWIN || key == VK_LSHIFT ||
@@ -437,21 +483,22 @@ void App::capture_hotkey(WPARAM key) {
         invalidate();
         return;  // still listening: try another one
     }
-    const std::string other = target == HotkeyTarget::Save ? settings_.mic_mute_hotkey : settings_.save_hotkey;
-    if (target != HotkeyTarget::PushToTalk && text == other) {
-        hotkey_message_ = L"That key already saves clips or mutes the mic. Pick another one.";
-        invalidate();
-        return;
+    if (target != HotkeyTarget::PushToTalk) {
+        for (int i = 0; i < kGlobalHotkeys; ++i) {
+            const auto other = static_cast<HotkeyTarget>(i);
+            if (other != target && text == hotkey_text(settings_, other)) {
+                hotkey_message_ = std::format(L"That key already {}. Pick another one.", hotkey_does(other));
+                invalidate();
+                return;
+            }
+        }
     }
     capturing_hotkey_ = false;
     hotkey_message_ = to_wide(parsed.warning);
-    std::string Settings::*field = target == HotkeyTarget::Save      ? &Settings::save_hotkey
-                                   : target == HotkeyTarget::MicMute ? &Settings::mic_mute_hotkey
-                                                                     : &Settings::push_to_talk_key;
-    if (text == settings_.*field) {
+    if (text == hotkey_text(settings_, target)) {
         apply_hotkey();
     } else {
-        change_settings([&](Settings& s) { s.*field = text; });
+        change_settings([&](Settings& s) { hotkey_text(s, target) = text; });
         apply_hotkey();  // the push-to-talk key does not register, but the others were let go while listening
     }
 }
@@ -479,6 +526,26 @@ std::vector<App::SettingRow> App::setting_rows() {
         row.changed = on != def;
         row.choose = [this, set](int choice) { change_settings([&](Settings& s) { set(s, choice != 0); }); };
         row.reset = [set, def](Settings& s) { set(s, def); };
+        return add(std::move(row));
+    };
+    // A segmented control over an enum stored in Settings (options in the enum's order).
+    const auto enum_row = [&]<typename Enum>(const char* section, const char* id, const wchar_t* label,
+                                             const wchar_t* description, std::vector<std::wstring> options,
+                                             Enum Settings::*field) -> SettingRow& {
+        SettingRow row;
+        row.id = id;
+        row.section = section;
+        row.kind = Kind::Segmented;
+        row.label = label;
+        row.description = description;
+        row.options = std::move(options);
+        row.selected = static_cast<int>(settings_.*field);
+        row.changed = settings_.*field != defaults.*field;
+        const int count = static_cast<int>(row.options.size());
+        row.choose = [this, field, count](int choice) {
+            if (choice >= 0 && choice < count) change_settings([&](Settings& s) { s.*field = static_cast<Enum>(choice); });
+        };
+        row.reset = [defaults, field](Settings& s) { s.*field = defaults.*field; };
         return add(std::move(row));
     };
     const auto soon_row = [&](const char* section, const char* id, Kind kind, const wchar_t* label,
@@ -565,9 +632,41 @@ std::vector<App::SettingRow> App::setting_rows() {
         const MonitorInfo* m = settings_.monitor >= 0 && static_cast<std::size_t>(settings_.monitor) < monitors_.size()
                                    ? &monitors_[static_cast<std::size_t>(settings_.monitor)]
                                    : nullptr;
-        soon_row("capture", "res", Kind::Select, L"Resolution", L"Lower resolutions give smaller files.",
-                 {m != nullptr ? std::format(L"Native ({}×{})", m->desktop_size.width, m->desktop_size.height)
-                               : std::wstring(L"Native")});
+        // Native, then only the sizes below the display's own: the video is never scaled up.
+        static constexpr int kHeights[] = {1440, 1080, 720};
+        SettingRow row;
+        row.id = "res";
+        row.section = "capture";
+        row.kind = Kind::Select;
+        row.label = L"Resolution";
+        row.description = L"Lower resolutions give smaller files.";
+        row.keywords = L"resolution 1080p 720p 1440p size scale";
+        row.options.push_back(m != nullptr ? std::format(L"Native ({}×{})", m->desktop_size.width, m->desktop_size.height)
+                                           : std::wstring(L"Native"));
+        std::vector<int> heights{0};
+        for (const int h : kHeights) {
+            if (m == nullptr || h < m->desktop_size.height) {
+                row.options.push_back(std::format(L"{}p", h));
+                heights.push_back(h);
+            }
+        }
+        const auto at = std::find(heights.begin(), heights.end(), settings_.resolution);
+        if (at != heights.end()) {
+            row.selected = static_cast<int>(at - heights.begin());
+        } else {
+            // Set for a larger display than this one: recorded at native size here.
+            row.options.push_back(std::format(L"{}p (native on this display)", settings_.resolution));
+            heights.push_back(settings_.resolution);
+            row.selected = static_cast<int>(heights.size()) - 1;
+        }
+        row.changed = settings_.resolution != defaults.resolution;
+        row.choose = [this, heights](int choice) {
+            if (choice >= 0 && static_cast<std::size_t>(choice) < heights.size()) {
+                change_settings([&](Settings& s) { s.resolution = heights[static_cast<std::size_t>(choice)]; });
+            }
+        };
+        row.reset = [defaults](Settings& s) { s.resolution = defaults.resolution; };
+        add(std::move(row));
     }
     {
         static constexpr int kFps[] = {30, 60, 120, 144};
@@ -634,9 +733,12 @@ std::vector<App::SettingRow> App::setting_rows() {
         row.reset = [defaults](Settings& s) { s.video_bitrate_kbps = defaults.video_bitrate_kbps; };
         add(std::move(row));
     }
-    soon_row("capture", "preset", Kind::Segmented, L"Quality preset", L"",
-             {L"Performance", L"Balanced", L"Quality"}, 1);
-    soon_row("capture", "cursor", Kind::Toggle, L"Capture mouse cursor", L"Shows the pointer in your clips.");
+    enum_row("capture", "preset", L"Quality preset", L"How hard the encoder works for the same bitrate.",
+             {L"Performance", L"Balanced", L"Quality"}, &Settings::quality)
+        .keywords = L"quality speed encoder preset";
+    toggle_row("capture", "cursor", L"Capture mouse cursor", L"Shows the pointer in your clips. Games that hide it stay clean.",
+               settings_.capture_cursor, defaults.capture_cursor, [](Settings& s, bool v) { s.capture_cursor = v; })
+        .keywords = L"mouse pointer cursor";
     soon_row("capture", "hdr", Kind::Toggle, L"HDR capture",
              L"Records in HDR when your display supports it. Files get larger.");
 
@@ -662,7 +764,7 @@ std::vector<App::SettingRow> App::setting_rows() {
         row.section = "replay";
         row.kind = Kind::Slider;
         row.label = L"Buffer length";
-        row.description = L"Between 5 seconds and 5 minutes. The save hotkey keeps this much.";
+        row.description = L"Between 5 seconds and 5 minutes: how far back you can save.";
         row.keywords = L"seconds minutes clip length duration";
         const auto seconds = [](float f) { return 5 + 5 * static_cast<int>(std::lround(f * 59.0f)); };
         row.value = static_cast<float>(settings_.clip_seconds - 5) / 295.0f;
@@ -677,8 +779,42 @@ std::vector<App::SettingRow> App::setting_rows() {
     }
     soon_row("replay", "replayStore", Kind::Segmented, L"Keep the buffer in",
              L"RAM is fastest. Disk uses less memory but writes constantly.", {L"RAM", L"Disk"});
-    soon_row("replay", "saveLen", Kind::Select, L"Length of a saved clip", L"What the save hotkey keeps.",
-             {L"Last " + length_text(settings_.clip_seconds)});
+    {
+        // The whole buffer, or a shorter stretch of it; lengths that do not fit in the buffer are left out.
+        static constexpr int kLengths[] = {15, 30, 60, 120};
+        SettingRow row;
+        row.id = "saveLen";
+        row.section = "replay";
+        row.kind = Kind::Select;
+        row.label = L"Length of a saved clip";
+        row.description = L"What the save hotkey keeps. Changes at once, the buffer is kept.";
+        row.keywords = L"save length seconds clip duration";
+        row.options.push_back(L"The whole buffer (" + length_text(settings_.clip_seconds) + L")");
+        std::vector<int> lengths{0};
+        for (const int l : kLengths) {
+            if (l < settings_.clip_seconds) {
+                row.options.push_back(L"Last " + length_text(l));
+                lengths.push_back(l);
+            }
+        }
+        const int effective = saved_seconds(settings_) == settings_.clip_seconds ? 0 : settings_.save_seconds;
+        const auto at = std::find(lengths.begin(), lengths.end(), effective);
+        if (at != lengths.end()) {
+            row.selected = static_cast<int>(at - lengths.begin());
+        } else {
+            row.options.push_back(L"Last " + length_text(effective));  // typed into backtrack.ini
+            lengths.push_back(effective);
+            row.selected = static_cast<int>(lengths.size()) - 1;
+        }
+        row.changed = settings_.save_seconds != defaults.save_seconds;
+        row.choose = [this, lengths](int choice) {
+            if (choice >= 0 && static_cast<std::size_t>(choice) < lengths.size()) {
+                change_settings([&](Settings& s) { s.save_seconds = lengths[static_cast<std::size_t>(choice)]; });
+            }
+        };
+        row.reset = [defaults](Settings& s) { s.save_seconds = defaults.save_seconds; };
+        add(std::move(row));
+    }
     {
         SettingRow row;
         row.id = "ram";
@@ -799,8 +935,10 @@ std::vector<App::SettingRow> App::setting_rows() {
     volume_row("micVol", L"Microphone volume", L"How loud your voice is in the clip.", &Settings::mic_volume);
     volume_row("sysVol", L"System volume", L"How loud the game and everything else you hear is in the clip.",
                &Settings::system_volume);
-    soon_row("audio", "tracks", Kind::Toggle, L"Separate audio tracks",
-             L"Keeps mic and system audio apart so you can edit them later.");
+    toggle_row("audio", "tracks", L"Separate audio tracks",
+               L"Also keeps mic and game sound on tracks of their own, for editing. Players and Discord play the mix.",
+               settings_.separate_tracks, defaults.separate_tracks, [](Settings& s, bool v) { s.separate_tracks = v; })
+        .keywords = L"tracks separate edit mic game";
     toggle_row("audio", "noise", L"Noise suppression", L"Takes out fan noise and hum, and softens keyboard clicks on your mic.",
                settings_.noise_suppression, defaults.noise_suppression,
                [](Settings& s, bool v) { s.noise_suppression = v; })
@@ -819,24 +957,24 @@ std::vector<App::SettingRow> App::setting_rows() {
         row.kind = Kind::Custom;
         row.full = true;
         row.keywords = L"keyboard shortcut keys save record screenshot";
-        row.changed = settings_.save_hotkey != defaults.save_hotkey || settings_.mic_mute_hotkey != defaults.mic_mute_hotkey ||
-                      settings_.push_to_talk_key != defaults.push_to_talk_key;
-        // Each row is 58; a row with a warning under it 26 more.
+        row.changed = false;
+        for (const HotkeyTarget t : kHotkeyRows) row.changed = row.changed || hotkey_text(settings_, t) != hotkey_text(defaults, t);
+        // Each row is 58; a row with a warning under it 26 more (the same rule as hotkey_row).
         int warnings = 0;
         if (!hotkey_message_.empty()) ++warnings;
         if (!capturing_hotkey_) {
-            if (!hotkey_registered_ && !(hotkey_message_.size() && message_target_ == HotkeyTarget::Save)) ++warnings;
-            if (!settings_.mic_mute_hotkey.empty() && !mute_hotkey_registered_ &&
-                !(hotkey_message_.size() && message_target_ == HotkeyTarget::MicMute)) {
-                ++warnings;
+            for (int i = 0; i < kGlobalHotkeys; ++i) {
+                const auto t = static_cast<HotkeyTarget>(i);
+                if (!hotkey_ok_[i] && !hotkey_text(settings_, t).empty() &&
+                    !(hotkey_message_.size() && message_target_ == t)) {
+                    ++warnings;
+                }
             }
         }
         row.height = 7 * 58.0f + 26.0f * static_cast<float>(warnings);
         row.paint = [this](const Rect& area) { paint_hotkeys(area.x, area.y, area.w); };
         row.reset = [defaults](Settings& s) {
-            s.save_hotkey = defaults.save_hotkey;
-            s.mic_mute_hotkey = defaults.mic_mute_hotkey;
-            s.push_to_talk_key = defaults.push_to_talk_key;
+            for (const HotkeyTarget t : kHotkeyRows) hotkey_text(s, t) = hotkey_text(defaults, t);
         };
         add(std::move(row));
     }
@@ -1035,11 +1173,35 @@ std::vector<App::SettingRow> App::setting_rows() {
     toggle_row("notify", "showBar", L"Show the \"Saved\" bar in the app",
                L"The floating bar at the bottom of the library.", settings_.saved_bar, defaults.saved_bar,
                [](Settings& s, bool v) { s.saved_bar = v; });
-    soon_row("notify", "overlayShow", Kind::Toggle, L"Show the in-screen overlay",
-             L"A small status chip on top of your screen. It is never part of recordings.");
-    soon_row("notify", "overlayPos", Kind::Segmented, L"Overlay position", L"",
-             {L"Top left", L"Top right", L"Bottom left", L"Bottom right"}, 1);
-    soon_row("notify", "overlayOpacity", Kind::Slider, L"Overlay opacity", L"", {}, 0, false, 0.9f, L"90%");
+    toggle_row("notify", "overlayShow", L"Show the in-screen overlay",
+               overlay_ && !overlay_->available()
+                   ? L"Needs Windows 10 version 2004 or later, which can keep it out of recordings."
+                   : L"A small status chip on top of your game (not over exclusive fullscreen). It is never part of "
+                     L"recordings.",
+               settings_.overlay, defaults.overlay, [](Settings& s, bool v) { s.overlay = v; })
+        .keywords = L"overlay chip status";
+    enum_row("notify", "overlayPos", L"Overlay position", L"On the display Instant Replay records.",
+             {L"Top left", L"Top right", L"Bottom left", L"Bottom right"}, &Settings::overlay_corner)
+        .keywords = L"overlay corner position";
+    {
+        // 20 to 100 % in steps of 5.
+        SettingRow row;
+        row.id = "overlayOpacity";
+        row.section = "notify";
+        row.kind = Kind::Slider;
+        row.label = L"Overlay opacity";
+        row.keywords = L"overlay transparent opacity";
+        const auto percent = [](float f) { return 20 + 5 * static_cast<int>(std::lround(f * 16.0f)); };
+        row.value = static_cast<float>(settings_.overlay_opacity - 20) / 80.0f;
+        row.value_text = std::format(L"{}%", settings_.overlay_opacity);
+        row.preview = [percent](float f) { return std::format(L"{}%", percent(f)); };
+        row.changed = settings_.overlay_opacity != defaults.overlay_opacity;
+        row.drag = [this, percent](float f, bool done) {
+            if (done) change_settings([&](Settings& s) { s.overlay_opacity = percent(f); });
+        };
+        row.reset = [defaults](Settings& s) { s.overlay_opacity = defaults.overlay_opacity; };
+        add(std::move(row));
+    }
 
     // Appearance.
     {
@@ -1048,31 +1210,41 @@ std::vector<App::SettingRow> App::setting_rows() {
         row.section = "appearance";
         row.kind = Kind::Custom;
         row.label = L"Color theme";
-        row.description = L"One theme for the whole app. More themes and your own colours are coming.";
+        row.description = L"For the whole app.";
         row.full = true;
-        row.soon = true;
-        row.keywords = L"theme color colour accent dark light night shift";
+        row.keywords = L"theme color colour accent dark light night shift harbor plum moss daylight";
+        row.changed = settings_.theme != defaults.theme;
+        row.reset = [defaults](Settings& s) { s.theme = defaults.theme; };
         row.height = 36;
         row.paint = [this](const Rect& area) {
             Graphics& g = *graphics_;
-            const std::pair<std::uint32_t, std::uint32_t> swatches[] = {
-                {0x0e1014, 0xffb547}, {0x0e1a24, 0x4fb0ff}, {0x1a1020, 0xff6fb0}, {0x0f1a12, 0x8ee05a}, {0xf3f4f6, 0x3a6df0}};
+            // .st-preset: the background with an accent bar, the chosen one ringed in the accent.
             float x = area.x;
-            for (std::size_t i = 0; i < std::size(swatches); ++i) {
+            for (std::size_t i = 0; i < kThemes.size(); ++i) {
+                const ThemeInput colors = theme_input(kThemes[i]);
+                const bool chosen = kThemes[i] == settings_.theme;
                 const Rect s{x, area.y + 2, 40, 32};
-                g.fill_round(s, 9, Color::hex(swatches[i].first, i == 0 ? 1.0f : 0.5f));
-                g.fill_round(Rect{s.x + 22, s.y + 7, 10, 18}, 4, Color::hex(swatches[i].second, i == 0 ? 1.0f : 0.5f));
-                g.stroke_round(s, 9, i == 0 ? kAccent : kLine, i == 0 ? 2.0f : 1.0f);
+                g.fill_round(s, 9, Color::hex(colors.bg.value()));
+                g.fill_round(Rect{s.x + 7, s.y + 7, 12, 18}, 4, Color::hex(colors.surface.value()));
+                g.fill_round(Rect{s.x + 22, s.y + 7, 10, 18}, 4, Color::hex(colors.accent.value()));
+                const bool hot = hovered(Action::Setting, std::format("theme:{}", i));
+                g.stroke_round(s, 9, chosen ? kAccent : hot ? kOff : kLine, chosen ? 2.0f : 1.0f);
+                add_hit(s, Action::Setting, std::format("theme:{}", i));
                 x += 46;
             }
-            g.text(L"Night shift", Rect{x + 4, area.y, 120, 36}, TextStyle{13}, kMute);
+            g.text(std::wstring(theme_name(settings_.theme)), Rect{x + 4, area.y, 160, 36}, TextStyle{13}, kMute);
         };
         add(std::move(row));
     }
-    soon_row("appearance", "density", Kind::Segmented, L"Density", L"Compact fits more on screen.",
-             {L"Comfortable", L"Compact"});
-    soon_row("appearance", "thumb", Kind::Segmented, L"Thumbnail size", L"", {L"S", L"M", L"L"}, 1);
-    soon_row("appearance", "motion", Kind::Toggle, L"Reduce motion", L"Turns off animations and transitions.");
+    enum_row("appearance", "density", L"Density", L"Compact puts the clips closer together.",
+             {L"Comfortable", L"Compact"}, &Settings::density)
+        .keywords = L"density compact spacing";
+    enum_row("appearance", "thumb", L"Thumbnail size", L"Five, four or three clips in a row on a wide window.",
+             {L"S", L"M", L"L"}, &Settings::thumbnail_size)
+        .keywords = L"thumbnail size grid columns";
+    toggle_row("appearance", "motion", L"Reduce motion", L"Turns off the overlay's fades.", settings_.reduce_motion,
+               defaults.reduce_motion, [](Settings& s, bool v) { s.reduce_motion = v; })
+        .keywords = L"motion animation";
 
     // About.
     {
@@ -1233,43 +1405,43 @@ void App::run_setting(const std::string& what, const Rect& anchor) {
         }
         return;
     }
-    if (what == "hotkey-save" || what == "hotkey-mute" || what == "hotkey-ptt") {
+    if (const auto target = hotkey_target_of(what, "")) {
         capturing_hotkey_ = true;
-        capture_target_ = what == "hotkey-save"   ? HotkeyTarget::Save
-                          : what == "hotkey-mute" ? HotkeyTarget::MicMute
-                                                  : HotkeyTarget::PushToTalk;
+        capture_target_ = *target;
         message_target_ = capture_target_;
         hotkey_message_.clear();
         // Free the keys while listening, or pressing a current one would save a clip instead.
-        if (hotkey_registered_) {
-            UnregisterHotKey(window_, 1);
-            hotkey_registered_ = false;
-        }
-        if (mute_hotkey_registered_) {
-            UnregisterHotKey(window_, 2);
-            mute_hotkey_registered_ = false;
-        }
+        unregister_hotkeys();
         SetFocus(window_);
         invalidate();
         return;
     }
-    if (what == "hotkey-save-reset" || what == "hotkey-mute-reset" || what == "hotkey-ptt-reset") {
+    if (const auto target = hotkey_target_of(what, "-reset")) {
         hotkey_message_.clear();
-        // The default of one may be what the other is set to: one key cannot save and mute.
+        // The default of one may be what another is set to now: one key cannot do two things.
         const Settings d{};
-        if ((what == "hotkey-save-reset" && d.save_hotkey == settings_.mic_mute_hotkey) ||
-            (what == "hotkey-mute-reset" && d.mic_mute_hotkey == settings_.save_hotkey)) {
-            message_target_ = what == "hotkey-save-reset" ? HotkeyTarget::Save : HotkeyTarget::MicMute;
-            hotkey_message_ = L"The default is the key of the other shortcut. Change that one first.";
-            invalidate();
-            return;
+        const std::string& default_keys = hotkey_text(d, *target);
+        if (*target != HotkeyTarget::PushToTalk) {
+            for (int i = 0; i < kGlobalHotkeys; ++i) {
+                const auto other = static_cast<HotkeyTarget>(i);
+                if (other != *target && !default_keys.empty() && default_keys == hotkey_text(settings_, other)) {
+                    message_target_ = *target;
+                    hotkey_message_ = std::format(L"{} already {}. Change that one first.", to_wide(default_keys),
+                                                  hotkey_does(other));
+                    invalidate();
+                    return;
+                }
+            }
         }
-        change_settings([&what](Settings& s) {
-            const Settings d{};
-            if (what == "hotkey-save-reset") s.save_hotkey = d.save_hotkey;
-            if (what == "hotkey-mute-reset") s.mic_mute_hotkey = d.mic_mute_hotkey;
-            if (what == "hotkey-ptt-reset") s.push_to_talk_key = d.push_to_talk_key;
-        });
+        const HotkeyTarget t = *target;
+        change_settings([t](Settings& s) { hotkey_text(s, t) = hotkey_text(Settings{}, t); });
+        return;
+    }
+    if (what.starts_with("theme:")) {
+        const int index = std::atoi(what.c_str() + 6);
+        if (index >= 0 && static_cast<std::size_t>(index) < kThemes.size()) {
+            change_settings([index](Settings& s) { s.theme = kThemes[static_cast<std::size_t>(index)]; });
+        }
         return;
     }
     if (what == "mic-privacy") {
@@ -1443,9 +1615,7 @@ float App::paint_setting_row(const SettingRow& source, float x, float y, float w
 float App::hotkey_row(float x, float y, float w, HotkeyTarget target, const wchar_t* label, const wchar_t* description,
                       const std::string& keys, const std::string& default_keys, bool registered) {
     Graphics& g = *graphics_;
-    const std::string arg = target == HotkeyTarget::Save      ? "hotkey-save"
-                            : target == HotkeyTarget::MicMute ? "hotkey-mute"
-                                                              : "hotkey-ptt";
+    const std::string arg = std::string("hotkey-") + hotkey_arg(target);
     // .hk: 10 px padding, label + small description, the key button on the right.
     g.text(label, Rect{x, y + 10, w * 0.5f, 20}, TextStyle{14, Weight::Semibold}, kInk);
     g.text(description, Rect{x, y + 30, w - 34 - 8 - 170 - 12, 18}, TextStyle{12.5f}, kMute);
@@ -1484,9 +1654,15 @@ float App::hotkey_row(float x, float y, float w, HotkeyTarget target, const wcha
     if (!hotkey_message_.empty() && message_target_ == target) {
         warning = hotkey_message_;
     } else if (!registered && !keys.empty() && !capturing_hotkey_) {  // all are let go while listening
-        warning = target == HotkeyTarget::MicMute && keys == settings_.save_hotkey
-                      ? std::format(L"{} also saves clips. Pick another key to mute.", to_wide(keys))
-                      : std::format(L"{} is used by another program. Pick another one.", to_wide(keys));
+        // register_hotkey gives a key set twice to the first one only.
+        warning = std::format(L"{} is used by another program. Pick another one.", to_wide(keys));
+        for (int i = 0; i < static_cast<int>(target) && i < kGlobalHotkeys; ++i) {
+            if (keys == hotkey_text(settings_, static_cast<HotkeyTarget>(i))) {
+                warning = std::format(L"{} already {}. Pick another key.", to_wide(keys),
+                                      hotkey_does(static_cast<HotkeyTarget>(i)));
+                break;
+            }
+        }
     }
     if (!warning.empty()) {
         // .warn: why the key does not work.
@@ -1502,10 +1678,16 @@ float App::paint_hotkeys(float x, float y, float w) {
     Graphics& g = *graphics_;
     const Settings defaults{};
     y = hotkey_row(x, y, w, HotkeyTarget::Save, L"Save clip", L"Saves the last stretch of Instant Replay as a clip",
-                   settings_.save_hotkey, defaults.save_hotkey, hotkey_registered_);
+                   settings_.save_hotkey, defaults.save_hotkey, hotkey_ok_[0]);
     y = hotkey_row(x, y, w, HotkeyTarget::MicMute, L"Toggle microphone",
                    L"Mutes or unmutes your mic in recordings. Backspace: no key", settings_.mic_mute_hotkey,
-                   defaults.mic_mute_hotkey, mute_hotkey_registered_);
+                   defaults.mic_mute_hotkey, hotkey_ok_[1]);
+    y = hotkey_row(x, y, w, HotkeyTarget::Overlay, L"Show overlay",
+                   L"Shows or hides the small status overlay. Backspace: no key", settings_.overlay_hotkey,
+                   defaults.overlay_hotkey, hotkey_ok_[2]);
+    y = hotkey_row(x, y, w, HotkeyTarget::Bookmark, L"Add a bookmark",
+                   L"Marks a moment; it shows on the clip's timeline. Backspace: no key", settings_.bookmark_hotkey,
+                   defaults.bookmark_hotkey, hotkey_ok_[3]);
     y = hotkey_row(x, y, w, HotkeyTarget::PushToTalk, L"Push-to-talk",
                    settings_.push_to_talk ? L"Hold it to record your mic" : L"Turn on push-to-talk in Audio to use it",
                    settings_.push_to_talk_key, defaults.push_to_talk_key, true);
@@ -1518,8 +1700,6 @@ float App::paint_hotkeys(float x, float y, float w) {
     static constexpr Row kSoon[] = {
         {L"Start or stop recording", L"Records the whole screen until you stop it", "Alt+F9"},
         {L"Take screenshot", L"Captures the selected display as an image", "Alt+F12"},
-        {L"Show overlay", L"Shows or hides the small status overlay", "Alt+Z"},
-        {L"Add a bookmark", L"Marks a moment while you record", "Alt+B"},
     };
     for (std::size_t i = 0; i < std::size(kSoon); ++i) {
         const Row& r = kSoon[i];
