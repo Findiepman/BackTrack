@@ -24,6 +24,7 @@
 #include "platform/MediaProbe.h"
 #include "platform/MicCapture.h"
 #include "platform/Recorder.h"
+#include "platform/Updater.h"
 #include "platform/VideoPlayer.h"
 #include "ui/Graphics.h"
 #include "ui/Overlay.h"
@@ -89,8 +90,9 @@ public:
     // Registered message a second copy sends to bring this window forward.
     static constexpr wchar_t kShowMessage[] = L"Backtrack.Show";
 
-    // Makes and starts the recorder, then the window.
-    App(const Settings& settings, const AppPaths& paths, RecorderFactory make_recorder, SavedInbox& inbox);
+    // Makes and starts the recorder, then the window. updater may be null (no update checks).
+    App(const Settings& settings, const AppPaths& paths, RecorderFactory make_recorder, SavedInbox& inbox,
+        Updater* updater = nullptr);
     ~App();
     App(const App&) = delete;
     App& operator=(const App&) = delete;
@@ -107,6 +109,9 @@ public:
     // At the end: stops the recorder (every queued clip is written), files the clips it finished
     // meanwhile and saves the library.
     void finish();
+    // After the window closed: may a downloaded update be installed now? Not when Windows ended
+    // the session or an installer closed Backtrack, and not when "Install now" already started it.
+    bool may_install_update() const { return !session_ended_ && !update_started_; }
 
 private:
     enum class Page { Library, Clip, Record, Uploads, Settings };
@@ -365,6 +370,9 @@ private:
     RecorderFactory make_recorder_;
     std::unique_ptr<Recorder> recorder_;
     SavedInbox& inbox_;
+    Updater* updater_ = nullptr;
+    bool session_ended_ = false;  // WM_ENDSESSION: logoff, shutdown or an installer closed us
+    bool update_started_ = false;  // "Install now" started the installer
 
     HWND window_ = nullptr;
     HWND search_box_ = nullptr;

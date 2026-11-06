@@ -216,6 +216,7 @@ void App::change_settings(const std::function<void(Settings&)>& edit) {
     if (before.start_minimized != settings_.start_minimized && launch_at_startup()) set_launch_at_startup(true);
     if (!settings_.saved_bar) saved_bar_.reset();
     if (before.theme != settings_.theme) apply_look();
+    if (before.auto_update != settings_.auto_update && updater_ != nullptr) updater_->set_automatic(settings_.auto_update);
     if (before.overlay != settings_.overlay || before.overlay_corner != settings_.overlay_corner ||
         before.overlay_opacity != settings_.overlay_opacity || before.reduce_motion != settings_.reduce_motion ||
         before.theme != settings_.theme || before.monitor != settings_.monitor) {
@@ -586,22 +587,59 @@ std::vector<App::SettingRow> App::setting_rows() {
                settings_.start_minimized, defaults.start_minimized,
                [](Settings& s, bool v) { s.start_minimized = v; });
     soon_row("general", "lang", Kind::Select, L"Language", L"More languages are coming.", {L"English"});
-    soon_row("general", "autoUpdate", Kind::Toggle, L"Install updates automatically",
-             L"Updates are applied the next time you close the app.");
+    toggle_row("general", "autoUpdate", L"Install updates automatically",
+               L"Downloads new versions in the background and installs them when you quit Backtrack.",
+               settings_.auto_update, defaults.auto_update, [](Settings& s, bool v) { s.auto_update = v; })
+        .keywords = L"update automatic";
     {
         SettingRow row;
         row.id = "update";
         row.section = "general";
         row.kind = Kind::Custom;
         row.label = L"Check for updates";
-        row.description = std::format(L"You are on version {}.", to_wide(BT_VERSION));
+        // What the updater is doing, and the one button that fits.
+        const UpdateState update = updater_ != nullptr ? updater_->state() : UpdateState{};
+        std::wstring what = std::format(L"You are on version {}.", to_wide(BT_VERSION));
+        std::wstring label = L"Check for updates";
+        std::string arg = "update";
+        bool disabled = updater_ == nullptr;
+        switch (update.stage) {
+            case UpdateStage::Idle: break;
+            case UpdateStage::Checking:
+                what = L"Checking for a new version...";
+                disabled = true;
+                break;
+            case UpdateStage::UpToDate: what += L" That is the newest."; break;
+            case UpdateStage::Available:
+                what = std::format(L"Version {} is out (you have {}).", to_wide(update.version), to_wide(BT_VERSION));
+                if (update.can_install) {
+                    label = L"Download";
+                    arg = "update-download";
+                } else {
+                    label = L"Open the download page";  // not an installed copy: it cannot replace itself
+                    arg = "update-page";
+                }
+                break;
+            case UpdateStage::Downloading:
+                what = std::format(L"Downloading version {}: {}%", to_wide(update.version),
+                                   std::lround(std::clamp(update.fraction, 0.0, 1.0) * 100));
+                disabled = true;
+                break;
+            case UpdateStage::Ready:
+                what = std::format(L"Version {} is ready. It installs when you quit Backtrack.", to_wide(update.version));
+                label = L"Install now";
+                arg = "update-install";
+                break;
+            case UpdateStage::Failed: what = to_wide(update.error); break;
+        }
+        row.description = what;
         row.keywords = L"update version";
         row.height = 30;
-        row.paint = [this](const Rect& area) {
-            const float w = button_width(L"Check for updates", glyph::kRestoreDefaults, true);
-            push_button(area.right() - w - 46, area.y + (area.h - 30) / 2, L"Check for updates", glyph::kRestoreDefaults,
-                        ButtonStyle::Line, true, Action::Setting, "update", true);
-            soon_badge(area.right() - 38, area.y + area.h / 2);
+        row.paint = [this, label, arg, disabled](const Rect& area) {
+            const float w = button_width(label, glyph::kRestoreDefaults, true);
+            push_button(area.right() - w, area.y + (area.h - 30) / 2, label, glyph::kRestoreDefaults,
+                        arg == "update-install" ? ButtonStyle::Primary : ButtonStyle::Line, true, Action::Setting, arg,
+                        disabled);
         };
         add(std::move(row));
     }
@@ -1435,6 +1473,23 @@ void App::run_setting(const std::string& what, const Rect& anchor) {
         }
         const HotkeyTarget t = *target;
         change_settings([t](Settings& s) { hotkey_text(s, t) = hotkey_text(Settings{}, t); });
+        return;
+    }
+    if (what == "update" || what == "update-download" || what == "update-install" || what == "update-page") {
+        if (updater_ == nullptr) return;
+        if (what == "update") updater_->check();
+        if (what == "update-download") updater_->download();
+        if (what == "update-page") shell::open(fs::path(to_wide(updater_->state().page_url)));
+        if (what == "update-install") {
+            // A clip being saved is finished first: quit() waits for the recorder.
+            if (updater_->install_now()) {
+                update_started_ = true;
+                quit();
+            } else {
+                show_notice(L"The update could not be started. backtrack.log says why.");
+            }
+        }
+        invalidate();
         return;
     }
     if (what.starts_with("theme:")) {

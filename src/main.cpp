@@ -233,6 +233,15 @@ int run(int show_command) {
     // Found by searching after pressing the Windows key.
     bt::shell::ensure_start_menu_shortcut(exe_path(), kAppUserModelId);
 
+    // Before the recorder and the window: an update downloaded before a logoff installs now (the
+    // installer starts Backtrack again), and this copy ends.
+    bt::Updater updater({.current_version = BT_VERSION, .exe_path = exe_path()});
+    updater.set_automatic(settings.auto_update);
+    if (updater.install_at_start(options.hidden)) {
+        bt::log::info("Installing the downloaded update; it starts Backtrack again");
+        return 0;
+    }
+
     bt::ui::SavedInbox inbox;
     // The window owns the recorder and makes a new one when a setting needs a new pipeline.
     const bt::ui::RecorderFactory make_recorder = [&exe_dir, &inbox](const bt::Settings& current) {
@@ -247,7 +256,7 @@ int run(int show_command) {
 
     int code = 0;
     {
-        bt::ui::App app(settings, paths, make_recorder, inbox);
+        bt::ui::App app(settings, paths, make_recorder, inbox, &updater);
         app.show(options.hidden ? SW_HIDE : show_command);
 
         g_options = &options;
@@ -272,6 +281,11 @@ int run(int show_command) {
             code = 1;
         }
         app.finish();  // §6: every queued clip is written before Backtrack ends, and goes into the library
+        // Quit from the tray (not a logoff, not an installer that closed us): a downloaded update
+        // installs now, silently, without starting Backtrack again. Off when automatic updates are off.
+        if (app.may_install_update() && updater.install_on_exit()) {
+            bt::log::info("Installing the downloaded update");
+        }
     }
     // An Explorer window still opening must not log into a log that is being torn down.
     bt::shell::wait_for_pending(kShellWaitMs);

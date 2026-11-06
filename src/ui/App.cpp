@@ -172,8 +172,9 @@ std::vector<SaveResult> SavedInbox::take() {
 // ---------------------------------------------------------------------------------------------
 // Window
 
-App::App(const Settings& settings, const AppPaths& paths, RecorderFactory make_recorder, SavedInbox& inbox)
-    : settings_(settings), paths_(paths), make_recorder_(std::move(make_recorder)), inbox_(inbox) {
+App::App(const Settings& settings, const AppPaths& paths, RecorderFactory make_recorder, SavedInbox& inbox,
+         Updater* updater)
+    : settings_(settings), paths_(paths), make_recorder_(std::move(make_recorder)), inbox_(inbox), updater_(updater) {
     try {
         construct();
     } catch (...) {
@@ -293,6 +294,7 @@ void App::construct() {
     overlay_ = std::make_unique<Overlay>();
     refresh_status();
     refresh_overlay();
+    if (updater_ != nullptr) updater_->notify(window_, kMsgUpdate);
     inbox_.attach(window_);
     SetTimer(window_, kTickTimer, kTickMs, nullptr);
     // A clip saved before the inbox knew the window (the recorder starts first) is picked up now.
@@ -402,6 +404,7 @@ void App::release() {
         remove_tray_icon();
     }
     inbox_.attach(nullptr);
+    if (updater_ != nullptr) updater_->notify(nullptr, 0);
     overlay_.reset();
     probe_.reset();  // its thread posts to the window; stop it first
     if (window_ != nullptr && IsWindow(window_)) {
@@ -854,6 +857,9 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
             return 0;
         case kMsgSaved: take_saved(); return 0;
         case kMsgWork: run_ui_tasks(); return 0;
+        case kMsgUpdate:
+            if (page_ == Page::Settings) invalidate();  // the update row shows the state
+            return 0;
         case kMsgPlayer:
             if (clip_view_ && clip_view_->player && lparam == clip_view_->player_tag &&
                 clip_view_->player->on_event(static_cast<DWORD>(wparam))) {
@@ -922,6 +928,7 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
                 } else {
                     log::info("Windows is shutting down or logging off");
                 }
+                session_ended_ = true;
                 if (editing_) end_edit(true);
                 commit_clip_text();
                 restart_due_.reset();  // already in backtrack.ini; the next start uses it
