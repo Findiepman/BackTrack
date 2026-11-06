@@ -86,9 +86,40 @@ void levels() {
     CHECK_EQ(h264::required_level(7680, 4320, 144, 100000), 0);    // beyond 6.2
 }
 
+void length_prefixed_samples() {
+    // A Medal keyframe as the MP4 stores it: AUD, SPS, PPS, IDR, each behind a 4-byte length.
+    const std::vector<std::uint8_t> sample = {
+        0, 0, 0, 2, 0x09, 0xF0,              // AUD
+        0, 0, 0, 3, 0x67, 0x4D, 0x00,        // SPS
+        0, 0, 0, 2, 0x68, 0xEE,              // PPS
+        0, 0, 0, 3, 0x65, 0x88, 0x84,        // IDR slice
+    };
+    const auto units = h264::split_length_prefixed(sample);
+    CHECK(units.has_value());
+    CHECK_EQ(units->size(), std::size_t{4});
+    CHECK_EQ((*units)[1].type, h264::kNalSps);
+    CHECK_EQ((*units)[3].type, h264::kNalIdrSlice);
+    CHECK_EQ((*units)[3].payload.size(), std::size_t{3});
+    const std::vector<std::uint8_t> sets = {0, 0, 0, 1, 0x67, 0x4D, 0x00, 0, 0, 0, 1, 0x68, 0xEE};
+    CHECK(h264::parameter_set_bytes(*units) == sets);
+    // A P-frame: no parameter sets. A PPS alone is still returned.
+    const auto p = h264::split_length_prefixed(std::vector<std::uint8_t>{0, 0, 0, 2, 0x41, 0x9A});
+    CHECK(p && h264::parameter_set_bytes(*p).empty());
+    const auto pps = h264::split_length_prefixed(std::vector<std::uint8_t>{0, 0, 0, 1, 0x68});
+    CHECK(pps && h264::parameter_set_bytes(*pps) == (std::vector<std::uint8_t>{0, 0, 0, 1, 0x68}));
+    // Lengths that do not add up, a zero length, a cut-off length: refused.
+    CHECK(!h264::split_length_prefixed(std::vector<std::uint8_t>{0, 0, 0, 5, 0x41}).has_value());
+    CHECK(!h264::split_length_prefixed(std::vector<std::uint8_t>{0, 0, 0, 0}).has_value());
+    CHECK(!h264::split_length_prefixed(std::vector<std::uint8_t>{0, 0, 0, 1, 0x41, 0, 0}).has_value());
+    // An Annex B frame read as length-prefixed: 00 00 00 01 is a length of 1, and the rest does not fit.
+    CHECK(!h264::split_length_prefixed(std::vector<std::uint8_t>{0, 0, 0, 1, 0x65, 0x88, 0x84}).has_value());
+    CHECK(h264::split_length_prefixed(std::vector<std::uint8_t>{})->empty());
+}
+
 }  // namespace
 
 int main() {
+    length_prefixed_samples();
     levels();
     splits_three_and_four_byte_start_codes();
     p_frame_and_noise();

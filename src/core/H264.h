@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -41,5 +42,13 @@ int required_level(int width, int height, int fps, int bitrate_kbps);
 // The SPS and PPS NAL units of a keyframe, each behind a 00 00 00 01 start code: the form
 // Media Foundation expects in MF_MT_MPEG_SEQUENCE_HEADER. Empty when either is missing.
 std::vector<std::uint8_t> parameter_sets(std::span<const std::uint8_t> keyframe);
+
+// Splits one sample as an MP4 file stores it: NAL units each behind a 4-byte big-endian length
+// (avcC lengthSizeMinusOne = 3). Empty optional when the lengths do not add up to the sample.
+std::optional<std::vector<NalUnit>> split_length_prefixed(std::span<const std::uint8_t> sample);
+
+// Every SPS and PPS among `units`, in order, each behind 00 00 00 01 (the form of parameter_sets);
+// empty when there is none. Unlike parameter_sets, an SPS without a PPS is returned too.
+std::vector<std::uint8_t> parameter_set_bytes(std::span<const NalUnit> units);
 
 }  // namespace bt::h264
