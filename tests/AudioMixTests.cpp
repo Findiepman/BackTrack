@@ -2,7 +2,10 @@
 
 #include "Check.h"
 
+#include <algorithm>
 #include <cmath>
+#include <span>
+#include <stdexcept>
 #include <vector>
 
 using namespace bt;
@@ -122,6 +125,86 @@ void gate_ramps_without_a_click() {
     CHECK(std::abs(volume.next() - middle) < 0.01f);
 }
 
+void separate_parts_match_the_mix() {
+    // Separate tracks: the mix must be bit for bit what it is without them, and the two parts the
+    // same gains on the same frames, while the gains ramp (mute, push-to-talk, volume) and settled.
+    const std::size_t frames = 2000;
+    std::vector<float> voice(frames);
+    for (std::size_t i = 0; i < frames; ++i) {
+        voice[i] = 0.9f * std::sin(static_cast<float>(i) * 0.05f);
+    }
+    for (int scenario = 0; scenario < 4; ++scenario) {
+        const float system_from = scenario == 1 ? 0.3f : 1.0f;
+        const float system_to = scenario == 2 ? 1.7f : 1.0f;
+        const float mic_from = scenario == 3 ? 1.0f : 0.0f;
+        const float mic_to = scenario == 0 ? 0.0f : 1.4f;
+        GainRamp system_a(system_from, kRamp);
+        GainRamp mic_a(mic_from, kRamp);
+        GainRamp system_b(system_from, kRamp);
+        GainRamp mic_b(mic_from, kRamp);
+        system_a.set_target(system_to);
+        mic_a.set_target(mic_to);
+        system_b.set_target(system_to);
+        mic_b.set_target(mic_to);
+        std::vector<std::int16_t> plain = pattern(frames);
+        std::vector<std::int16_t> mixed = plain;
+        const std::vector<std::int16_t> original = plain;
+        std::vector<std::int16_t> system_part(plain.size(), 1);
+        std::vector<std::int16_t> mic_part(plain.size(), 1);
+        // Two blocks each, so a ramp crosses a block boundary.
+        const std::size_t half = frames / 2;
+        for (std::size_t block = 0; block < 2; ++block) {
+            const std::size_t at = block * half * 2;
+            const std::span<const float> v(voice.data() + block * half, half);
+            const MixPeaks a = mix_block(std::span(plain).subspan(at, half * 2), v, system_a, mic_a);
+            const MixPeaks b = mix_block(std::span(mixed).subspan(at, half * 2), v, system_b, mic_b,
+                                         std::span(system_part).subspan(at, half * 2),
+                                         std::span(mic_part).subspan(at, half * 2));
+            CHECK_EQ(a.system, b.system);
+            CHECK_EQ(a.mic, b.mic);
+        }
+        CHECK(mixed == plain);
+        bool system_ok = true;
+        bool mic_ok = true;
+        bool mic_stereo = true;
+        GainRamp system_c(system_from, kRamp);
+        GainRamp mic_c(mic_from, kRamp);
+        system_c.set_target(system_to);
+        mic_c.set_target(mic_to);
+        for (std::size_t i = 0; i < frames; ++i) {
+            const float gs = system_c.next();
+            const float gm = mic_c.next();
+            const auto expect = [](float v) {
+                return static_cast<std::int16_t>(std::lrintf(std::clamp(v, -32768.0f, 32767.0f)));
+            };
+            system_ok = system_ok && system_part[2 * i] == expect(static_cast<float>(original[2 * i]) * gs) &&
+                        system_part[2 * i + 1] == expect(static_cast<float>(original[2 * i + 1]) * gs);
+            mic_ok = mic_ok && mic_part[2 * i] == expect(voice[i] * gm * 32768.0f);
+            mic_stereo = mic_stereo && mic_part[2 * i] == mic_part[2 * i + 1];
+        }
+        CHECK(system_ok);
+        CHECK(mic_ok);
+        CHECK(mic_stereo);
+        if (scenario == 0) {
+            // Unity and a closed microphone: the system part is the input itself, the mic part silence.
+            CHECK(system_part == original);
+            CHECK(std::all_of(mic_part.begin(), mic_part.end(), [](std::int16_t s) { return s == 0; }));
+        }
+    }
+    // A part of the wrong size is refused rather than written past its end.
+    std::vector<std::int16_t> samples(20);
+    std::vector<std::int16_t> small(10);
+    GainRamp system(1.0f, kRamp);
+    GainRamp mic(1.0f, kRamp);
+    bool threw = false;
+    try {
+        mix_block(samples, {}, system, mic, small, {});
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
 void peak_meter_decays() {
     PeakMeter meter(4800.0f);
     CHECK_EQ(meter.level(), 0.0f);
@@ -146,6 +229,7 @@ int main() {
     system_gain_scales();
     mic_goes_to_both_channels_and_saturates();
     gate_ramps_without_a_click();
+    separate_parts_match_the_mix();
     peak_meter_decays();
     return bt_test::finish("AudioMixTests");
 }

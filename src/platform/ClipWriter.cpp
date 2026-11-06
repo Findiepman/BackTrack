@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <optional>
+#include <span>
 
 namespace bt {
 namespace {
@@ -34,17 +36,8 @@ bool copy_range(std::ifstream& in, std::ofstream& out, std::uint64_t from, std::
     return static_cast<bool>(in) && static_cast<bool>(out);
 }
 
-// "Fast start": writes a copy of `in` with the moov box (the index) in front of the media data,
-// so Discord previews and phones can start playing without fetching the end of the file first.
-// False when the layout is not [header boxes, mdat, moov] or the offsets cannot be moved; the
-// caller then keeps the file as written, which plays everywhere, only less quickly when streamed.
-bool move_index_to_front(const std::filesystem::path& in_path, const std::filesystem::path& out_path) {
-    std::error_code ec;
-    const std::uint64_t file_size = std::filesystem::file_size(in_path, ec);
-    if (ec) {
-        return false;
-    }
-    std::ifstream in(in_path, std::ios::binary);
+// The top-level boxes of an MP4 file; empty when they do not add up to the file.
+std::vector<mp4::BoxHeader> top_level_boxes(std::ifstream& in, std::uint64_t file_size) {
     std::vector<mp4::BoxHeader> boxes;
     for (std::uint64_t at = 0; at < file_size;) {
         std::uint8_t header[kLargestBoxHeader] = {};
@@ -53,26 +46,63 @@ bool move_index_to_front(const std::filesystem::path& in_path, const std::filesy
         in.read(reinterpret_cast<char*>(header), static_cast<std::streamsize>(available));
         auto box = mp4::read_box_header(std::span<const std::uint8_t>(header, available), 0, file_size - at);
         if (!in || !box || box->size > file_size - at) {
-            return false;
+            return {};
         }
         box->offset = at;
         boxes.push_back(*box);
         at += box->size;
     }
-    if (boxes.size() < 2 || boxes.back().type != "moov" || boxes[boxes.size() - 2].type != "mdat" ||
-        boxes.back().size > kMaxMoovBytes) {
+    return boxes;
+}
+
+std::optional<std::vector<std::uint8_t>> read_box(std::ifstream& in, const mp4::BoxHeader& box) {
+    if (box.size > kMaxMoovBytes) {
+        return std::nullopt;
+    }
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(box.size));
+    in.seekg(static_cast<std::streamoff>(box.offset));
+    in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    if (!in) {
+        return std::nullopt;
+    }
+    return bytes;
+}
+
+// "Fast start": writes a copy of `in` with the moov box (the index) in front of the media data,
+// so Discord previews and phones can start playing without fetching the end of the file first.
+// With several sound tracks the moov is also labeled (mp4::label_audio_tracks: names, and only the
+// first plays). False when the layout is not [header boxes, mdat, moov] or the offsets cannot be
+// moved; the caller then keeps the file as written, which plays everywhere, only less quickly
+// when streamed, and labels it in place (label_in_place).
+bool move_index_to_front(const std::filesystem::path& in_path, const std::filesystem::path& out_path,
+                         std::span<const std::string> audio_names) {
+    std::error_code ec;
+    const std::uint64_t file_size = std::filesystem::file_size(in_path, ec);
+    if (ec) {
+        return false;
+    }
+    std::ifstream in(in_path, std::ios::binary);
+    const std::vector<mp4::BoxHeader> boxes = top_level_boxes(in, file_size);
+    if (boxes.size() < 2 || boxes.back().type != "moov" || boxes[boxes.size() - 2].type != "mdat") {
         return false;
     }
     const mp4::BoxHeader moov = boxes.back();
     const mp4::BoxHeader mdat = boxes[boxes.size() - 2];
-    std::vector<std::uint8_t> moov_bytes(static_cast<std::size_t>(moov.size));
-    in.seekg(static_cast<std::streamoff>(moov.offset));
-    in.read(reinterpret_cast<char*>(moov_bytes.data()), static_cast<std::streamsize>(moov_bytes.size()));
-    if (!in) {
+    const auto moov_bytes = read_box(in, moov);
+    if (!moov_bytes) {
         return false;
     }
+    const bool several_tracks = audio_names.size() > 1;
+    std::optional<std::vector<std::uint8_t>> labeled;
+    if (several_tracks) {
+        labeled = mp4::label_audio_tracks(*moov_bytes, audio_names);
+        if (!labeled) {
+            log::warn("Could not label the sound tracks; players may play all of them at once");
+        }
+    }
+    const std::vector<std::uint8_t>& index = labeled ? *labeled : *moov_bytes;
     // Inserting the moov in front of mdat moves every media byte by the moov's size.
-    const auto moved = mp4::shift_chunk_offsets(moov_bytes, moov.size);
+    const auto moved = mp4::shift_chunk_offsets(index, index.size());
     if (!moved) {
         return false;
     }
@@ -82,6 +112,42 @@ bool move_index_to_front(const std::filesystem::path& in_path, const std::filesy
     ok = ok && copy_range(in, out, mdat.offset, moov.offset);
     out.close();
     return ok && !out.fail();
+}
+
+// When the index could not be moved to the front: the sound tracks are still marked as
+// alternatives (only the first plays) in the file as written. Without names the moov keeps its
+// size, so it replaces the old one where it is; the names are what is lost.
+void label_in_place(const std::filesystem::path& path) {
+    std::error_code ec;
+    const std::uint64_t file_size = std::filesystem::file_size(path, ec);
+    std::optional<std::vector<std::uint8_t>> labeled;
+    mp4::BoxHeader moov;
+    if (!ec) {
+        std::ifstream in(path, std::ios::binary);
+        for (const mp4::BoxHeader& box : top_level_boxes(in, file_size)) {
+            if (box.type == "moov") {
+                const auto bytes = read_box(in, box);
+                labeled = bytes ? mp4::label_audio_tracks(*bytes, {}) : std::nullopt;
+                if (labeled && labeled->size() != bytes->size()) {
+                    labeled.reset();
+                }
+                moov = box;
+                break;
+            }
+        }
+    }
+    bool ok = labeled.has_value();
+    if (ok) {
+        std::fstream patch(path, std::ios::binary | std::ios::in | std::ios::out);
+        patch.seekp(static_cast<std::streamoff>(moov.offset));
+        patch.write(reinterpret_cast<const char*>(labeled->data()), static_cast<std::streamsize>(labeled->size()));
+        patch.close();
+        ok = !patch.fail();
+    }
+    if (!ok) {
+        log::warn("Could not mark the sound tracks of {}; some players may play all of them at once",
+                  to_utf8(path.filename().wstring()));
+    }
 }
 
 ComPtr<IMFMediaType> copy_type(IMFMediaType* source) {
@@ -116,7 +182,12 @@ ComPtr<IMFSample> make_sample(const Packet& packet, const ClipSample& planned) {
 
 ClipWriteResult write_clip(const ClipWriteRequest& request) {
     ClipWriteResult result;
-    const ClipPlan plan = plan_clip(request.video, request.audio);
+    std::vector<std::vector<Packet>> audio_packets;
+    audio_packets.reserve(request.audio.size());
+    for (const ClipAudioTrack& track : request.audio) {
+        audio_packets.push_back(track.packets);  // shared bytes: copies pointers only
+    }
+    const ClipPlan plan = plan_clip_tracks(request.video, audio_packets);
     if (plan.samples.empty()) {
         result.error = "the clip does not start on a keyframe";
         return result;
@@ -185,22 +256,50 @@ ClipWriteResult write_clip(const ClipWriteRequest& request) {
         BT_CHECK_HR(writer->AddStream(video_type.Get(), &video_stream));
         BT_CHECK_HR(writer->SetInputMediaType(video_stream, video_type.Get(), nullptr));
 
-        DWORD audio_stream = 0;
-        const bool with_audio = request.audio_type && plan.audio_samples > 0;
-        if (with_audio) {
-            ComPtr<IMFMediaType> audio_type = copy_type(request.audio_type.Get());
-            BT_CHECK_HR(writer->AddStream(audio_type.Get(), &audio_stream));
-            BT_CHECK_HR(writer->SetInputMediaType(audio_stream, audio_type.Get(), nullptr));
+        // The sink writes the tracks in the order they are added, so the first sound track is the
+        // first one in the file: the one Discord, phones and Backtrack's own player play.
+        constexpr DWORD kNoStream = static_cast<DWORD>(-1);
+        std::vector<DWORD> audio_streams(request.audio.size(), kNoStream);
+        std::vector<std::string> audio_names;
+        UINT32 declared_before = 0;
+        for (std::size_t t = 0; t < request.audio.size(); ++t) {
+            if (!request.audio[t].type || plan.track_samples[t] == 0) {
+                continue;
+            }
+            ComPtr<IMFMediaType> audio_type = copy_type(request.audio[t].type.Get());
+            // Windows' own MP4 reader (Media Player, Films & TV, and the clip page's media engine)
+            // ignores which track is marked as the default and plays the audio track that declares
+            // the highest bitrate, the last one on a tie (measured): with three equal tracks it
+            // played the microphone alone. So each later track declares one byte per second less
+            // than the one before (the sink writes it into the track's esds); the first, the mix,
+            // stays the one Windows plays. It also gives each track its own sample description, by
+            // which a trim tells them apart (see Trim.cpp).
+            // A trim of such a clip already declares descending values and keeps them.
+            UINT32 declared = MFGetAttributeUINT32(audio_type.Get(), MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 0);
+            if (result.audio_tracks > 0 && declared_before > 1 && declared >= declared_before) {
+                declared = declared_before - 1;
+                BT_CHECK_HR(audio_type->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, declared));
+            }
+            declared_before = declared;
+            BT_CHECK_HR(writer->AddStream(audio_type.Get(), &audio_streams[t]));
+            BT_CHECK_HR(writer->SetInputMediaType(audio_streams[t], audio_type.Get(), nullptr));
+            audio_names.push_back(request.audio[t].name);
+            if (result.audio_tracks == 0) {
+                result.audio_frames = plan.track_samples[t];
+            }
+            ++result.audio_tracks;
         }
 
         BT_CHECK_HR(writer->BeginWriting());
         for (const ClipSample& planned : plan.samples) {
-            if (planned.audio && !with_audio) {
+            const DWORD stream = planned.audio ? audio_streams[planned.track] : video_stream;
+            if (stream == kNoStream) {
                 continue;
             }
-            const Packet& packet = planned.audio ? request.audio[planned.index] : request.video[planned.index];
+            const Packet& packet =
+                planned.audio ? request.audio[planned.track].packets[planned.index] : request.video[planned.index];
             const ComPtr<IMFSample> sample = make_sample(packet, planned);
-            BT_CHECK_HR(writer->WriteSample(planned.audio ? audio_stream : video_stream, sample.Get()));
+            BT_CHECK_HR(writer->WriteSample(stream, sample.Get()));
         }
         BT_CHECK_HR(writer->Finalize());
         writer.Reset();  // closes the file
@@ -210,7 +309,7 @@ ClipWriteResult write_clip(const ClipWriteRequest& request) {
         fast += L".fast.tmp";
         bool fast_start = false;
         try {
-            fast_start = move_index_to_front(temp, fast);
+            fast_start = move_index_to_front(temp, fast, audio_names);
         } catch (const std::exception& e) {
             log::debug("Moving the MP4 index failed: {}", e.what());
         }
@@ -222,10 +321,18 @@ ClipWriteResult write_clip(const ClipWriteRequest& request) {
         } else {
             DeleteFileW(fast.c_str());
             log::debug("MP4 index left at the end of {}", to_utf8(request.path.filename().wstring()));
+            if (audio_names.size() > 1) {
+                try {
+                    label_in_place(temp);
+                } catch (const std::exception& e) {
+                    log::warn("Marking the sound tracks failed: {}", e.what());
+                }
+            }
             BT_CHECK_WIN32(MoveFileExW(temp.c_str(), request.path.c_str(), MOVEFILE_WRITE_THROUGH));
         }
-        result.audio_frames = with_audio ? plan.audio_samples : 0;
     } catch (const std::exception& e) {
+        result.audio_frames = 0;
+        result.audio_tracks = 0;
         DeleteFileW(temp.c_str());
         std::filesystem::path fast = request.path;
         fast += L".fast.tmp";
@@ -241,11 +348,28 @@ ClipWriteResult write_clip(const ClipWriteRequest& request) {
     result.video_frames = plan.video_samples;
     const auto write_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
-    log::info("Saved {}: {:.3f} s, {} video frames, {} audio frames ({} dropped before the first frame), {:.1f} MB, "
+    log::info("Saved {}: {:.3f} s, {} video frames, {} audio frames ({} dropped before the first frame){}, {:.1f} MB, "
               "written in {} ms",
               to_utf8(request.path.wstring()), result.seconds, result.video_frames, result.audio_frames,
-              plan.audio_dropped, static_cast<double>(result.bytes) / kBytesPerMegabyte, write_ms);
+              plan.audio_dropped, result.audio_tracks > 1 ? std::format(", {} sound tracks", result.audio_tracks) : "",
+              static_cast<double>(result.bytes) / kBytesPerMegabyte, write_ms);
     return result;
+}
+
+std::vector<mp4::AudioTrackInfo> read_audio_tracks(const std::filesystem::path& path) {
+    std::error_code ec;
+    const std::uint64_t file_size = std::filesystem::file_size(path, ec);
+    if (ec) {
+        return {};
+    }
+    std::ifstream in(path, std::ios::binary);
+    for (const mp4::BoxHeader& box : top_level_boxes(in, file_size)) {
+        if (box.type == "moov") {
+            const auto moov = read_box(in, box);
+            return moov ? mp4::audio_tracks(*moov) : std::vector<mp4::AudioTrackInfo>{};
+        }
+    }
+    return {};
 }
 
 }  // namespace bt

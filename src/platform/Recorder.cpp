@@ -156,9 +156,7 @@ Recorder::Recorder(const Settings& settings, const std::filesystem::path& app_di
       on_saved_(std::move(on_saved)),
       output_dir_(prepare_output_dir(settings.output_dir, app_dir, output_dir_fallback_)),
       encoder_preference_(settings.encoder),
-      video_buffer_(seconds_to_100ns(settings.clip_seconds), byte_cap(settings.clip_seconds, settings.video_bitrate_kbps)),
-      audio_buffer_(seconds_to_100ns(settings.clip_seconds + kAudioExtraSeconds),
-                    byte_cap(settings.clip_seconds + kAudioExtraSeconds, settings.audio_bitrate_kbps)) {
+      video_buffer_(seconds_to_100ns(settings.clip_seconds), byte_cap(settings.clip_seconds, settings.video_bitrate_kbps)) {
     log::info("Clips are saved to {}", to_utf8(output_dir_.wstring()));
     remove_stale_temp_files(output_dir_, L"");
     // The Videos folder is where a clip goes when the clips folder was gone. Other programs use it
@@ -183,6 +181,8 @@ Recorder::Recorder(const Settings& settings, const std::filesystem::path& app_di
         mix.mic_volume = settings_.mic_volume;
         mix.noise_suppression = settings_.noise_suppression;
         mix.push_to_talk = settings_.push_to_talk;
+        mix.system_device = to_wide(settings_.system_device);
+        mix.separate_tracks = settings_.separate_tracks;
         const HotkeyParseResult key = parse_hotkey(settings_.push_to_talk_key, HotkeyUse::Held);
         if (key.hotkey) {
             mix.push_to_talk_key = *key.hotkey;
@@ -191,12 +191,22 @@ Recorder::Recorder(const Settings& settings, const std::filesystem::path& app_di
             log::warn("The push-to-talk key '{}' cannot be used ({}); the microphone stays off until it is fixed",
                       settings_.push_to_talk_key, key.error);
         }
-        audio_ = std::make_unique<AudioCapture>(settings_.audio_bitrate_kbps, max_gap_fill, mix,
-                                                [this](Packet&& packet) { on_audio_packet(std::move(packet)); });
-        audio_type_ = audio_->output_type();
+        audio_ = std::make_unique<AudioCapture>(
+            settings_.audio_bitrate_kbps, max_gap_fill, mix,
+            [this](std::size_t track, Packet&& packet) { on_audio_packet(track, std::move(packet)); });
+        // Every track holds the same seconds: separate tracks take about three times the memory
+        // of the one mixed track (still a few MB against the video's tens).
+        for (std::size_t track = 0; track < audio_->track_count(); ++track) {
+            audio_buffers_.push_back(std::make_unique<ClipBuffer>(
+                seconds_to_100ns(settings.clip_seconds + kAudioExtraSeconds),
+                byte_cap(settings.clip_seconds + kAudioExtraSeconds, settings.audio_bitrate_kbps)));
+            audio_types_.push_back(audio_->output_type(track));
+        }
     } catch (const std::exception& e) {
         log::error("Sound recording is not available ({}); clips are saved without sound", e.what());
         audio_.reset();
+        audio_buffers_.clear();
+        audio_types_.clear();
     }
 }
 
@@ -345,10 +355,14 @@ bool Recorder::save_clip(std::string& reason) {
         std::lock_guard lock(stream_mutex_);
         job.video = video_buffer_.extract(now - seconds_to_100ns(settings_.clip_seconds), now);
         job.video_type = video_type_;
-        if (!job.video.empty() && audio_type_) {
+        if (!job.video.empty()) {
             // §6: audio from the first video frame on; the writer drops the packet that starts before it.
-            job.audio = audio_buffer_.extract(job.video.front().pts, now);
-            job.audio_type = audio_type_;
+            // Names only with separate tracks: a lone track keeps Windows' own, as before.
+            for (std::size_t track = 0; track < audio_buffers_.size(); ++track) {
+                job.audio.push_back(ClipAudioTrack{audio_types_[track],
+                                                   audio_buffers_[track]->extract(job.video.front().pts, now),
+                                                   audio_buffers_.size() > 1 ? AudioCapture::track_name(track) : ""});
+            }
         }
     } catch (const std::exception& e) {
         reason = std::string("Cannot save: ") + e.what();
@@ -375,8 +389,10 @@ bool Recorder::save_clip(std::string& reason) {
 BufferStatus Recorder::buffer_status() {
     BufferStatus status;
     const ClipBufferStats video = video_buffer_.stats();
-    const ClipBufferStats audio = audio_buffer_.stats();
-    status.bytes = video.bytes + audio.bytes;
+    status.bytes = video.bytes;
+    for (const auto& buffer : audio_buffers_) {
+        status.bytes += buffer->stats().bytes;
+    }
     if (video.packets > 0 && video.newest_pts > video.oldest_pts) {
         status.seconds = static_cast<double>(video.newest_pts - video.oldest_pts) / 1e7;
     }
@@ -434,6 +450,8 @@ AudioLevels Recorder::audio_levels() const {
         levels.mic_name = audio_->mic_name();
         levels.mic_gate_open = audio_->mic_gate_open();
         levels.mic_fallback = audio_->mic_fallback();
+        levels.system_name = audio_->system_name();
+        levels.system_fallback = audio_->system_fallback();
         levels.ptt_blocked = audio_->push_to_talk_blocked();
     }
     return levels;
@@ -739,9 +757,11 @@ void Recorder::on_video_packet(std::uint64_t generation, Packet&& packet, IMFMed
     video_buffer_.push(std::move(packet));
 }
 
-void Recorder::on_audio_packet(Packet&& packet) {
+void Recorder::on_audio_packet(std::size_t track, Packet&& packet) {
     std::lock_guard lock(stream_mutex_);
-    audio_buffer_.push(std::move(packet));
+    if (track < audio_buffers_.size()) {
+        audio_buffers_[track]->push(std::move(packet));
+    }
 }
 
 void Recorder::log_counters() {
@@ -780,11 +800,21 @@ void Recorder::log_counters() {
         }
     }
     ClipBufferStats v;
-    ClipBufferStats a;
+    ClipBufferStats a;  // the sound tracks together; the seconds are the first one's
     {
         std::lock_guard lock(stream_mutex_);
         v = video_buffer_.stats();
-        a = audio_buffer_.stats();
+        for (std::size_t track = 0; track < audio_buffers_.size(); ++track) {
+            const ClipBufferStats t = audio_buffers_[track]->stats();
+            if (track == 0) {
+                a = t;
+            } else {
+                a.bytes += t.bytes;
+                a.dropped_out_of_order += t.dropped_out_of_order;
+                a.dropped_waiting_for_keyframe += t.dropped_waiting_for_keyframe;
+                a.dropped_by_byte_cap += t.dropped_by_byte_cap;
+            }
+        }
     }
     log::debug("Buffers: video {:.1f} s {:.1f} MB, sound {:.1f} s {:.1f} MB; dropped {} out of order, {} waiting for "
                "a keyframe, {} by the byte cap",
@@ -816,8 +846,8 @@ void Recorder::writer_main() {
             }
             SaveResult result;
             try {
-                ClipWriteRequest request{next_clip_path(job.requested), job.video_type, job.audio_type,
-                                         std::move(job.video), std::move(job.audio)};
+                ClipWriteRequest request{next_clip_path(job.requested), job.video_type, std::move(job.video),
+                                         std::move(job.audio)};
                 result.path = request.path;
                 const ClipWriteResult written = write_clip(request);
                 result.ok = written.ok;

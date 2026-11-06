@@ -92,6 +92,64 @@ void audio_exactly_at_the_keyframe_is_kept() {
     CHECK_EQ(plan.audio_samples, std::size_t{1});
 }
 
+void several_audio_tracks() {
+    // Separate tracks: the mix, the system sound and the microphone carry the same stamps; each is
+    // trimmed like the single track, and every track's samples land at the same times.
+    const Time100ns base = 2'000'000;
+    std::vector<Packet> v;
+    for (int i = 0; i < 6; ++i) v.push_back(video(base + i * kFrame, i == 0));
+    std::vector<Packet> one;
+    for (int i = -2; i < 8; ++i) one.push_back(audio(base + i * kAac));
+    const std::vector<std::vector<Packet>> tracks = {one, one, one};
+
+    const ClipPlan single = plan_clip(v, one);
+    const ClipPlan plan = plan_clip_tracks(v, tracks);
+    CHECK_EQ(plan.video_samples, std::size_t{6});
+    CHECK_EQ(plan.audio_samples, std::size_t{24});
+    CHECK_EQ(plan.audio_dropped, std::size_t{6});
+    CHECK_EQ(plan.track_samples.size(), std::size_t{3});
+    CHECK_EQ(plan.track_samples[2], std::size_t{8});
+    CHECK_EQ(plan.duration, single.duration);
+    CHECK_EQ(plan.video_duration, single.video_duration);
+    // Order: video first on a tie, then track 0, 1, 2 of the same moment; never backwards.
+    CHECK(!plan.samples[0].audio);
+    CHECK(plan.samples[1].audio && plan.samples[1].track == 0 && plan.samples[1].time == 0);
+    CHECK(plan.samples[2].audio && plan.samples[2].track == 1 && plan.samples[2].time == 0);
+    CHECK(plan.samples[3].audio && plan.samples[3].track == 2 && plan.samples[3].index == 2);
+    bool ordered = true;
+    for (std::size_t i = 1; i < plan.samples.size(); ++i) {
+        ordered = ordered && plan.samples[i].time >= plan.samples[i - 1].time;
+    }
+    CHECK(ordered);
+    // Each track gets exactly the samples (time, duration, index) the single track gets.
+    for (std::size_t t = 0; t < 3; ++t) {
+        std::vector<ClipSample> mine;
+        for (const ClipSample& s : plan.samples) {
+            if (s.audio && s.track == t) mine.push_back(s);
+        }
+        std::vector<ClipSample> expected;
+        for (const ClipSample& s : single.samples) {
+            if (s.audio) expected.push_back(s);
+        }
+        bool same = mine.size() == expected.size();
+        for (std::size_t i = 0; same && i < mine.size(); ++i) {
+            same = mine[i].time == expected[i].time && mine[i].duration == expected[i].duration &&
+                   mine[i].index == expected[i].index;
+        }
+        CHECK(same);
+    }
+    // A single track through plan_clip_tracks is plan_clip; an empty track list is video only.
+    CHECK_EQ(plan_clip_tracks(v, std::span(&one, 1)).samples.size(), single.samples.size());
+    const ClipPlan video_only = plan_clip_tracks(v, {});
+    CHECK_EQ(video_only.samples.size(), std::size_t{6});
+    CHECK(video_only.track_samples.empty());
+    // One empty track among others is simply empty.
+    const std::vector<std::vector<Packet>> uneven = {one, {}, one};
+    const ClipPlan gap = plan_clip_tracks(v, uneven);
+    CHECK_EQ(gap.track_samples[1], std::size_t{0});
+    CHECK_EQ(gap.audio_samples, std::size_t{16});
+}
+
 void file_names() {
     std::tm t{};
     t.tm_year = 2026 - 1900;
@@ -119,6 +177,7 @@ int main() {
     audio_exactly_at_the_keyframe_is_kept();
     dropped_frames_keep_their_time();
     durations_are_never_zero();
+    several_audio_tracks();
     file_names();
     return bt_test::finish("ClipPlanTests");
 }

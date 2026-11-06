@@ -40,10 +40,14 @@ void PeakMeter::add(float block_peak, std::size_t frames) {
 }
 
 MixPeaks mix_block(std::span<std::int16_t> stereo, std::span<const float> mic, GainRamp& system_gain,
-                   GainRamp& mic_gain) {
+                   GainRamp& mic_gain, std::span<std::int16_t> system_part, std::span<std::int16_t> mic_part) {
     const std::size_t frames = stereo.size() / 2;
     if (!mic.empty() && mic.size() != frames) {
         throw std::invalid_argument("mix_block: the mic block must have one sample per stereo frame");
+    }
+    if ((!system_part.empty() && system_part.size() != stereo.size()) ||
+        (!mic_part.empty() && mic_part.size() != stereo.size())) {
+        throw std::invalid_argument("mix_block: a separate part must be as large as the stereo block");
     }
     MixPeaks peaks;
     const bool mic_silent = mic.empty() || (mic_gain.settled() && mic_gain.current() == 0.0f);
@@ -53,6 +57,11 @@ MixPeaks mix_block(std::span<std::int16_t> stereo, std::span<const float> mic, G
             largest = std::max(largest, std::abs(static_cast<int>(s)));
         }
         peaks.system = static_cast<float>(largest) / kInt16Scale;
+        // The gains do not move while they are settled, so skipping their steps changes nothing.
+        if (!system_part.empty()) {
+            std::copy(stereo.begin(), stereo.end(), system_part.begin());
+        }
+        std::fill(mic_part.begin(), mic_part.end(), std::int16_t{0});
         return peaks;
     }
     for (std::size_t i = 0; i < frames; ++i) {
@@ -68,6 +77,14 @@ MixPeaks mix_block(std::span<std::int16_t> stereo, std::span<const float> mic, G
         }
         stereo[2 * i] = saturate(left + voice);
         stereo[2 * i + 1] = saturate(right + voice);
+        if (!system_part.empty()) {
+            system_part[2 * i] = saturate(left);
+            system_part[2 * i + 1] = saturate(right);
+        }
+        if (!mic_part.empty()) {
+            mic_part[2 * i] = saturate(voice);
+            mic_part[2 * i + 1] = mic_part[2 * i];
+        }
     }
     peaks.system = std::min(1.0f, peaks.system / kInt16Scale);
     peaks.mic = std::min(1.0f, peaks.mic / kInt16Scale);

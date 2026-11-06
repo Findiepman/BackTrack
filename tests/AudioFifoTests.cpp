@@ -420,8 +420,14 @@ void gap_fill_does_not_scatter_live_voice() {
 
 void two_threads() {
     // The real thing: a producer and a consumer thread at the same time. Every value comes out in
-    // order (no slow correction can start: the window is longer than the run).
-    AudioFifo fifo(4096, AudioFifoTuning{.target_frames = 512, .margin_frames = 256, .window_frames = 1u << 30});
+    // order (no slow correction can start: the window is longer than the run). The hard drop is
+    // switched off too: when the test machine is busy the consumer thread can be held up while the
+    // producer fills the FIFO, and the next priming then drops that backlog on purpose
+    // (backlog_is_dropped_at_once), which shows up here as a jump in the count (measured: with 16
+    // copies running at once about half the runs jumped by exactly the dropped frames, and two
+    // drops kept `seen` from ever reaching the end, so the test hung).
+    AudioFifo fifo(4096, AudioFifoTuning{.target_frames = 512, .margin_frames = 256, .window_frames = 1u << 30,
+                                         .hard_drop_frames = 1u << 30});
     constexpr std::size_t kTotal = 2'000'000;
     std::thread producer([&fifo] {
         std::size_t next = 1;
@@ -461,6 +467,7 @@ void two_threads() {
     }
     producer.join();
     CHECK(in_order);
+    CHECK_EQ(fifo.stats().dropped_frames, std::uint64_t{0});
 }
 
 }  // namespace

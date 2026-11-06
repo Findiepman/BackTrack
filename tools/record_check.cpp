@@ -5,7 +5,8 @@
 //   record_check <backtrack.ini> <log file> <save after s> <exit after s>
 //
 // The clip goes to the ini's output_dir. Prints the sound meters and the microphone's state every
-// second, then the save result.
+// second, then the save result. First it lists the playback devices (with the ids that go into
+// [audio] system_device) and the microphones.
 
 #include "core/Config.h"
 #include "platform/Com.h"
@@ -54,6 +55,10 @@ int run(int argc, wchar_t** argv) {
     const int save_after = _wtoi(argv[3]);
     const int exit_after = _wtoi(argv[4]);
 
+    for (const bt::PlaybackDevice& device : bt::list_playback_devices()) {
+        std::printf("playback: %s%s  %s\n", device.name.c_str(), device.is_default ? " (default)" : "",
+                    bt::to_utf8(device.id).c_str());
+    }
     for (const bt::MicDevice& mic : bt::list_microphones()) {
         std::printf("microphone: %s%s%s\n", mic.name.c_str(), mic.is_default ? " (default)" : "",
                     mic.bluetooth ? " (bluetooth)" : "");
@@ -73,7 +78,8 @@ int run(int argc, wchar_t** argv) {
         for (int second = 1; second <= exit_after; ++second) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             const bt::AudioLevels levels = recorder.audio_levels();
-            std::printf("%2d s: system %.2f, mic %.2f (%s, %s, gate %s%s%s) | %s\n", second, levels.system, levels.mic,
+            std::printf("%2d s: system %.2f (%s%s), mic %.2f (%s, %s, gate %s%s%s) | %s\n", second, levels.system,
+                        levels.system_name.c_str(), levels.system_fallback ? ", fallback" : "", levels.mic,
                         status_name(levels.mic_status), levels.mic_name.c_str(), levels.mic_gate_open ? "open" : "closed",
                         levels.mic_fallback ? ", fallback" : "", levels.ptt_blocked ? ", ptt blocked" : "",
                         recorder.status_text().c_str());

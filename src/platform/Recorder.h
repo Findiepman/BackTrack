@@ -14,8 +14,8 @@
 //   - Capture thread (ScreenCapture): hands frames to the encoder under encoder_mutex_ and never
 //     waits for the supervisor; frames arriving while there is no encoder are counted and dropped.
 //   - Encoder threads: packets into the video buffer under stream_mutex_.
-//   - Audio thread (AudioCapture): packets into the audio buffer under stream_mutex_. It mixes in
-//     the microphone, which MicCapture records on a thread of its own.
+//   - Audio thread (AudioCapture): packets into the audio buffers (one per sound track) under
+//     stream_mutex_. It mixes in the microphone, which MicCapture records on a thread of its own.
 //   - Writer thread: writes saved clips one after another, then calls SavedCallback (§3.8).
 //
 // Locks: pipeline_mutex_ may be held while taking encoder_mutex_ or stream_mutex_; nothing ever
@@ -59,7 +59,7 @@ struct SaveResult {
 
 // The sound meters and the microphone's state for the UI. MicStatus is in platform/MicCapture.h
 // (Off, Starting, Recording, NoDevice, Blocked = Windows privacy settings, Failed), and so is
-// list_microphones() for the device list.
+// list_microphones() for the device list; list_playback_devices() is in platform/AudioCapture.h.
 struct AudioLevels {
     float system = 0;  // peaks 0..1 after the volume
     float mic = 0;  // after the volume and the gate
@@ -67,6 +67,8 @@ struct AudioLevels {
     std::string mic_name;  // the microphone being recorded; empty before one was opened
     bool mic_gate_open = false;  // not muted and (push-to-talk off or its key held)
     bool mic_fallback = false;  // the chosen microphone is not connected: the Windows default is recorded
+    std::string system_name;  // the playback device being recorded; empty before one was opened
+    bool system_fallback = false;  // the chosen playback device is not connected: the Windows default is recorded
     // Push-to-talk is on and closed while an admin (elevated) program is in front and Backtrack is
     // not elevated: Windows may hide the key from Backtrack then.
     bool ptt_blocked = false;
@@ -112,7 +114,8 @@ public:
     bool output_dir_is_fallback() const { return output_dir_fallback_; }
 
     // Sound. All live (no restart), from any thread. The initial values come from Settings;
-    // changing mic_enabled or mic_device needs a new Recorder. The mute is not saved anywhere.
+    // changing mic_enabled, mic_device, system_device or separate_tracks needs a new Recorder.
+    // The mute is not saved anywhere.
     AudioLevels audio_levels() const;
     void set_volumes(int system_percent, int mic_percent);
     void set_noise_suppression(bool on);
@@ -127,9 +130,8 @@ private:
     struct SaveJob {
         std::chrono::system_clock::time_point requested;
         ComPtr<IMFMediaType> video_type;
-        ComPtr<IMFMediaType> audio_type;
         std::vector<Packet> video;
-        std::vector<Packet> audio;
+        std::vector<ClipAudioTrack> audio;  // one per sound track, the mix first
     };
 
     // Owner thread / supervisor.
@@ -146,7 +148,7 @@ private:
 
     // Encoder and audio threads.
     void on_video_packet(std::uint64_t generation, Packet&& packet, IMFMediaType* type);
-    void on_audio_packet(Packet&& packet);
+    void on_audio_packet(std::size_t track, Packet&& packet);
 
     // Writer thread.
     void writer_main();
@@ -182,9 +184,10 @@ private:
     // Streams: encoder and audio threads, owner (save), supervisor, under stream_mutex_.
     std::mutex stream_mutex_;
     ClipBuffer video_buffer_;
-    ClipBuffer audio_buffer_;
+    // One per sound track (AudioCapture::track_count), made with audio_; empty without sound.
+    std::vector<std::unique_ptr<ClipBuffer>> audio_buffers_;
     ComPtr<IMFMediaType> video_type_;
-    ComPtr<IMFMediaType> audio_type_;
+    std::vector<ComPtr<IMFMediaType>> audio_types_;
     std::uint64_t video_generation_ = 0;  // packets from an older encoder are ignored
 
     // Supervisor.

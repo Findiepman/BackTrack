@@ -13,6 +13,7 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -67,13 +68,20 @@ ComPtr<IMFMediaType> copy_keys(IMFMediaType* native, std::span<const GUID> keys)
     return type;
 }
 
+struct SourceAudio {
+    DWORD stream = 0;
+    ComPtr<IMFMediaType> type;
+    Time100ns frame_duration = kFallbackAacFrame;  // for a packet without its own duration
+    std::vector<std::uint8_t> sample_description;  // the track's stsd box (MF_MT_MPEG4_SAMPLE_DESCRIPTION)
+    std::string name;  // from the file's hdlr; empty when the order could not be matched
+};
+
 struct SourceStreams {
     std::optional<DWORD> video;
-    std::optional<DWORD> audio;
     ComPtr<IMFMediaType> video_type;
-    ComPtr<IMFMediaType> audio_type;
     Time100ns frame_duration = kFallbackFrame;  // for a frame without its own duration
-    Time100ns audio_frame_duration = kFallbackAacFrame;  // for a packet without its own duration
+    // Every sound track in file order (separate tracks: the mix, the system sound, the microphone).
+    std::vector<SourceAudio> audio;
 };
 
 SourceStreams find_streams(IMFSourceReader* reader) {
@@ -100,22 +108,73 @@ SourceStreams find_streams(IMFSourceReader* reader) {
             if (SUCCEEDED(MFGetAttributeRatio(native.Get(), MF_MT_FRAME_RATE, &num, &den)) && num > 0 && den > 0) {
                 s.frame_duration = std::max<Time100ns>(1, kTicksPerSecond * den / num);
             }
-        } else if (major == MFMediaType_Audio && !s.audio) {
+        } else if (major == MFMediaType_Audio) {
             if (subtype != MFAudioFormat_AAC) {
                 throw TrimError("only clips with AAC sound can be trimmed");
             }
-            s.audio = index;
-            s.audio_type = copy_keys(native.Get(), kAudioKeys);
+            SourceAudio audio;
+            audio.stream = index;
+            audio.type = copy_keys(native.Get(), kAudioKeys);
+            UINT32 size = 0;
+            if (SUCCEEDED(native->GetBlobSize(MF_MT_MPEG4_SAMPLE_DESCRIPTION, &size)) && size > 0) {
+                audio.sample_description.resize(size);
+                BT_CHECK_HR(native->GetBlob(MF_MT_MPEG4_SAMPLE_DESCRIPTION, audio.sample_description.data(), size, nullptr));
+            }
             const UINT32 rate = MFGetAttributeUINT32(native.Get(), MF_MT_AUDIO_SAMPLES_PER_SECOND, 0);
             if (rate > 0) {
-                s.audio_frame_duration = std::max<Time100ns>(1, kAacSamplesPerFrame * kTicksPerSecond / rate);
+                audio.frame_duration = std::max<Time100ns>(1, kAacSamplesPerFrame * kTicksPerSecond / rate);
             }
+            s.audio.push_back(std::move(audio));
         }
     }
     if (!s.video) {
         throw TrimError("the file has no video");
     }
     return s;
+}
+
+// Puts the sound tracks in the file's order and gives them the file's names. Media Foundation's
+// source reader numbers them its own way (measured: the last track in the file comes first), and a
+// trim that kept that order would put the microphone where the mix belongs. Each track in the file
+// is matched to the one stream with exactly its sample description (Backtrack's own tracks always
+// differ there, see ClipWriter). When that does not work out for every track, the reader's order
+// is turned around, which was the file's order on every file tried, and the names stay empty.
+void put_audio_in_file_order(std::vector<SourceAudio>& audio, const std::vector<mp4::AudioTrackInfo>& file) {
+    if (audio.size() < 2) {
+        if (audio.size() == 1 && file.size() == 1) {
+            audio.front().name = file.front().name;
+        }
+        return;
+    }
+    std::vector<SourceAudio> ordered;
+    if (file.size() == audio.size()) {
+        std::vector<bool> used(audio.size(), false);
+        for (const mp4::AudioTrackInfo& track : file) {
+            std::size_t match = audio.size();
+            std::size_t matches = 0;
+            for (std::size_t i = 0; i < audio.size(); ++i) {
+                if (!track.sample_description.empty() && audio[i].sample_description == track.sample_description) {
+                    match = i;
+                    ++matches;
+                }
+            }
+            if (matches != 1 || used[match]) {
+                break;
+            }
+            used[match] = true;
+            ordered.push_back(audio[match]);
+            ordered.back().name = track.name;
+        }
+    }
+    if (ordered.size() == audio.size()) {
+        audio = std::move(ordered);
+        return;
+    }
+    log::info("Trim: the sound tracks could not be matched to the file; keeping them in the reader's order, reversed");
+    std::reverse(audio.begin(), audio.end());
+    for (SourceAudio& track : audio) {
+        track.name.clear();
+    }
 }
 
 PacketBytes sample_bytes(IMFSample* sample) {
@@ -136,24 +195,26 @@ struct SourceData {
     std::vector<TrimFrame> frames;
     std::vector<Time100ns> frame_durations;
     std::vector<PacketBytes> frame_bytes;  // null for frames that were let go
-    std::vector<Packet> audio;
+    std::vector<std::vector<Packet>> audio;  // per sound track
     bool video_reaches_out = false;  // a frame at or after `out` was seen
 };
 
 SourceData read_source(IMFSourceReader* reader, const SourceStreams& streams, Time100ns in, Time100ns out) {
     SourceData data;
+    data.audio.resize(streams.audio.size());
     BT_CHECK_HR(reader->SetStreamSelection(static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS), FALSE));
     BT_CHECK_HR(reader->SetStreamSelection(*streams.video, TRUE));
-    if (streams.audio) {
-        BT_CHECK_HR(reader->SetStreamSelection(*streams.audio, TRUE));
+    for (const SourceAudio& audio : streams.audio) {
+        BT_CHECK_HR(reader->SetStreamSelection(audio.stream, TRUE));
     }
     bool video_done = false;
-    bool audio_done = !streams.audio;
+    std::vector<bool> audio_done(streams.audio.size(), false);
+    const auto all_audio_done = [&] { return std::find(audio_done.begin(), audio_done.end(), false) == audio_done.end(); };
     std::size_t released = 0;  // frame_bytes before this index are already let go
     std::optional<Time100ns> restart;  // pts of the last restart keyframe
     int empty_reads = 0;
 
-    while (!video_done || !audio_done) {
+    while (!video_done || !all_audio_done()) {
         DWORD index = 0;
         DWORD flags = 0;
         LONGLONG timestamp = 0;
@@ -167,10 +228,16 @@ SourceData read_source(IMFSourceReader* reader, const SourceStreams& streams, Ti
             throw TrimError("the video changes format partway through");
         }
         const bool is_video = index == *streams.video;
-        const bool is_audio = streams.audio && index == *streams.audio;
+        std::size_t track = 0;
+        while (track < streams.audio.size() && streams.audio[track].stream != index) {
+            ++track;
+        }
+        const bool is_audio = track < streams.audio.size();
         if ((flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0) {
             video_done = video_done || is_video;
-            audio_done = audio_done || is_audio;
+            if (is_audio) {
+                audio_done[track] = true;
+            }
             continue;
         }
         if (!sample || (!is_video && !is_audio)) {
@@ -207,7 +274,9 @@ SourceData read_source(IMFSourceReader* reader, const SourceStreams& streams, Ti
                 for (; released < data.frame_bytes.size(); ++released) {
                     data.frame_bytes[released].reset();
                 }
-                std::erase_if(data.audio, [&](const Packet& p) { return p.pts < frame.pts; });
+                for (std::vector<Packet>& audio : data.audio) {
+                    std::erase_if(audio, [&](const Packet& p) { return p.pts < frame.pts; });
+                }
                 restart = frame.pts;
             }
             data.frames.push_back(frame);
@@ -215,15 +284,15 @@ SourceData read_source(IMFSourceReader* reader, const SourceStreams& streams, Ti
             data.frame_bytes.push_back(sample_bytes(sample.Get()));
         } else {
             if (pts >= out) {
-                audio_done = true;
-                BT_CHECK_HR(reader->SetStreamSelection(*streams.audio, FALSE));
+                audio_done[track] = true;
+                BT_CHECK_HR(reader->SetStreamSelection(streams.audio[track].stream, FALSE));
                 continue;
             }
             if (restart && pts < *restart) {
                 continue;
             }
-            const Time100ns span = duration > 0 ? duration : streams.audio_frame_duration;
-            data.audio.push_back(Packet{pts, span, true, sample_bytes(sample.Get())});
+            const Time100ns span = duration > 0 ? duration : streams.audio[track].frame_duration;
+            data.audio[track].push_back(Packet{pts, span, true, sample_bytes(sample.Get())});
         }
     }
     return data;
@@ -287,7 +356,8 @@ TrimResult trim_clip_unguarded(const TrimRequest& request) {
             result.error = "the clip could not be opened";
             return result;
         }
-        const SourceStreams streams = find_streams(reader.Get());
+        SourceStreams streams = find_streams(reader.Get());
+        put_audio_in_file_order(streams.audio, read_audio_tracks(request.source));
         SourceData data = read_source(reader.Get(), streams, in, out);
         reader.Reset();  // the source file is closed before the new one is written
 
@@ -312,18 +382,23 @@ TrimResult trim_clip_unguarded(const TrimRequest& request) {
             throw TrimError("the video frames are in a form Backtrack cannot copy");
         }
 
-        std::vector<Time100ns> audio_pts;
-        audio_pts.reserve(data.audio.size());
-        for (const Packet& p : data.audio) {
-            audio_pts.push_back(p.pts);
-        }
-        const TrimRange audio = trim_audio(audio_pts, plan.start, out);
-        for (std::size_t i = audio.first; i < audio.end; ++i) {
-            write.audio.push_back(std::move(data.audio[i]));
+        // Every sound track is cut the same way, so a clip with separate tracks keeps all of them,
+        // in their order and with their names.
+        for (std::size_t t = 0; t < streams.audio.size(); ++t) {
+            std::vector<Time100ns> audio_pts;
+            audio_pts.reserve(data.audio[t].size());
+            for (const Packet& p : data.audio[t]) {
+                audio_pts.push_back(p.pts);
+            }
+            const TrimRange range = trim_audio(audio_pts, plan.start, out);
+            ClipAudioTrack track{streams.audio[t].type, {}, streams.audio[t].name};
+            for (std::size_t i = range.first; i < range.end; ++i) {
+                track.packets.push_back(std::move(data.audio[t][i]));
+            }
+            write.audio.push_back(std::move(track));
         }
         write.path = request.destination;
         write.video_type = streams.video_type;
-        write.audio_type = write.audio.empty() ? nullptr : streams.audio_type;
     } catch (const TrimError& e) {
         log::info("Trim of {} refused: {}", name, e.what());
         result.error = e.what();
@@ -350,9 +425,10 @@ TrimResult trim_clip_unguarded(const TrimRequest& request) {
     result.bytes = written.bytes;
     const auto ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
-    log::info("Trimmed {} from {:.3f} s (asked {:.3f} s) to {:.3f} s: {:.3f} s, {} video and {} audio frames, {} ms",
+    log::info("Trimmed {} from {:.3f} s (asked {:.3f} s) to {:.3f} s: {:.3f} s, {} video and {} audio frames ({} sound "
+              "tracks), {} ms",
               name, result.start_s, request.in_s, request.out_s, result.seconds, written.video_frames,
-              written.audio_frames, ms);
+              written.audio_frames, written.audio_tracks, ms);
     return result;
 }
 
