@@ -75,7 +75,9 @@ void App::close_export() {
     if (!export_) return;
     if (export_->stage == ExportView::Stage::Running) {
         export_->cancel->store(true);  // finishes on the worker
-        show_notice(L"The export was cancelled.");  // also when something else closed the clip page
+        // Also when something else closed the clip page. A file finished a moment ago is kept.
+        show_notice(export_->finished->load() ? L"The export was saved in the Exports folder."
+                                              : L"The export was cancelled.");
     }
     export_.reset();
     invalidate();
@@ -115,10 +117,12 @@ void App::run_export(const std::string& what, const Rect& anchor) {
         std::error_code ec;
         const fs::path folder = recorder_->output_dir() / L"Exports";
         fs::create_directories(folder, ec);
-        const fs::path destination = free_export_path(folder, clip_path(view->file).stem().wstring(), o.format);
+        const fs::path destination =
+            ec ? fs::path() : free_export_path(folder, clip_path(view->file).stem().wstring(), o.format);
         if (destination.empty()) {
             view->stage = ExportView::Stage::Failed;
-            view->message = "There is no free file name left in the Exports folder. Remove some exports first.";
+            view->message = "Backtrack cannot write to the Exports folder in your clips folder (is the drive there, "
+                            "and is it full of exports?).";
             invalidate();
             return;
         }
@@ -128,9 +132,11 @@ void App::run_export(const std::string& what, const Rect& anchor) {
         const ExportOptions options = o;
         const std::shared_ptr<std::atomic<double>> progress = view->progress;
         const std::shared_ptr<std::atomic<bool>> cancel = view->cancel;
+        const std::shared_ptr<std::atomic<bool>> finished = view->finished;
         HWND window = window_;
         log::info("Exporting {} as {}", view->file, to_utf8(destination.filename().wstring()));
-        run_in_background([this, view, source, destination, options, progress, cancel, window]() -> std::function<void()> {
+        run_in_background([this, view, source, destination, options, progress, cancel, finished,
+                           window]() -> std::function<void()> {
             auto last = std::chrono::steady_clock::now();
             const ExportResult result = export_clip(
                 source, destination, options,
@@ -144,6 +150,7 @@ void App::run_export(const std::string& what, const Rect& anchor) {
                     }
                 },
                 *cancel);
+            if (result.ok) finished->store(true);
             return [this, view, result] {
                 if (result.ok) {
                     log::info("Exported {} ({} bytes)", to_utf8(result.path.filename().wstring()), result.bytes);

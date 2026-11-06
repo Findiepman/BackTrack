@@ -205,6 +205,8 @@ private:
         Stage stage = Stage::Form;
         std::shared_ptr<std::atomic<double>> progress = std::make_shared<std::atomic<double>>(0.0);
         std::shared_ptr<std::atomic<bool>> cancel = std::make_shared<std::atomic<bool>>(false);
+        // Set on the worker the moment the file is complete, before the UI hears about it.
+        std::shared_ptr<std::atomic<bool>> finished = std::make_shared<std::atomic<bool>>(false);
         std::string message;  // Failed: why
         std::filesystem::path result_path;
         std::uint64_t result_bytes = 0;

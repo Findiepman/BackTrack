@@ -1,5 +1,5 @@
 ﻿cmake_minimum_required(VERSION 3.25)
-project(Backtrack VERSION 0.3.0 LANGUAGES CXX)
+project(Backtrack VERSION 0.4.0 LANGUAGES CXX)
 
 if(NOT MSVC)
     message(FATAL_ERROR "Backtrack is built with MSVC (Visual Studio 2022 Build Tools).")
