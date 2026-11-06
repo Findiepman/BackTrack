@@ -6,8 +6,9 @@
 //   - The constructor (any thread, after MFStartup) creates the D3D11 device, the DXGI device
 //     manager and the sample allocator. The device is multithread protected because the encoder
 //     uses it from Media Foundation's own threads (§3.4).
-//   - start() spawns the capture thread. It alone touches the duplication, the video processor
-//     and the BGRA frame texture, and it calls FrameCallback and EventCallback.
+//   - start() spawns the capture thread. It alone touches the duplication, the video processor,
+//     the BGRA frame texture and the mouse pointer overlay, and it calls FrameCallback and
+//     EventCallback.
 //   - stop() and the destructor join the capture thread. Samples handed out may still be held
 //     by the receiver; they return to the allocator when released, so release them before
 //     destroying ScreenCapture.
@@ -17,6 +18,7 @@
 
 #include "core/Clock.h"
 #include "platform/Com.h"
+#include "platform/CursorOverlay.h"
 #include "platform/Log.h"
 
 #include <d3d11_1.h>
@@ -27,6 +29,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
@@ -64,6 +67,13 @@ struct CaptureStats {
     std::uint64_t delivered = 0;  // frames handed to FrameCallback
 };
 
+struct CaptureOptions {
+    int monitor = 0;  // index into list_monitors(); one that does not exist falls back to 0
+    int fps = 60;
+    int resolution = 0;  // Settings::resolution: 0 = the display's own size, else scaled_output_size()
+    bool cursor = true;  // draw the mouse pointer into the frames
+};
+
 enum class CaptureEvent {
     FormatChanged,  // the first frame: from now on frame_size() is known. The size never changes
                     // afterwards; a later resolution change is scaled into it.
@@ -79,7 +89,7 @@ public:
     using FrameCallback = std::function<void(IMFSample* nv12_sample, Time100ns pts)>;
     using EventCallback = std::function<void(CaptureEvent event, VideoSize size)>;
 
-    ScreenCapture(int monitor_index, int fps, FrameCallback on_frame, EventCallback on_event);
+    ScreenCapture(const CaptureOptions& options, FrameCallback on_frame, EventCallback on_event);
     ~ScreenCapture();
     ScreenCapture(const ScreenCapture&) = delete;
     ScreenCapture& operator=(const ScreenCapture&) = delete;
@@ -94,6 +104,7 @@ public:
     IMFDXGIDeviceManager* device_manager() const { return device_manager_.Get(); }
     const MonitorInfo& monitor() const { return monitor_; }
     int fps() const { return fps_; }
+    // The size of the NV12 frames: the display's size, or smaller for the resolution setting.
     VideoSize frame_size() const;
     CaptureStats stats() const;
 
@@ -139,12 +150,14 @@ private:
     void lose_duplication(HRESULT hr);
     void rebuild_pipeline(const SourceFormat& format);
     void deliver(Time100ns pts, Time100ns duration);
+    bool draw_cursor();
     HRESULT output_view_for(ID3D11Texture2D* texture, UINT subresource, ID3D11VideoProcessorOutputView** view);
     void notify(CaptureEvent event);
     void log_counters();
     void check_monitor_assignment();
 
     const int fps_;
+    const int resolution_;
     FrameCallback on_frame_;
     EventCallback on_event_;
     MonitorInfo monitor_;
@@ -182,11 +195,17 @@ private:
     ComPtr<ID3D11VideoProcessor> processor_;
     ComPtr<ID3D11VideoProcessorInputView> input_view_;
     std::vector<OutputView> output_views_;
+    // Null when the pointer is not drawn (setting off, or the overlay could not be set up).
+    std::unique_ptr<CursorOverlay> cursor_;
+    ComPtr<ID3D11VideoProcessorInputView> cursor_input_view_;  // reads the overlay's composite
+    bool frame_changed_ = false;  // bgra_frame_ got a desktop image the overlay has not drawn on yet
+    log::RateLimit cursor_error_log_{std::chrono::seconds(10)};
     log::RateLimit convert_error_log_{std::chrono::seconds(10)};
     ComPtr<ID3D11Texture2D> nv12_staging_;
 
     mutable std::mutex size_mutex_;
     VideoSize output_size_;
+    VideoSize sized_for_;  // the desktop size output_size_ was chosen for
 
     Counters counters_;
     std::atomic<bool> simulate_lost_{false};

@@ -162,6 +162,9 @@ and the tray menu still work.
 | `fps` | `60` | 30, 60, 120 or 144. Other numbers are rounded to the nearest. |
 | `bitrate_kbps` | `20000` | Video quality in kbit/s, 1000 to 100000. 20000 suits 1080p60. |
 | `encoder` | `auto` | `auto` uses the graphics card and falls back to software; `hardware` is the same but logs an error when it has to fall back; `software` always uses Windows' software encoder (high CPU use). |
+| `resolution` | `native` | `native` records at the display's own size; `720`, `1080` or `1440` scales it down to that many lines (the short side, so a portrait monitor gets that width), keeping its shape. Never scaled up: a 1080p display with `1440` records 1080p. |
+| `quality` | `balanced` | How hard the encoder works for the same bitrate: `performance`, `balanced` (the encoder's own default) or `quality`. On an AMD RX 6750 XT `quality` about doubles the graphics card's encoder load; Windows' software encoder uses about three times the CPU. |
+| `cursor` | `true` | Draw the mouse pointer into the video, the way it looks on screen. When a game hides the pointer, it is not in the video either. |
 
 ### `[audio]`
 

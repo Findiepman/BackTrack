@@ -2,10 +2,11 @@
 // exits. Not shipped. It has no single-instance lock, so sound changes can be checked on a PC
 // where Backtrack itself is running (the two record side by side).
 //
-//   record_check <backtrack.ini> <log file> <save after s> <exit after s>
+//   record_check <backtrack.ini> <log file> <save after s> <exit after s> [lose capture at s]
 //
 // The clip goes to the ini's output_dir. Prints the sound meters and the microphone's state every
-// second, then the save result.
+// second, then the save result. The optional last argument makes the capture behave once as if
+// Windows took the screen away (a UAC prompt), to check what recovers afterwards.
 
 #include "core/Config.h"
 #include "platform/Com.h"
@@ -37,8 +38,8 @@ const char* status_name(bt::MicStatus status) {
 }
 
 int run(int argc, wchar_t** argv) {
-    if (argc != 5) {
-        std::printf("usage: record_check <backtrack.ini> <log file> <save after s> <exit after s>\n");
+    if (argc != 5 && argc != 6) {
+        std::printf("usage: record_check <backtrack.ini> <log file> <save after s> <exit after s> [lose capture at s]\n");
         return 2;
     }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);  // DuplicateOutput1 needs it
@@ -53,6 +54,7 @@ int run(int argc, wchar_t** argv) {
     }
     const int save_after = _wtoi(argv[3]);
     const int exit_after = _wtoi(argv[4]);
+    const int lose_at = argc == 6 ? _wtoi(argv[5]) : 0;
 
     for (const bt::MicDevice& mic : bt::list_microphones()) {
         std::printf("microphone: %s%s%s\n", mic.name.c_str(), mic.is_default ? " (default)" : "",
@@ -77,6 +79,9 @@ int run(int argc, wchar_t** argv) {
                         status_name(levels.mic_status), levels.mic_name.c_str(), levels.mic_gate_open ? "open" : "closed",
                         levels.mic_fallback ? ", fallback" : "", levels.ptt_blocked ? ", ptt blocked" : "",
                         recorder.status_text().c_str());
+            if (second == lose_at) {
+                recorder.simulate_capture_loss();
+            }
             if (second == save_after) {
                 std::string reason;
                 if (!recorder.save_clip(reason)) {

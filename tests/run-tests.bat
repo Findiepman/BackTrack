@@ -19,12 +19,12 @@ set "OUT=build\quick-tests"
 if not exist "%OUT%" mkdir "%OUT%"
 set "FLAGS=/nologo /std:c++20 /W4 /WX /permissive- /utf-8 /EHsc /MT /Isrc"
 
-cl %FLAGS% /c src\core\Config.cpp src\core\Hotkey.cpp src\core\ClipBuffer.cpp src\core\H264.cpp src\core\ClipPlan.cpp src\core\Mp4.cpp src\core\Json.cpp src\core\Library.cpp src\core\AudioFifo.cpp src\core\AudioMix.cpp src\core\Fft.cpp src\core\NoiseSuppressor.cpp /Fo%OUT%\ >nul || (echo Compiling core failed & exit /b 1)
+cl %FLAGS% /c src\core\Config.cpp src\core\Hotkey.cpp src\core\ClipBuffer.cpp src\core\H264.cpp src\core\ClipPlan.cpp src\core\Mp4.cpp src\core\Json.cpp src\core\Library.cpp src\core\AudioFifo.cpp src\core\AudioMix.cpp src\core\Fft.cpp src\core\NoiseSuppressor.cpp src\core\CaptureMath.cpp /Fo%OUT%\ >nul || (echo Compiling core failed & exit /b 1)
 
 set FAILED=0
-for %%t in (ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests AudioFifoTests AudioMixTests NoiseSuppressorTests) do (
+for %%t in (ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests AudioFifoTests AudioMixTests NoiseSuppressorTests CaptureMathTests) do (
     if exist %OUT%\%%t.exe del /q %OUT%\%%t.exe
-    cl %FLAGS% "/DBT_SOURCE_DIR=\"%ROOT%\"" tests\%%t.cpp %OUT%\Config.obj %OUT%\Hotkey.obj %OUT%\ClipBuffer.obj %OUT%\H264.obj %OUT%\ClipPlan.obj %OUT%\Mp4.obj %OUT%\Json.obj %OUT%\Library.obj %OUT%\AudioFifo.obj %OUT%\AudioMix.obj %OUT%\Fft.obj %OUT%\NoiseSuppressor.obj /Fo%OUT%\ /Fe%OUT%\%%t.exe >nul || (echo Compiling %%t failed & set FAILED=1)
+    cl %FLAGS% "/DBT_SOURCE_DIR=\"%ROOT%\"" tests\%%t.cpp %OUT%\Config.obj %OUT%\Hotkey.obj %OUT%\ClipBuffer.obj %OUT%\H264.obj %OUT%\ClipPlan.obj %OUT%\Mp4.obj %OUT%\Json.obj %OUT%\Library.obj %OUT%\AudioFifo.obj %OUT%\AudioMix.obj %OUT%\Fft.obj %OUT%\NoiseSuppressor.obj %OUT%\CaptureMath.obj /Fo%OUT%\ /Fe%OUT%\%%t.exe >nul || (echo Compiling %%t failed & set FAILED=1)
     if exist %OUT%\%%t.exe %OUT%\%%t.exe || set FAILED=1
 )
 if %FAILED%==1 (

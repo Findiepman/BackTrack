@@ -142,6 +142,16 @@ D3D11_VIDEO_PROCESSOR_ROTATION processor_rotation(DXGI_MODE_ROTATION rotation) {
     }
 }
 
+// The same mapping as processor_rotation, so the pointer is turned exactly like the picture.
+Rotation pointer_rotation(DXGI_MODE_ROTATION rotation) {
+    switch (rotation) {
+        case DXGI_MODE_ROTATION_ROTATE90: return Rotation::Clockwise90;
+        case DXGI_MODE_ROTATION_ROTATE180: return Rotation::Clockwise180;
+        case DXGI_MODE_ROTATION_ROTATE270: return Rotation::Clockwise270;
+        default: return Rotation::None;
+    }
+}
+
 bool is_sideways(DXGI_MODE_ROTATION rotation) {
     return rotation == DXGI_MODE_ROTATION_ROTATE90 || rotation == DXGI_MODE_ROTATION_ROTATE270;
 }
@@ -199,8 +209,12 @@ std::vector<MonitorInfo> list_monitors() {
     return monitors;
 }
 
-ScreenCapture::ScreenCapture(int monitor_index, int fps, FrameCallback on_frame, EventCallback on_event)
-    : fps_(fps), on_frame_(std::move(on_frame)), on_event_(std::move(on_event)) {
+ScreenCapture::ScreenCapture(const CaptureOptions& options, FrameCallback on_frame, EventCallback on_event)
+    : fps_(options.fps),
+      resolution_(options.resolution),
+      on_frame_(std::move(on_frame)),
+      on_event_(std::move(on_event)) {
+    int monitor_index = options.monitor;
     const std::vector<MonitorInfo> monitors = list_monitors();
     if (monitors.empty()) {
         throw std::runtime_error("No monitor is attached to the desktop, there is nothing to record");
@@ -220,11 +234,21 @@ ScreenCapture::ScreenCapture(int monitor_index, int fps, FrameCallback on_frame,
         fell_back_ = true;  // switched to the configured monitor once it appears (asleep at startup)
     }
     monitor_ = monitors[static_cast<std::size_t>(monitor_index)];
-    log::info("Recording monitor {} ({}) at {} fps", monitor_index, to_utf8(monitor_.device_name), fps_);
+    log::info("Recording monitor {} ({}) at {} fps, {}, mouse pointer {}", monitor_index, to_utf8(monitor_.device_name),
+              fps_, resolution_ > 0 ? std::format("at most {}p", resolution_) : std::string("its own resolution"),
+              options.cursor ? "drawn in" : "left out");
 
     stop_event_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     BT_CHECK_WIN32(static_cast<bool>(stop_event_));
     create_device();
+    if (options.cursor) {
+        try {
+            cursor_ = std::make_unique<CursorOverlay>(device_.Get(), context_.Get());
+        } catch (const std::exception& e) {
+            // A missing pointer is better than no recording.
+            log::warn("The mouse pointer cannot be drawn into the recording ({}), recording without it", e.what());
+        }
+    }
 }
 
 ScreenCapture::~ScreenCapture() {
@@ -601,6 +625,18 @@ void ScreenCapture::acquire_frame() {
             }
             context_->CopyResource(bgra_frame_.Get(), texture.Get());
             copied = true;
+            frame_changed_ = true;
+        }
+        if (cursor_) {
+            // Before ReleaseFrame: the pointer's shape can only be read while the frame is held.
+            try {
+                cursor_->update(duplication_.Get(), info);
+            } catch (const std::exception& e) {
+                // Out of memory for a huge shape: the pointer keeps its previous state, the frame goes on.
+                if (cursor_error_log_.allow()) {
+                    log::warn("Reading the mouse pointer failed: {}", e.what());
+                }
+            }
         }
     } catch (...) {
         const HRESULT released = duplication_->ReleaseFrame();
@@ -654,16 +690,25 @@ void ScreenCapture::rebuild_pipeline(const SourceFormat& format) {
     // into it (black bars when the shape differs): an MP4 cannot change size halfway, and
     // re-creating the encoder at the new size would throw away the replay buffer, which §3.7
     // forbids. The new size is used the next time Backtrack starts.
+    // The resolution setting scales the desktop down here as well, in the same video processor step.
+    const PixelSize scaled = scaled_output_size(PixelSize{natural.width, natural.height}, resolution_);
     VideoSize out;
+    VideoSize sized_for;
     {
         std::lock_guard lock(size_mutex_);
         // Fixed only once frames have gone to the encoder: until then a correction (ModeDesc and
         // the first real texture disagreeing, as on a rotated monitor) still sets the size.
         const bool size_locked = output_size_.width != 0 && counters_.delivered > 0;
-        out = size_locked ? output_size_ : natural;
+        if (!size_locked) {
+            sized_for_ = natural;
+        }
+        out = size_locked ? output_size_ : VideoSize{scaled.width, scaled.height};
+        sized_for = sized_for_;
     }
     RECT target_rect{0, 0, out.width, out.height};
-    if (!(out == natural)) {
+    // The desktop the size was chosen for fills the frame (scaled down, if the setting says so, with
+    // its shape kept up to rounding). Any other desktop is a later mode change: fitted in with bars.
+    if (!(natural == sized_for)) {
         const double scale = std::min(static_cast<double>(out.width) / natural.width,
                                       static_cast<double>(out.height) / natural.height);
         // Even sizes and offsets: NV12 has one chroma sample per 2x2 pixels.
@@ -680,6 +725,7 @@ void ScreenCapture::rebuild_pipeline(const SourceFormat& format) {
 
     output_views_.clear();
     input_view_.Reset();
+    cursor_input_view_.Reset();
     processor_.Reset();
     processor_enum_.Reset();
     bgra_frame_.Reset();
@@ -724,6 +770,22 @@ void ScreenCapture::rebuild_pipeline(const SourceFormat& format) {
     input_desc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
     BT_CHECK_HR(video_device_->CreateVideoProcessorInputView(bgra_frame_.Get(), processor_enum_.Get(), &input_desc,
                                                              &input_view_));
+    if (cursor_) {
+        try {
+            const PixelSize desktop = sideways ? PixelSize{static_cast<int>(format.height), static_cast<int>(format.width)}
+                                               : PixelSize{static_cast<int>(format.width), static_cast<int>(format.height)};
+            cursor_->set_frame(bgra_frame_.Get(), desktop, pointer_rotation(format.rotation));
+            BT_CHECK_HR(video_device_->CreateVideoProcessorInputView(cursor_->composite(), processor_enum_.Get(),
+                                                                     &input_desc, &cursor_input_view_));
+        } catch (const std::exception& e) {
+            if (FAILED(device_->GetDeviceRemovedReason())) {
+                throw;
+            }
+            log::warn("The mouse pointer cannot be drawn into the recording ({}), recording without it", e.what());
+            cursor_input_view_.Reset();
+            cursor_.reset();
+        }
+    }
 
     ID3D11VideoContext* vc = video_context_.Get();
     ID3D11VideoProcessor* vp = processor_.Get();
@@ -820,7 +882,7 @@ void ScreenCapture::deliver(Time100ns pts, Time100ns duration) {
     if (SUCCEEDED(hr)) {
         D3D11_VIDEO_PROCESSOR_STREAM stream{};
         stream.Enable = TRUE;
-        stream.pInputSurface = input_view_.Get();
+        stream.pInputSurface = draw_cursor() ? cursor_input_view_.Get() : input_view_.Get();
         hr = video_context_->VideoProcessorBlt(processor_.Get(), view, 0, 1, &stream);
     }
     if (SUCCEEDED(hr)) hr = sample->SetSampleTime(pts);
@@ -837,6 +899,28 @@ void ScreenCapture::deliver(Time100ns pts, Time100ns duration) {
     }
     ++counters_.delivered;
     on_frame_(sample.Get(), pts);
+}
+
+// True when this frame is converted from the overlay's composite (the desktop with the pointer).
+bool ScreenCapture::draw_cursor() {
+    if (!cursor_ || !cursor_input_view_) {
+        return false;
+    }
+    try {
+        const bool drawn = cursor_->compose(frame_changed_);
+        frame_changed_ = false;
+        return drawn;
+    } catch (const std::exception& e) {
+        if (FAILED(device_->GetDeviceRemovedReason())) {
+            throw;  // the capture ends as Failed and the owner builds a new device
+        }
+        // Anything else (out of video memory for a huge pointer) costs the pointer, not the frame.
+        frame_changed_ = false;
+        if (cursor_error_log_.allow()) {
+            log::warn("Drawing the mouse pointer failed: {}", e.what());
+        }
+        return false;
+    }
 }
 
 HRESULT ScreenCapture::output_view_for(ID3D11Texture2D* texture, UINT subresource,

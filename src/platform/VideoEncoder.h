@@ -40,6 +40,7 @@ struct VideoEncoderSettings {
     int bitrate_kbps = 20000;
     EncoderPreference preference = EncoderPreference::Auto;
     LUID adapter_luid{};  // the hardware encoder must run on the GPU that holds the frames
+    QualityPreset quality = QualityPreset::Balanced;  // Balanced leaves the encoder's own default
 };
 
 struct VideoEncoderStats {
