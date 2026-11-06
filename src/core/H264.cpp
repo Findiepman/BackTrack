@@ -106,4 +106,36 @@ std::vector<std::uint8_t> parameter_sets(std::span<const std::uint8_t> keyframe)
     return out;
 }
 
+std::optional<std::vector<NalUnit>> split_length_prefixed(std::span<const std::uint8_t> sample) {
+    constexpr std::size_t kLengthBytes = 4;
+    std::vector<NalUnit> units;
+    std::size_t at = 0;
+    while (at < sample.size()) {
+        if (sample.size() - at < kLengthBytes) {
+            return std::nullopt;
+        }
+        const std::size_t length = std::size_t{sample[at]} << 24 | std::size_t{sample[at + 1]} << 16 |
+                                   std::size_t{sample[at + 2]} << 8 | std::size_t{sample[at + 3]};
+        at += kLengthBytes;
+        if (length == 0 || length > sample.size() - at) {
+            return std::nullopt;
+        }
+        units.push_back(NalUnit{static_cast<std::uint8_t>(sample[at] & kNalTypeMask), sample.subspan(at, length)});
+        at += length;
+    }
+    return units;
+}
+
+std::vector<std::uint8_t> parameter_set_bytes(std::span<const NalUnit> units) {
+    constexpr std::uint8_t kStartCode[] = {0, 0, 0, 1};
+    std::vector<std::uint8_t> out;
+    for (const NalUnit& unit : units) {
+        if (unit.type == kNalSps || unit.type == kNalPps) {
+            out.insert(out.end(), std::begin(kStartCode), std::end(kStartCode));
+            out.insert(out.end(), unit.payload.begin(), unit.payload.end());
+        }
+    }
+    return out;
+}
+
 }  // namespace bt::h264

@@ -68,14 +68,11 @@ std::optional<std::vector<std::uint8_t>> read_box(std::ifstream& in, const mp4::
     return bytes;
 }
 
-// "Fast start": writes a copy of `in` with the moov box (the index) in front of the media data,
-// so Discord previews and phones can start playing without fetching the end of the file first.
-// With several sound tracks the moov is also labeled (mp4::label_audio_tracks: names, and only the
-// first plays). False when the layout is not [header boxes, mdat, moov] or the offsets cannot be
-// moved; the caller then keeps the file as written, which plays everywhere, only less quickly
-// when streamed, and labels it in place (label_in_place).
+}  // namespace
+
+// See ClipWriter.h; write_clip and the repair (platform/Repair) use it.
 bool move_index_to_front(const std::filesystem::path& in_path, const std::filesystem::path& out_path,
-                         std::span<const std::string> audio_names) {
+                         std::span<const std::string> audio_names, std::span<const std::uint8_t> user_data) {
     std::error_code ec;
     const std::uint64_t file_size = std::filesystem::file_size(in_path, ec);
     if (ec) {
@@ -100,7 +97,14 @@ bool move_index_to_front(const std::filesystem::path& in_path, const std::filesy
             log::warn("Could not label the sound tracks; players may play all of them at once");
         }
     }
-    const std::vector<std::uint8_t>& index = labeled ? *labeled : *moov_bytes;
+    std::vector<std::uint8_t> index = labeled ? std::move(*labeled) : *moov_bytes;
+    if (!user_data.empty()) {
+        if (auto with_user_data = mp4::replace_moov_child(index, user_data)) {
+            index = std::move(*with_user_data);
+        } else {
+            log::warn("Could not keep the source's notes (udta) in the MP4 index");
+        }
+    }
     // Inserting the moov in front of mdat moves every media byte by the moov's size.
     const auto moved = mp4::shift_chunk_offsets(index, index.size());
     if (!moved) {
@@ -113,6 +117,8 @@ bool move_index_to_front(const std::filesystem::path& in_path, const std::filesy
     out.close();
     return ok && !out.fail();
 }
+
+namespace {
 
 // When the index could not be moved to the front: the sound tracks are still marked as
 // alternatives (only the first plays) in the file as written. Without names the moov keeps its

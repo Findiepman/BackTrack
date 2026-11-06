@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -45,5 +46,16 @@ ClipWriteResult write_clip(const ClipWriteRequest& request);
 
 // The sound tracks of an MP4 file in file order (mp4::audio_tracks; empty when it cannot be read).
 std::vector<mp4::AudioTrackInfo> read_audio_tracks(const std::filesystem::path& path);
+
+// "Fast start", after the sink writer's Finalize; write_clip and the repair (platform/Repair) use
+// it. Writes a copy of `in` with the moov box (the index) in front of the media data, so Discord
+// previews and phones can start playing without fetching the end of the file first. With several
+// sound tracks the moov is also labeled (mp4::label_audio_tracks: names, and only the first plays).
+// A non-empty `user_data` (a whole udta box) replaces the sink writer's, so a repaired clip keeps
+// the notes its recorder left in it. False when the layout is not [header boxes, mdat, moov] or the
+// offsets cannot be moved; write_clip then keeps the file as written, which plays everywhere, only
+// less quickly when streamed, and labels it in place.
+bool move_index_to_front(const std::filesystem::path& in_path, const std::filesystem::path& out_path,
+                         std::span<const std::string> audio_names, std::span<const std::uint8_t> user_data = {});
 
 }  // namespace bt

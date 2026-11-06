@@ -41,6 +41,7 @@ add_library(backtrack_core STATIC
     src/core/UpdateCheck.cpp
     src/core/ExportPlan.cpp
     src/core/ShareUpload.cpp
+    src/core/RepairPlan.cpp
 )
 target_include_directories(backtrack_core PUBLIC src)
 target_link_libraries(backtrack_core PUBLIC bt_options)
@@ -88,6 +89,7 @@ add_executable(backtrack WIN32
     src/platform/Filmstrip.cpp
     src/platform/Trim.cpp
     src/platform/Exporter.cpp
+    src/platform/Repair.cpp
     src/platform/Uploader.cpp
     src/platform/Shell.cpp
     src/platform/VideoPlayer.cpp
@@ -157,13 +159,19 @@ target_include_directories(update_check PRIVATE src)
 target_compile_definitions(update_check PRIVATE BT_VERSION="${PROJECT_VERSION}")
 target_link_libraries(update_check PRIVATE backtrack_core winhttp bcrypt shell32 ole32 advapi32)
 
+# Development tool: checks and repairs clips from the command line (tools/repair_check.cpp). Not shipped.
+add_executable(repair_check tools/repair_check.cpp src/platform/Log.cpp src/platform/Repair.cpp
+               src/platform/ClipWriter.cpp)
+target_include_directories(repair_check PRIVATE src)
+target_link_libraries(repair_check PRIVATE backtrack_core mfplat mfuuid mfreadwrite ole32 propsys)
+
 # Development tool: one upload the way Share does it (tools/share_check.cpp). Not shipped.
 add_executable(share_check tools/share_check.cpp src/platform/Uploader.cpp src/platform/Log.cpp)
 target_include_directories(share_check PRIVATE src)
 target_link_libraries(share_check PRIVATE backtrack_core winhttp bcrypt)
 
 enable_testing()
-foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests TrimPlanTests AudioFifoTests AudioMixTests NoiseSuppressorTests ThemeColorsTests CaptureMathTests UpdateCheckTests ExportPlanTests ShareUploadTests)
+foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests TrimPlanTests AudioFifoTests AudioMixTests NoiseSuppressorTests ThemeColorsTests CaptureMathTests UpdateCheckTests ExportPlanTests ShareUploadTests RepairPlanTests)
     add_executable(${test_name} tests/${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE backtrack_core)
     target_compile_definitions(${test_name} PRIVATE BT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
