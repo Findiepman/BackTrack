@@ -27,7 +27,7 @@ inline Color kOk = Color::hex(0x6fdc9f);  // --ok
 inline Color kOff = Color::hex(0x4a5160);  // --off
 inline Color kSoft = kAccent.mix(kBg, 0.15f);  // --soft
 inline Color kHover = kInk.with_alpha(0.08f);  // --hov
-inline bool kLightTheme = false;  // Daylight: lighter shadows and scrims
+inline bool kLightTheme = false;  // Daylight: Windows draws the frame around the window light
 
 inline Color to_color(Rgb c) {
     return Color::hex(c.value());

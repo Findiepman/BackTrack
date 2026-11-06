@@ -24,6 +24,18 @@ constexpr float kGap = 8;
 constexpr float kMargin = 16;  // from the screen's edges
 constexpr float kFontSize = 12.5f;
 
+// GetVersionEx lies to programs without a manifest entry for each Windows; ntdll does not.
+DWORD windows_build() {
+    using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    const auto get = ntdll != nullptr ? reinterpret_cast<RtlGetVersionFn>(
+                                            reinterpret_cast<void*>(GetProcAddress(ntdll, "RtlGetVersion")))
+                                      : nullptr;
+    OSVERSIONINFOW info{};
+    info.dwOSVersionInfoSize = sizeof(info);
+    return get != nullptr && get(&info) == 0 ? info.dwBuildNumber : 0;
+}
+
 D2D1_COLOR_F d2d(Color c) {
     return D2D1::ColorF(c.r, c.g, c.b, c.a);
 }
@@ -50,7 +62,9 @@ Overlay::Overlay() {
         return;
     }
     // Before anything is drawn: from its first frame on it is left out of screen captures.
-    excluded_ = SetWindowDisplayAffinity(window_, WDA_EXCLUDEFROMCAPTURE) != FALSE;
+    // Before Windows 10 2004 (build 19041) the call "succeeds" but acts as WDA_MONITOR: a black
+    // box in every recording. So the build decides, not the return value.
+    excluded_ = windows_build() >= 19041 && SetWindowDisplayAffinity(window_, WDA_EXCLUDEFROMCAPTURE) != FALSE;
     if (!excluded_) {
         log::info("The overlay is off: this Windows cannot keep it out of recordings (needs Windows 10 2004 or later)");
         return;
@@ -61,7 +75,9 @@ Overlay::Overlay() {
                                         reinterpret_cast<IUnknown**>(dwrite_.ReleaseAndGetAddressOf())));
         // Premultiplied alpha into a 32-bit DIB is what UpdateLayeredWindow wants.
         const D2D1_RENDER_TARGET_PROPERTIES properties = D2D1::RenderTargetProperties(
-            D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+            // Software: a 30 px chip costs nothing to draw on the CPU, and a CPU target is never
+            // lost with the graphics driver (sleep, driver update), which a hardware one is.
+            D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
             96.0f, 96.0f);
         BT_CHECK_HR(d2d_->CreateDCRenderTarget(&properties, target_.ReleaseAndGetAddressOf()));
         // ClearType needs an opaque background to blend against; this one is see-through.
@@ -240,7 +256,12 @@ void Overlay::render() {
         SelectObject(memory, previous);
         DeleteObject(bitmap);
         DeleteDC(memory);
-        if (!drawn) return;
+        if (!drawn) {
+            // Never leave an old message standing on the screen.
+            ShowWindow(window_, SW_HIDE);
+            drawn_ = Picture{};
+            return;
+        }
     }
     if (!IsWindowVisible(window_)) ShowWindow(window_, SW_SHOWNOACTIVATE);
     // A game that makes itself topmost later would cover it; keep it above.

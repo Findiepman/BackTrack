@@ -254,7 +254,7 @@ void App::run_clip(const std::string& what, const Rect& anchor) {
         const auto index = static_cast<std::size_t>(std::atoi(what.c_str() + 9));
         if (player != nullptr && player->ready() && index < clip->bookmarks.size()) {
             // A moment before the mark: the bookmark key is pressed just after the thing happened.
-            player->seek(std::clamp(clip->bookmarks[index] - 2.0, 0.0, length));
+            player->seek(std::clamp(clip->bookmarks[index] - 2.0, view.in, std::max(view.in, out)));
         }
     } else if (what == "back5" || what == "fwd5") {
         if (player != nullptr) {
@@ -552,7 +552,8 @@ void App::paint_player(const ClipEntry& clip, const Rect& rect) {
         const std::string arg = std::format("bookmark:{}", i);
         const bool hot = hovered(Action::Clip, arg);
         g.fill_round(Rect{bx - 1.5f, track.y - 3, 3, 12}, 1.5f, hot ? white : kAccent);
-        add_hit(Rect{bx - 6, track.y - 8, 12, 14}, Action::Clip, arg);
+        // Only above the bar, so a press on the bar itself still seeks where it was pressed.
+        add_hit(Rect{bx - 5, track.y - 8, 10, 9}, Action::Clip, arg);
     }
 
     const float row = track.bottom() + 6;

@@ -806,7 +806,7 @@ std::vector<App::SettingRow> App::setting_rows() {
             lengths.push_back(effective);
             row.selected = static_cast<int>(lengths.size()) - 1;
         }
-        row.changed = settings_.save_seconds != defaults.save_seconds;
+        row.changed = saved_seconds(settings_) != settings_.clip_seconds;  // anything but the whole buffer
         row.choose = [this, lengths](int choice) {
             if (choice >= 0 && static_cast<std::size_t>(choice) < lengths.size()) {
                 change_settings([&](Settings& s) { s.save_seconds = lengths[static_cast<std::size_t>(choice)]; });

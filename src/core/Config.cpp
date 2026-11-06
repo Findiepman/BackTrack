@@ -28,8 +28,8 @@ constexpr long long kMaxClipSeconds = 300;
 
 constexpr std::array<int, 4> kAllowedFps = {30, 60, 120, 144};
 
-// Output heights; 0 = the display's own size.
-constexpr std::array<int, 4> kAllowedResolutions = {0, 720, 1080, 1440};
+// Output heights besides "native" (0).
+constexpr std::array<int, 3> kAllowedResolutions = {720, 1080, 1440};
 
 constexpr long long kMinOverlayOpacity = 20;
 constexpr long long kMaxOverlayOpacity = 100;
@@ -413,9 +413,9 @@ private:
                          names[static_cast<std::size_t>(target)]));
     }
 
-    // "native" or a height; heights in between snap to the nearest offered one.
+    // "native" (or 0) or a height; other heights snap to the nearest offered one.
     void resolution() {
-        if (to_lower(e_.value) == "native") {
+        if (to_lower(e_.value) == "native" || trim(e_.value) == "0") {
             s_.resolution = 0;
             return;
         }

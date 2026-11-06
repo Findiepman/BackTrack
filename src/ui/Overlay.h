@@ -30,7 +30,6 @@ struct OverlayState {
     int corner = 1;  // OverlayCorner: 0 top left, 1 top right, 2 bottom left, 3 bottom right
     float opacity = 0.85f;
     bool reduce_motion = false;  // no fading
-    bool light = false;  // a light theme: a light chip
     Color chip;  // background
     Color ink;  // text
 };

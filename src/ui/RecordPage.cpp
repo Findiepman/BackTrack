@@ -78,8 +78,10 @@ void App::sample_load() {
     }
 }
 
-void App::run_record(const std::string& what, const Rect&) {
-    if (what.starts_with("display:")) {
+void App::run_record(const std::string& what, const Rect& anchor) {
+    if (what == "save-length") {
+        run_setting("saveLen", anchor);  // the same list as Settings > Instant Replay
+    } else if (what.starts_with("display:")) {
         const int index = std::stoi(what.substr(8));
         if (index != settings_.monitor) change_settings([index](Settings& s) { s.monitor = index; });
     } else if (what == "replay") {
@@ -209,11 +211,12 @@ void App::paint_record_page(const Rect& area) {
             add_hit(rec, Action::Disabled);
             soon_badge(rec.right() + 10, rec.y + 28);
         }
-        const float save_w = button_width(std::format(L"Save last {}", to_wide(format_duration(settings_.clip_seconds))),
+        const int save_seconds = saved_seconds(settings_);
+        const float save_w = button_width(std::format(L"Save last {}", to_wide(format_duration(save_seconds))),
                                           glyph::kBolt, false);
-        const std::wstring save_label = settings_.clip_seconds < 60
-                                            ? std::format(L"Save last {} s", settings_.clip_seconds)
-                                            : std::format(L"Save last {}", to_wide(format_duration(settings_.clip_seconds)));
+        const std::wstring save_label = save_seconds < 60
+                                            ? std::format(L"Save last {} s", save_seconds)
+                                            : std::format(L"Save last {}", to_wide(format_duration(save_seconds)));
         const float sw2 = button_width(save_label, glyph::kBolt, false);
         (void)save_w;
         push_button(px + pw - sw2, cy + 9, save_label, glyph::kBolt, ButtonStyle::Primary, false, Action::Record, "save",
@@ -366,9 +369,10 @@ void App::paint_record_page(const Rect& area) {
         ry += 44;
         krow(L"Save button saves");
         {
-            const std::wstring text = L"Last " + (settings_.clip_seconds < 60 ? std::format(L"{} s", settings_.clip_seconds)
-                                                                               : to_wide(format_duration(settings_.clip_seconds)));
-            select_box(Rect{px + pw - 130, ry + 4, 130, 36}, text, Action::Record, "save-length", true);
+            const int save_seconds = saved_seconds(settings_);
+            const std::wstring text = L"Last " + (save_seconds < 60 ? std::format(L"{} s", save_seconds)
+                                                                     : to_wide(format_duration(save_seconds)));
+            select_box(Rect{px + pw - 130, ry + 4, 130, 36}, text, Action::Record, "save-length");
         }
         ry += 44 + 8;
         // .fillbar: how much of the buffer is there (it fills up after a start or a settings change).

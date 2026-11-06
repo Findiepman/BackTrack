@@ -1271,7 +1271,10 @@ void App::on_saved(const SaveResult& result) {
         clip.source = std::format("Display {}", recorded_display() + 1);
         std::vector<double> marks;
         for (const Time100ns b : bookmarks_) marks.push_back(static_cast<double>(b) / kTicksPerSecond);
-        clip.bookmarks = bookmarks_within(marks, static_cast<double>(result.start) / kTicksPerSecond, result.seconds);
+        // The newest frame in the buffer is a few frames behind the clock: a bookmark pressed just
+        // before saving lands a moment past the end and is kept at the end instead of dropped.
+        clip.bookmarks = bookmarks_within(marks, static_cast<double>(result.start) / kTicksPerSecond, result.seconds + 0.5);
+        for (double& b : clip.bookmarks) b = std::min(b, result.seconds);
         library_.add_saved_clip(clip);
         new_files_.insert(file);
         save_library();
@@ -1325,7 +1328,6 @@ void App::toggle_pause() {
 }
 
 void App::refresh_status() {
-    refresh_overlay();
     const std::string status = recorder_->status_text();
     if (status != status_) {
         status_ = status;
@@ -1340,6 +1342,7 @@ void App::refresh_status() {
         }
         if (window_ != nullptr) invalidate();
     }
+    refresh_overlay();  // after status_, which it shows
 }
 
 std::string& App::hotkey_text(Settings& s, HotkeyTarget target) {
@@ -1364,6 +1367,7 @@ void App::register_hotkey() {
         const auto target = static_cast<HotkeyTarget>(i);
         const std::string& text = hotkey_text(settings_, target);
         hotkey_ok_[i] = false;
+        registered_keys_[i].reset();
         if (text.empty()) continue;  // only the save key cannot be empty
         bool taken = false;
         for (int j = 0; j < i; ++j) taken = taken || text == hotkey_text(settings_, static_cast<HotkeyTarget>(j));
@@ -1375,6 +1379,7 @@ void App::register_hotkey() {
         if (!parsed.hotkey) continue;
         hotkey_ok_[i] = RegisterHotKey(window_, i + 1, parsed.hotkey->modifiers | MOD_NOREPEAT,
                                        parsed.hotkey->virtual_key) != FALSE;
+        registered_keys_[i] = parsed.hotkey;
         if (!hotkey_ok_[i]) {
             log::warn("Cannot use {} to {}: {}. Pick another key in Settings > Hotkeys", text, kWhat[i],
                       hresult_text(HRESULT_FROM_WIN32(GetLastError())));
@@ -1475,37 +1480,58 @@ void App::on_raw_key(const RAWKEYBOARD& key) {
     const UINT vk = key.VKey;
     if (vk == 0 || vk == 0xFF) return;  // part of an escape sequence, not a key
     const bool down = (key.Flags & RI_KEY_BREAK) == 0;
+    const auto now = std::chrono::steady_clock::now();
+    // One physical key: left and right Ctrl/Alt share a virtual key and differ by the E0 prefix.
+    const std::uint32_t id = vk << 16 | key.MakeCode | ((key.Flags & RI_KEY_E0) != 0 ? 0x8000u : 0u);
+    std::uint32_t modifier = 0;
     switch (vk) {
-        case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL: case VK_MENU: case VK_LMENU: case VK_RMENU:
-        case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT: case VK_LWIN: case VK_RWIN:
-            return;  // modifiers are read from Windows when the key itself goes down
+        case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL: modifier = hotkey_mod::kCtrl; break;
+        case VK_MENU: case VK_LMENU: case VK_RMENU: modifier = hotkey_mod::kAlt; break;
+        case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT: modifier = hotkey_mod::kShift; break;
+        case VK_LWIN: case VK_RWIN: modifier = hotkey_mod::kWin; break;
         default: break;
     }
     if (!down) {
-        raw_keys_down_.erase(vk);
+        raw_keys_down_.erase(id);
         return;
     }
-    // Held down, Windows repeats the key every ~30 ms after a short delay: a "press" of a key that
-    // went down moments ago is a repeat. By time, not by remembering releases: a release lost
-    // (lock screen, UAC) must not make the next real press look like a repeat. Keys are never logged.
-    constexpr auto kRepeat = std::chrono::milliseconds(600);
-    const auto now = std::chrono::steady_clock::now();
-    const auto last = raw_keys_down_.find(vk);
-    const bool repeat = last != raw_keys_down_.end() && now - last->second < kRepeat;
-    raw_keys_down_[vk] = now;
-    if (repeat) return;
-    if (capturing_hotkey_ || finished_) return;  // Settings is listening for a new key
+    // A key held down repeats every ~30 ms (after a delay of up to a second, a Windows setting):
+    // a "press" of a key that is still down is a repeat. A release can get lost (lock screen,
+    // UAC), so a key not heard from for a few seconds counts as up again. Keys are never logged.
+    constexpr auto kHeldExpiry = std::chrono::seconds(5);
+    const auto last = raw_keys_down_.find(id);
+    const bool repeat = last != raw_keys_down_.end() && now - last->second.last < kHeldExpiry;
+    if (repeat) {
+        last->second.last = now;
+        return;
+    }
+    raw_keys_down_[id] = RawKey{now, now, modifier};
+    if (modifier != 0 || capturing_hotkey_ || finished_) return;  // Settings is listening for a new key
+    // Modifiers from this same stream, so they are right even when this message is handled late
+    // (the window busy) or a game keeps Windows' own key state from updating. Windows' state as
+    // well: one held down since before this ran (or whose press was missed) still counts. A
+    // modifier the stream says is down but Windows has up for seconds lost its release.
     std::uint32_t modifiers = 0;
+    for (auto it = raw_keys_down_.begin(); it != raw_keys_down_.end();) {
+        const auto& [key_id, held] = *it;
+        if (held.modifier != 0 && GetAsyncKeyState(static_cast<int>(key_id >> 16)) >= 0 &&
+            now - held.since > std::chrono::seconds(2)) {
+            it = raw_keys_down_.erase(it);
+            continue;
+        }
+        modifiers |= held.modifier;
+        ++it;
+    }
     if (GetAsyncKeyState(VK_CONTROL) < 0) modifiers |= hotkey_mod::kCtrl;
     if (GetAsyncKeyState(VK_MENU) < 0) modifiers |= hotkey_mod::kAlt;
     if (GetAsyncKeyState(VK_SHIFT) < 0) modifiers |= hotkey_mod::kShift;
     if (GetAsyncKeyState(VK_LWIN) < 0 || GetAsyncKeyState(VK_RWIN) < 0) modifiers |= hotkey_mod::kWin;
     const Hotkey pressed{modifiers, vk};
     for (int i = 0; i < kGlobalHotkeys; ++i) {
-        const std::string& text = hotkey_text(settings_, static_cast<HotkeyTarget>(i));
-        if (text.empty()) continue;
-        if (const auto parsed = parse_hotkey(text); parsed.hotkey && *parsed.hotkey == pressed) {
-            on_shortcut(i + 1);  // the first one with this key, as register_hotkey decides
+        // Only keys Windows gave us: one another program owns stays that program's (the raw path
+        // is for games that switch hotkeys off, not for taking keys from other programs).
+        if (hotkey_ok_[i] && registered_keys_[i] && *registered_keys_[i] == pressed) {
+            on_shortcut(i + 1);
             return;
         }
     }
@@ -1587,14 +1613,14 @@ void App::refresh_overlay() {
     state.visible = settings_.overlay && !finished_ && window_ != nullptr && GetForegroundWindow() != window_;
     const bool paused = recorder_->paused();
     const bool normal = status_.starts_with("Recording") || status_.starts_with("Saving");
-    state.text = paused ? L"Replay paused" : normal ? L"Replay on" : L"Replay has a problem";
+    state.text = paused ? L"Replay paused" : normal ? L"Replay on" : L"Replay starting";  // as the title bar says
     if (!paused && recorder_->mic_muted() && settings_.mic_enabled) state.text += L" \u00b7 Mic muted";
     state.dot = paused ? kOff : normal ? kAccent : kWarn;
     state.monitor = recorded_monitor_rect();
     state.corner = static_cast<int>(settings_.overlay_corner);
     state.opacity = static_cast<float>(settings_.overlay_opacity) / 100.0f;
-    state.reduce_motion = settings_.reduce_motion;
-    state.light = kLightTheme;
+    // After Quit the message loop ends before a fade could run: gone at once.
+    state.reduce_motion = settings_.reduce_motion || finished_;
     state.chip = kPop.with_alpha(0.94f);
     state.ink = kInk;
     overlay_->update(state);
@@ -1705,7 +1731,7 @@ void App::tray_menu() {
     const HMENU menu = CreatePopupMenu();
     if (menu == nullptr) return;
     AppendMenuW(menu, MF_STRING, kTrayOpen, L"Open Backtrack");
-    const std::wstring save = std::format(L"Save last {} s\t{}", settings_.clip_seconds, to_wide(settings_.save_hotkey));
+    const std::wstring save = std::format(L"Save last {} s\t{}", saved_seconds(settings_), to_wide(settings_.save_hotkey));
     AppendMenuW(menu, MF_STRING, kTraySave, save.c_str());
     AppendMenuW(menu, MF_STRING, kTrayPause, recorder_->paused() ? L"Resume Instant Replay" : L"Pause Instant Replay");
     if (settings_.mic_enabled) {

@@ -457,7 +457,13 @@ private:
     bool capturing_hotkey_ = false;
     HotkeyTarget capture_target_ = HotkeyTarget::Save;  // which key "press keys" is listening for
     HotkeyTarget message_target_ = HotkeyTarget::Save;  // the row hotkey_message_ belongs to
-    std::map<UINT, std::chrono::steady_clock::time_point> raw_keys_down_;  // key -> its last raw "down" (auto-repeat)
+    struct RawKey {
+        std::chrono::steady_clock::time_point since;  // when it went down
+        std::chrono::steady_clock::time_point last;  // its last "down" (auto-repeat refreshes it)
+        std::uint32_t modifier = 0;  // hotkey_mod bit for Ctrl/Alt/Shift/Win, else 0
+    };
+    std::map<std::uint32_t, RawKey> raw_keys_down_;  // physical keys down, from the raw input
+    std::optional<Hotkey> registered_keys_[kGlobalHotkeys];  // parsed once, for the raw input path
     std::chrono::steady_clock::time_point last_shortcut_[kGlobalHotkeys + 1]{};  // by hotkey id: a press seen both ways acts once
     std::vector<MicDevice> microphones_;  // refreshed when the Record or Settings page opens
     std::wstring hotkey_message_;  // why the last pressed combination cannot be used
