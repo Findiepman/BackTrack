@@ -35,8 +35,8 @@ struct Settings {
     std::string save_hotkey = "F8";  // always a string parse_hotkey accepts
     std::string mic_mute_hotkey = "Alt+F7";  // empty: no mute key; else a Global hotkey
     std::string push_to_talk_key = "V";  // a Held key (parse_hotkey with HotkeyUse::Held)
-    std::string overlay_hotkey = "Alt+O";  // shows or hides the overlay; empty: no key
-    std::string bookmark_hotkey = "Alt+B";  // marks a moment in the replay buffer; empty: no key
+    std::string overlay_hotkey = "Alt+Shift+O";  // shows or hides the overlay; empty: no key
+    std::string bookmark_hotkey = "Alt+Shift+B";  // marks a moment in the replay buffer; empty: no key
     // [video]
     int monitor = 0;
     int fps = 60;

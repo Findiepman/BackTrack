@@ -604,7 +604,7 @@ void round_eleven_settings() {
     CHECK(bad.settings.overlay_corner == OverlayCorner::TopRight);
     CHECK_EQ(bad.settings.overlay_opacity, 20);
     CHECK(bad.settings.theme == ThemeId::Night && bad.settings.thumbnail_size == ThumbnailSize::Medium);
-    CHECK(bad.settings.bookmark_hotkey == "Alt+B");  // a plain letter is no global hotkey
+    CHECK(bad.settings.bookmark_hotkey == "Alt+Shift+B");  // a plain letter is no global hotkey
     CHECK_EQ(bad.warnings.size(), std::size_t{8});
     CHECK(any_warning(bad, "theme = 'neon' should be night, harbor, plum, moss or daylight, keeping night"));
     CHECK_EQ(load_settings("[video]\nresolution = NATIVE\n").settings.resolution, 0);
