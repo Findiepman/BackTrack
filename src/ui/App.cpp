@@ -385,6 +385,7 @@ void App::run_ui_tasks() {
 }
 
 void App::release() {
+    if (export_) export_->cancel->store(true);  // stops within a second; the worker is joined below
     {
         // A trim that is being written finishes (never a half file); queued jobs are dropped.
         std::lock_guard lock(worker_mutex_);
@@ -857,6 +858,9 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
             return 0;
         case kMsgSaved: take_saved(); return 0;
         case kMsgWork: run_ui_tasks(); return 0;
+        case kMsgExport:
+            if (export_) invalidate();
+            return 0;
         case kMsgUpdate:
             if (page_ == Page::Settings) invalidate();  // the update row shows the state
             return 0;
@@ -1844,6 +1848,11 @@ void App::paint() {
     }
     paint_sidebar(h);
     paint_title_bar(w);
+    if (export_) {
+        paint_export(w, h);
+        // The page's text boxes are windows of their own and would show through the dialog.
+        for (auto& [control, place] : controls_) place.second = false;
+    }
     if (menu_) paint_menu(w, h);
     end_guard.done = true;
     g.end();
@@ -2518,6 +2527,10 @@ bool App::on_key(WPARAM key) {
         if (key == VK_ESCAPE) close_menu();
         return true;  // keys do not reach the page under an open menu
     }
+    if (export_) {
+        if (key == VK_ESCAPE) close_export();
+        return true;  // the clip page under the Export window does not react
+    }
     if (page_ == Page::Clip && clip_view_) {
         switch (key) {
             case VK_SPACE: run_clip("play", Rect{}); return true;
@@ -2635,7 +2648,10 @@ void App::run(const Hit& hit, bool right, POINT screen) {
             invalidate();
             break;
         case Action::MoreCollections: more_collections_menu(anchor); break;
-        case Action::Clip: run_clip(hit.arg, anchor); break;
+        case Action::Clip:
+            if (hit.arg.starts_with("ex-")) run_export(hit.arg, anchor);
+            else run_clip(hit.arg, anchor);
+            break;
         case Action::Record: run_record(hit.arg, anchor); break;
         case Action::Setting: run_setting(hit.arg, anchor); break;
     }

@@ -121,6 +121,7 @@ void App::open_clip(const std::string& file) {
 }
 
 void App::close_clip() {
+    close_export();  // it belongs to the clip that is closing
     if (!clip_view_) return;
     commit_clip_text();
     if (window_ != nullptr) KillTimer(window_, kPlayerTimer);
@@ -289,6 +290,8 @@ void App::run_clip(const std::string& what, const Rect& anchor) {
         }
     } else if (what == "save-trim") {
         save_trim();
+    } else if (what == "export") {
+        open_export();
     } else if (what == "share") {
         // Sharing links come later; until then the file, ready to drag into Discord or anywhere.
         shell::show_in_folder(clip_path(file));
@@ -672,9 +675,8 @@ void App::paint_trim(const ClipEntry& clip, const Rect& rect) {
     tx += 8 + push_button(tx, y, trimming_ ? L"Saving..." : L"Save as new clip", glyph::kCut, ButtonStyle::Primary, false,
                           Action::Clip, "save-trim", !can_trim || !trimmed || trimming_ || clip.trashed_at.has_value());
     if (!clip.trashed_at) {  // in the Trash, Restore and Delete forever need the room
-        tx += push_button(tx, y, L"Export...", glyph::kDownload, ButtonStyle::Line, false, Action::Clip, "export", true);
-        soon_badge(tx + 4, y + kPageControl / 2);
-        tx += 4 + 38 + 8;
+        tx += 8 + push_button(tx, y, L"Export...", glyph::kDownload, ButtonStyle::Line, false, Action::Clip, "export",
+                              !clip.size_bytes && clip.duration_s <= 0);
     }
     push_button(tx, y, L"Share...", glyph::kShare, ButtonStyle::Line, false, Action::Clip, "share");
     if (clip.trashed_at) {

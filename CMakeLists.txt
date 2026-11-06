@@ -94,6 +94,7 @@ add_executable(backtrack WIN32
     src/ui/App.cpp
     src/ui/Widgets.cpp
     src/ui/ClipPage.cpp
+    src/ui/ExportDialog.cpp
     src/ui/RecordPage.cpp
     src/ui/SettingsPage.cpp
     src/ui/Graphics.cpp

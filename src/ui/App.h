@@ -24,6 +24,7 @@
 #include "platform/MediaProbe.h"
 #include "platform/MicCapture.h"
 #include "platform/Recorder.h"
+#include "core/ExportPlan.h"
 #include "platform/Updater.h"
 #include "platform/VideoPlayer.h"
 #include "ui/Graphics.h"
@@ -194,6 +195,21 @@ private:
         int strip_frames = 0;  // filmstrip pictures uploaded ("strip|<file>|<i>")
     };
 
+    // The Export window (ExportDialog.cpp). Shared with the background job that runs the export.
+    struct ExportView {
+        enum class Stage { Form, Running, Done, Failed };
+        std::string file;
+        std::string title;
+        ExportOptions options;
+        std::optional<ExportSource> source;  // read in the background when the window opens
+        Stage stage = Stage::Form;
+        std::shared_ptr<std::atomic<double>> progress = std::make_shared<std::atomic<double>>(0.0);
+        std::shared_ptr<std::atomic<bool>> cancel = std::make_shared<std::atomic<bool>>(false);
+        std::string message;  // Failed: why
+        std::filesystem::path result_path;
+        std::uint64_t result_bytes = 0;
+    };
+
     // Values a Settings page row can show and change; built in SettingsPage.cpp.
     struct SettingRow;
 
@@ -325,6 +341,10 @@ private:
     void make_player();
     void tick_player();
     void save_trim();
+    void open_export();
+    void close_export();  // cancels a running export
+    void run_export(const std::string& what, const Rect& anchor);
+    void paint_export(float width, float height);
     std::vector<std::string> clip_order() const;  // the files of the library view the clip page came from
     void request_filmstrip();
     std::vector<SettingRow> setting_rows();
@@ -453,6 +473,7 @@ private:
 
     // Clip page.
     std::optional<ClipView> clip_view_;
+    std::shared_ptr<ExportView> export_;  // the Export window, while it is open
     std::string clip_title_drawn_;  // the title the side panel shows, to notice a rename elsewhere
     bool trimming_ = false;
     LPARAM next_player_tag_ = 1;
