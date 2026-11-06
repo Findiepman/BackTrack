@@ -302,3 +302,7 @@ Direct2D and DirectWrite on a Direct3D 11 swap chain (part of Windows, nothing t
 clip page plays clips with Windows' Media Foundation media engine on the same graphics device, so
 the controls are drawn over the picture. Trimming (`src/platform/Trim.cpp`) copies the compressed
 frames into a new file without decoding them.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
