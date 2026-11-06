@@ -37,9 +37,35 @@ add_library(backtrack_core STATIC
     src/core/Fft.cpp
     src/core/NoiseSuppressor.cpp
     src/core/ThemeColors.cpp
+    src/core/CaptureMath.cpp
 )
 target_include_directories(backtrack_core PUBLIC src)
 target_link_libraries(backtrack_core PUBLIC bt_options)
+
+# The mouse pointer's shaders, compiled at build time by the Windows SDK's fxc into headers with the
+# bytecode, so the exe needs no shader compiler (d3dcompiler_47.dll) at run time.
+set(BT_PROGRAM_FILES_X86 "ProgramFiles(x86)")  # $ENV{} cannot take the parentheses directly
+find_program(BT_FXC fxc REQUIRED
+             HINTS "$ENV{WindowsSdkVerBinPath}/x64"
+                   "$ENV{${BT_PROGRAM_FILES_X86}}/Windows Kits/10/bin/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/x64"
+             DOC "fxc.exe from the Windows SDK")
+set(BT_SHADER_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated/shaders)
+set(BT_SHADER_HEADERS)
+foreach(shader CursorVS:vs_5_0 CursorPS:ps_5_0)
+    string(REPLACE ":" ";" parts ${shader})
+    list(GET parts 0 shader_name)
+    list(GET parts 1 shader_profile)
+    set(shader_source ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/shaders/${shader_name}.hlsl)
+    set(shader_header ${BT_SHADER_DIR}/${shader_name}.h)
+    add_custom_command(OUTPUT ${shader_header}
+                       COMMAND ${CMAKE_COMMAND} -E make_directory ${BT_SHADER_DIR}
+                       COMMAND ${BT_FXC} /nologo /WX /O3 /Qstrip_reflect /Qstrip_debug /T ${shader_profile} /E main
+                               /Vn k${shader_name} /Fh ${shader_header} ${shader_source}
+                       DEPENDS ${shader_source}
+                       COMMENT "Compiling ${shader_name}.hlsl")
+    list(APPEND BT_SHADER_HEADERS ${shader_header})
+endforeach()
+add_custom_target(backtrack_shaders DEPENDS ${BT_SHADER_HEADERS})
 
 # WIN32: a window app, no console window. The manifest turns on modern common controls and
 # per-monitor DPI awareness.
@@ -48,6 +74,7 @@ add_executable(backtrack WIN32
     src/backtrack.manifest
     src/platform/Log.cpp
     src/platform/ScreenCapture.cpp
+    src/platform/CursorOverlay.cpp
     src/platform/VideoEncoder.cpp
     src/platform/AudioCapture.cpp
     src/platform/MicCapture.cpp
@@ -71,7 +98,8 @@ add_executable(backtrack WIN32
     src/ui/Logo.cpp
     src/backtrack.rc
 )
-target_include_directories(backtrack PRIVATE src)
+target_include_directories(backtrack PRIVATE src ${CMAKE_CURRENT_BINARY_DIR}/generated)
+add_dependencies(backtrack backtrack_shaders)
 target_compile_definitions(backtrack PRIVATE BT_VERSION="${PROJECT_VERSION}")
 target_link_libraries(backtrack PRIVATE backtrack_core d3d11 dxgi mfplat mfuuid mfreadwrite winmm avrt wmcodecdspuuid
                       shell32 ole32 d2d1 dwrite dxguid dwmapi comctl32 windowscodecs propsys shcore)
@@ -101,14 +129,15 @@ target_link_libraries(media_check PRIVATE backtrack_core mfplat mfuuid mfreadwri
 # Development tool: the recording engine without the window and its single-instance lock, to check
 # sound and picture while Backtrack itself runs (tools/record_check.cpp). Not shipped.
 add_executable(record_check tools/record_check.cpp src/platform/Log.cpp src/platform/ScreenCapture.cpp
-               src/platform/VideoEncoder.cpp src/platform/AudioCapture.cpp src/platform/MicCapture.cpp
-               src/platform/ClipWriter.cpp src/platform/Recorder.cpp)
-target_include_directories(record_check PRIVATE src)
+               src/platform/CursorOverlay.cpp src/platform/VideoEncoder.cpp src/platform/AudioCapture.cpp
+               src/platform/MicCapture.cpp src/platform/ClipWriter.cpp src/platform/Recorder.cpp)
+target_include_directories(record_check PRIVATE src ${CMAKE_CURRENT_BINARY_DIR}/generated)
+add_dependencies(record_check backtrack_shaders)
 target_link_libraries(record_check PRIVATE backtrack_core d3d11 dxgi mfplat mfuuid mfreadwrite winmm avrt
                       wmcodecdspuuid shell32 ole32 propsys)
 
 enable_testing()
-foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests TrimPlanTests AudioFifoTests AudioMixTests NoiseSuppressorTests ThemeColorsTests)
+foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests TrimPlanTests AudioFifoTests AudioMixTests NoiseSuppressorTests ThemeColorsTests CaptureMathTests)
     add_executable(${test_name} tests/${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE backtrack_core)
     target_compile_definitions(${test_name} PRIVATE BT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

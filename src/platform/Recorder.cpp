@@ -555,8 +555,9 @@ void Recorder::rebuild_pipeline() {
 
     std::unique_ptr<ScreenCapture> capture;
     try {
+        const CaptureOptions options{settings_.monitor, settings_.fps, settings_.resolution, settings_.capture_cursor};
         capture = std::make_unique<ScreenCapture>(
-            settings_.monitor, settings_.fps, [this](IMFSample* sample, Time100ns pts) { on_frame(sample, pts); },
+            options, [this](IMFSample* sample, Time100ns pts) { on_frame(sample, pts); },
             [this](CaptureEvent event, VideoSize) { on_capture_event(event); });
     } catch (const std::exception& e) {
         log::warn("Cannot start screen capture ({}), retrying in {} s", e.what(),
@@ -657,7 +658,7 @@ void Recorder::ensure_encoder() {
     }
     try {
         const VideoEncoderSettings encoder_settings{size, settings_.fps, settings_.video_bitrate_kbps,
-                                                    encoder_preference_, adapter};
+                                                    encoder_preference_, adapter, settings_.quality};
         auto encoder = std::make_unique<VideoEncoder>(
             encoder_settings, manager,
             [this, generation](Packet&& packet, IMFMediaType* type) { on_video_packet(generation, std::move(packet), type); });

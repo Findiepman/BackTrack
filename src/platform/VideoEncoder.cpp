@@ -5,6 +5,7 @@
 #include <codecapi.h>
 #include <mferror.h>
 #include <strmif.h>
+#include <vfwmsgs.h>
 #include <wmcodecdsp.h>
 
 #include <algorithm>
@@ -57,6 +58,52 @@ void set_codec_value(ICodecAPI* codec, const GUID& property, const char* what, V
     if (FAILED(hr)) {
         log::warn("Video encoder refused {}: {}", what, hresult_text(hr));
     }
+}
+
+const char* quality_name(QualityPreset preset) {
+    switch (preset) {
+        case QualityPreset::Performance: return "performance";
+        case QualityPreset::Balanced: return "balanced";
+        case QualityPreset::Quality: return "quality";
+    }
+    return "?";
+}
+
+std::string variant_text(const VARIANT& v) {
+    if (v.vt == VT_UI4) {
+        return std::to_string(v.ulVal);
+    }
+    if (v.vt == VT_UI8) {
+        return std::to_string(v.ullVal);
+    }
+    return std::format("(variant type {})", static_cast<int>(v.vt));
+}
+
+// "50", or why it could not be read.
+std::string read_codec_value(ICodecAPI* codec, const GUID& property) {
+    VARIANT value;
+    VariantInit(&value);
+    const HRESULT hr = codec->GetValue(&property, &value);
+    // AMD answers NO_CURRENT_VALUE for a property nobody set (measured): it then uses its own default.
+    std::string text = SUCCEEDED(hr)                         ? variant_text(value)
+                       : hr == VFW_E_CODECAPI_NO_CURRENT_VALUE ? std::string("not set")
+                                                               : "unreadable, " + hresult_text(hr);
+    VariantClear(&value);
+    return text;
+}
+
+// CODECAPI_AVEncCommonQualityVsSpeed: 0 = fastest, 100 = best quality at the same bitrate.
+// Balanced sets nothing, so it is exactly what every earlier version recorded with. The ends are set
+// as they are, not clamped to GetParameterRange: AMD reports the range as 50..50 yet takes 0 and
+// 100 and reads them back (measured). An encoder that really refuses a value says so in SetValue.
+void set_quality(ICodecAPI* codec, QualityPreset preset, std::string& default_value) {
+    const GUID& property = CODECAPI_AVEncCommonQualityVsSpeed;
+    default_value = read_codec_value(codec, property);
+    if (preset == QualityPreset::Balanced) {
+        return;
+    }
+    set_codec_value(codec, property, "the speed/quality setting",
+                    variant_ui4(preset == QualityPreset::Performance ? 0 : 100));
 }
 
 // §3.6: tell players exactly what the video processor produced, so they do not guess BT.601 or
@@ -315,6 +362,8 @@ void VideoEncoder::configure(IMFTransform* transform) {
     // §3.1: one keyframe per second, no B-frames (decode order = presentation order, so the MP4
     // muxer never reorders), low latency so packets come out immediately.
     ComPtr<ICodecAPI> codec;
+    bool has_quality = false;
+    std::string default_quality;
     if (SUCCEEDED(transform->QueryInterface(IID_PPV_ARGS(&codec)))) {
         set_codec_value(codec.Get(), CODECAPI_AVEncCommonRateControlMode, "constant bitrate",
                         variant_ui4(eAVEncCommonRateControlMode_CBR));
@@ -324,6 +373,13 @@ void VideoEncoder::configure(IMFTransform* transform) {
                         variant_ui4(static_cast<ULONG>(settings_.fps)));
         set_codec_value(codec.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, "zero B-frames", variant_ui4(0));
         set_codec_value(codec.Get(), CODECAPI_AVLowLatencyMode, "low latency mode", variant_bool(true));
+        has_quality = codec->IsSupported(&CODECAPI_AVEncCommonQualityVsSpeed) == S_OK;
+        if (has_quality) {
+            set_quality(codec.Get(), settings_.quality, default_quality);
+        } else {
+            log::info("Video encoder has no speed/quality setting; quality = {} records like balanced",
+                      quality_name(settings_.quality));
+        }
     } else {
         log::warn("Video encoder has no ICodecAPI; GOP length and B-frames use its defaults");
     }
@@ -360,6 +416,13 @@ void VideoEncoder::configure(IMFTransform* transform) {
     BT_CHECK_HR(MFCreateMediaType(&input));
     set_video_basics(input.Get(), MFVideoFormat_NV12, settings_);
     BT_CHECK_HR(transform->SetInputType(input_id_, input.Get(), 0));
+    if (has_quality) {
+        // Read back after the media types, which some encoders reset their properties on: the log
+        // shows what the encoder really runs with.
+        log::info("Video encoder speed/quality: {} for quality = {} (0 fastest, 100 best; its default {})",
+                  read_codec_value(codec.Get(), CODECAPI_AVEncCommonQualityVsSpeed), quality_name(settings_.quality),
+                  default_quality);
+    }
 
     read_stream_info();
 }
