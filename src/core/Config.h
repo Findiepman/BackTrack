@@ -14,6 +14,8 @@ enum class OverlayCorner { TopLeft, TopRight, BottomLeft, BottomRight };
 enum class ThemeId { Night, Harbor, Plum, Moss, Daylight };
 enum class Density { Comfortable, Compact };
 enum class ThumbnailSize { Small, Medium, Large };
+// Where Share uploads a clip (core/ShareUpload.h): catbox.moe keeps it, Litterbox for 72 hours.
+enum class ShareHost { Catbox, Litterbox };
 
 // Ordered by severity so "level <= threshold" means "should be logged".
 enum class LogLevel { Error, Warning, Info, Debug };
@@ -60,6 +62,9 @@ struct Settings {
     bool sound = true;
     bool notification = true;
     bool saved_bar = true;  // the "Saved" bar in the window
+    // [sharing]
+    ShareHost share_host = ShareHost::Catbox;
+    bool share_copy_link = true;  // the link goes to the clipboard when an upload finishes
     // [overlay]: a small status chip on top of the screen, never part of recordings
     bool overlay = true;
     OverlayCorner overlay_corner = OverlayCorner::TopRight;

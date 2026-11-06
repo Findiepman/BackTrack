@@ -122,6 +122,7 @@ void App::open_clip(const std::string& file) {
 
 void App::close_clip() {
     close_export();  // it belongs to the clip that is closing
+    close_share();
     if (!clip_view_) return;
     commit_clip_text();
     if (window_ != nullptr) KillTimer(window_, kPlayerTimer);
@@ -293,7 +294,8 @@ void App::run_clip(const std::string& what, const Rect& anchor) {
     } else if (what == "export") {
         open_export();
     } else if (what == "share") {
-        // Sharing links come later; until then the file, ready to drag into Discord or anywhere.
+        open_share();
+    } else if (what == "show-folder") {
         shell::show_in_folder(clip_path(file));
     } else if (what == "delete") {
         const std::vector<std::string> order = clip_order();
@@ -528,7 +530,7 @@ void App::paint_player(const ClipEntry& clip, const Rect& rect) {
                Align::Center);
         const float bw = button_width(L"Show in folder", glyph::kFolder, true);
         push_button(rect.x + (rect.w - bw) / 2, rect.y + rect.h / 2 + 6, L"Show in folder", glyph::kFolder,
-                    ButtonStyle::Line, true, Action::Clip, "share");
+                    ButtonStyle::Line, true, Action::Clip, "show-folder");
     } else if (!playing) {
         // .big-play: 76 px, dark glass, white triangle.
         const float cx = rect.x + rect.w / 2;

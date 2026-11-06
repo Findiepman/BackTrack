@@ -126,7 +126,7 @@ private:
         SaveNow, TogglePause,
         Sort,
         OpenClip, ToggleFavorite,  // arg: file
-        SavedOpen, SavedFolder, SavedTrash, SavedClose,
+        SavedOpen, SavedFolder, SavedShare, SavedTrash, SavedClose,
         MoreCollections,
         Search,
         Clip,  // a control on the clip page; arg names it
@@ -210,6 +210,24 @@ private:
         std::string message;  // Failed: why
         std::filesystem::path result_path;
         std::uint64_t result_bytes = 0;
+    };
+
+    // The Share window (ShareDialog.cpp): a share copy is made, uploaded, and the link kept.
+    struct ShareView {
+        enum class Stage { Form, Working, Done, Failed };
+        std::string file;
+        std::string title;
+        ShareHost host = ShareHost::Catbox;
+        ExportOptions range;  // in/out of the trim
+        std::optional<ExportSource> source;
+        Stage stage = Stage::Form;
+        std::shared_ptr<std::atomic<double>> progress = std::make_shared<std::atomic<double>>(0.0);
+        std::shared_ptr<std::atomic<bool>> uploading = std::make_shared<std::atomic<bool>>(false);
+        std::shared_ptr<std::atomic<bool>> cancel = std::make_shared<std::atomic<bool>>(false);
+        std::shared_ptr<std::atomic<bool>> finished = std::make_shared<std::atomic<bool>>(false);  // the link exists
+        std::string url;
+        std::string message;  // Failed: why
+        bool copied = false;  // the link went to the clipboard
     };
 
     // Values a Settings page row can show and change; built in SettingsPage.cpp.
@@ -347,6 +365,12 @@ private:
     void close_export();  // cancels a running export
     void run_export(const std::string& what, const Rect& anchor);
     void paint_export(float width, float height);
+    void open_share();
+    void close_share();  // cancels a running share
+    void run_share(const std::string& what, const Rect& anchor);
+    void paint_share(float width, float height);
+    bool copy_text(const std::wstring& text);  // to the clipboard
+    bool dialog_open() const { return export_ || share_; }
     std::vector<std::string> clip_order() const;  // the files of the library view the clip page came from
     void request_filmstrip();
     std::vector<SettingRow> setting_rows();
@@ -476,6 +500,7 @@ private:
     // Clip page.
     std::optional<ClipView> clip_view_;
     std::shared_ptr<ExportView> export_;  // the Export window, while it is open
+    std::shared_ptr<ShareView> share_;  // the Share window, while it is open
     std::string clip_title_drawn_;  // the title the side panel shows, to notice a rename elsewhere
     bool trimming_ = false;
     LPARAM next_player_tag_ = 1;

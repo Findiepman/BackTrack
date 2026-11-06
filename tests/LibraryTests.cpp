@@ -429,7 +429,34 @@ void bookmarks() {
     CHECK(sync.find("new.mp4")->bookmarks == (std::vector<double>{2.5}));
 }
 
+void sharing() {
+    Library lib = sample();
+    CHECK(lib.set_shared("a.mp4", "https://files.catbox.moe/abc.mp4", kNow, 0));
+    CHECK(lib.set_shared("b.mp4", "https://litter.catbox.moe/def.mp4", kNow, kNow + 72 * 3600));
+    CHECK(!lib.set_shared("nope.mp4", "https://files.catbox.moe/x.mp4", kNow, 0));
+    LibraryQuery q;
+    q.view = LibraryView::Shared;
+    q.now = kNow;
+    CHECK_EQ(lib.query(q).size(), std::size_t{2});
+    CHECK_EQ(lib.counts(kNow).shared, std::size_t{2});
+    // The Litterbox link is gone after 72 hours.
+    q.now = kNow + 73 * 3600;
+    CHECK_EQ(lib.query(q).size(), std::size_t{1});
+    CHECK_EQ(lib.counts(kNow + 73 * 3600).shared, std::size_t{1});
+    // Kept through library.json.
+    const Library back = Library::from_json(*parse_json(lib.to_json().dump()).value);
+    CHECK_EQ(back.find("a.mp4")->share_url, std::string("https://files.catbox.moe/abc.mp4"));
+    CHECK_EQ(back.find("b.mp4")->share_expires, kNow + 72 * 3600);
+    CHECK_EQ(back.find("a.mp4")->shared_at, kNow);
+    // A link to anywhere else in a hand-edited file is dropped, the clip kept.
+    const Library odd = Library::from_json(
+        *parse_json(R"({"clips":[{"file":"x.mp4","share_url":"https://evil.example/x.mp4","shared_at":5}]})").value);
+    CHECK(odd.find("x.mp4") != nullptr && odd.find("x.mp4")->share_url.empty());
+    CHECK(sample().to_json().dump().find("share_url") == std::string::npos);
+}
+
 int main() {
+    sharing();
     bookmarks();
     folder_sync();
     saved_clip_merges_with_folder_sync();

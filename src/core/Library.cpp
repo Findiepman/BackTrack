@@ -133,7 +133,7 @@ void Library::add_saved_clip(const ClipEntry& clip) {
         existing->height = clip.height;
         existing->source = clip.source;
         existing->bookmarks = clip.bookmarks;
-        return;
+        return;  // never shared yet: a clip this new has no link
     }
     clips_.push_back(clip);
 }
@@ -290,6 +290,7 @@ std::vector<std::size_t> Library::query(const LibraryQuery& q) const {
         const ClipEntry& clip = clips_[i];
         if ((q.view == LibraryView::Trash) != in_trash(clip)) continue;
         if (q.view == LibraryView::Favorites && !clip.favorite) continue;
+        if (q.view == LibraryView::Shared && !share_link_live(clip, q.now)) continue;
         if (q.view == LibraryView::Recent && clip.created < q.now - kRecentDays * kSecondsPerDay) continue;
         if (q.view == LibraryView::Collection &&
             std::find(clip.collections.begin(), clip.collections.end(), q.collection) == clip.collections.end()) {
@@ -341,6 +342,7 @@ LibraryCounts Library::counts(std::int64_t now) const {
         }
         ++c.all;
         if (clip.favorite) ++c.favorites;
+        if (share_link_live(clip, now)) ++c.shared;
         if (clip.created >= now - kRecentDays * kSecondsPerDay) ++c.recent;
     }
     return c;
@@ -426,6 +428,11 @@ Json Library::to_json() const {
         item.set("height", Json(clip.height));
         if (!clip.source.empty()) item.set("source", Json(clip.source));
         if (clip.trashed_at) item.set("trashed_at", Json(*clip.trashed_at));
+        if (!clip.share_url.empty()) {
+            item.set("share_url", Json(clip.share_url));
+            item.set("shared_at", Json(clip.shared_at));
+            if (clip.share_expires != 0) item.set("share_expires", Json(clip.share_expires));
+        }
         if (!clip.bookmarks.empty()) {
             Json marks{Json::Array{}};
             for (const double b : clip.bookmarks) marks.push(Json(b));
@@ -491,9 +498,30 @@ Library Library::from_json(const Json& json) {
             if (mark.is_number()) marks.push_back(mark.as_number());
         }
         clip.bookmarks = clean_bookmarks(std::move(marks), clip.duration_s);
+        // Only links of the hosts Share uses: a hand-edited file must not make the window open
+        // some other address when "Copy link" is pressed.
+        const std::string url = item["share_url"].as_string();
+        if (url.starts_with("https://files.catbox.moe/") || url.starts_with("https://litter.catbox.moe/")) {
+            clip.share_url = url;
+            clip.shared_at = item["shared_at"].as_int();
+            clip.share_expires = std::max<std::int64_t>(0, item["share_expires"].as_int());
+        }
         library.clips_.push_back(std::move(clip));
     }
     return library;
+}
+
+bool Library::set_shared(std::string_view file, std::string_view url, std::int64_t at, std::int64_t expires) {
+    ClipEntry* clip = find(file);
+    if (clip == nullptr) return false;
+    clip->share_url = std::string(url);
+    clip->shared_at = at;
+    clip->share_expires = expires;
+    return true;
+}
+
+bool share_link_live(const ClipEntry& clip, std::int64_t now) {
+    return !clip.share_url.empty() && (clip.share_expires == 0 || clip.share_expires > now);
 }
 
 bool Library::set_bookmarks(std::string_view file, std::vector<double> seconds) {

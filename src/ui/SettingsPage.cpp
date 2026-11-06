@@ -1198,45 +1198,16 @@ std::vector<App::SettingRow> App::setting_rows() {
         add(std::move(row));
     }
 
-    // Sharing & Accounts: all later.
-    {
-        SettingRow row;
-        row.id = "accounts";
-        row.section = "sharing";
-        row.kind = Kind::Custom;
-        row.label = L"Connected accounts";
-        row.full = true;
-        row.soon = true;
-        row.keywords = L"discord youtube x twitter accounts connect";
-        row.height = 3 * 52.0f;
-        row.paint = [this](const Rect& area) {
-            Graphics& g = *graphics_;
-            const struct {
-                const wchar_t* name;
-                const wchar_t* letter;
-                std::uint32_t color;
-            } accounts[] = {{L"Discord", L"D", 0x5865f2}, {L"YouTube", L"Y", 0xff0033}, {L"X", L"X", 0x2a2f3a}};
-            float y = area.y;
-            for (const auto& a : accounts) {
-                g.fill_round(Rect{area.x, y + 6, 36, 36}, 10, Color::hex(a.color, 0.5f));
-                g.text(a.letter, Rect{area.x, y + 6, 36, 36}, TextStyle{14, Weight::Bold}, Color::hex(0xffffff, 0.6f),
-                       Align::Center);
-                g.text(a.name, Rect{area.x + 48, y + 6, 200, 18}, TextStyle{14, Weight::Semibold}, kInk.with_alpha(0.5f));
-                g.text(L"Not connected", Rect{area.x + 48, y + 24, 200, 18}, TextStyle{12.5f}, kMute.with_alpha(0.6f));
-                const float w = button_width(L"Connect", 0, true);
-                push_button(area.right() - w, y + 9, L"Connect", 0, ButtonStyle::Line, true, Action::Setting, "connect",
-                            true);
-                y += 52;
-            }
-        };
-        add(std::move(row));
-    }
-    soon_row("sharing", "privacy", Kind::Segmented, L"Default privacy", L"New links start out as",
-             {L"Public", L"Unlisted", L"Private"}, 1);
-    soon_row("sharing", "autoCopy", Kind::Toggle, L"Copy the link when an upload finishes",
-             L"So you can paste it straight away.");
-    soon_row("sharing", "autoUpload", Kind::Toggle, L"Upload new clips automatically",
-             L"Every saved clip is uploaded in the background.");
+    // Sharing & Accounts: links through catbox.moe (core/ShareUpload.h); accounts later.
+    enum_row("sharing", "shareHost", L"Upload shared clips to",
+             L"catbox.moe keeps a clip (it cannot be deleted again); Litterbox deletes it after 3 days. Anyone with "
+             L"the link can watch it. Discord plays both links in the chat.",
+             {L"catbox.moe", L"Litterbox (3 days)"}, &Settings::share_host)
+        .keywords = L"share link discord catbox litterbox upload";
+    toggle_row("sharing", "autoCopy", L"Copy the link when an upload finishes", L"So you can paste it straight away.",
+               settings_.share_copy_link, defaults.share_copy_link, [](Settings& s, bool v) { s.share_copy_link = v; })
+        .keywords = L"copy link clipboard";
+    soon_row("sharing", "accounts", Kind::Toggle, L"Connected accounts", L"YouTube and others are coming later.");
 
     // Notifications & Overlay.
     toggle_row("notify", "toastSave", L"Show a message when a clip is saved",

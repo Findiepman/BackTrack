@@ -374,6 +374,8 @@ Settings non_default_settings() {
     s.density = Density::Compact;
     s.thumbnail_size = ThumbnailSize::Large;
     s.reduce_motion = true;
+    s.share_host = ShareHost::Litterbox;
+    s.share_copy_link = false;
     return s;
 }
 

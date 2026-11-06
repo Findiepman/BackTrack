@@ -386,6 +386,7 @@ void App::run_ui_tasks() {
 
 void App::release() {
     if (export_) export_->cancel->store(true);  // stops within a second; the worker is joined below
+    if (share_) share_->cancel->store(true);
     {
         // A trim that is being written finishes (never a half file); queued jobs are dropped.
         std::lock_guard lock(worker_mutex_);
@@ -859,7 +860,7 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
         case kMsgSaved: take_saved(); return 0;
         case kMsgWork: run_ui_tasks(); return 0;
         case kMsgExport:
-            if (export_) invalidate();
+            if (dialog_open()) invalidate();
             return 0;
         case kMsgUpdate:
             if (page_ == Page::Settings) invalidate();  // the update row shows the state
@@ -1234,7 +1235,8 @@ void App::run_cleanup() {
     std::erase_if(due, [this](const std::string& file) {
         // Nor the clip being exported: it waits for the next run instead of ending the export.
         return cleanup_skipped_.contains(file) ||
-               (export_ && export_->stage == ExportView::Stage::Running && export_->file == file);
+               (export_ && export_->stage == ExportView::Stage::Running && export_->file == file) ||
+               (share_ && share_->stage == ShareView::Stage::Working && share_->file == file);
     });
     if (due.empty()) return;
     if (editing_) end_edit(true);
@@ -1705,6 +1707,7 @@ std::wstring App::view_title() const {
         case LibraryView::Favorites: return L"Favorites";
         case LibraryView::Recent: return L"Recent";
         case LibraryView::Trash: return L"Trash";
+        case LibraryView::Shared: return L"Shared";
         case LibraryView::Collection: {
             const Collection* c = library_.find_collection(view_collection_);
             return c != nullptr ? to_wide(c->name) : L"Collection";
@@ -1845,17 +1848,18 @@ void App::paint() {
         case Page::Record: paint_record_page(main); break;
         case Page::Uploads:
             paint_placeholder_page(main, L"Uploads",
-                                   L"Sharing links and connected accounts are coming later. For now, Share shows the "
-                                   L"clip in Explorer so you can drag it into Discord or anywhere else.");
+                                   L"Clips you shared are listed under Shared in the library, with their links. "
+                                   L"Connected accounts (YouTube and others) are coming later.");
             break;
         case Page::Settings: paint_settings_page(main); break;
     }
     paint_sidebar(h);
     paint_title_bar(w);
     // The title bar's search box is a window of its own above the scrim: off while the dialog is open.
-    if ((IsWindowEnabled(search_box_) != FALSE) == static_cast<bool>(export_)) EnableWindow(search_box_, !export_);
-    if (export_) {
+    if ((IsWindowEnabled(search_box_) != FALSE) == dialog_open()) EnableWindow(search_box_, !dialog_open());
+    if (dialog_open()) {
         paint_export(w, h);
+        paint_share(w, h);
         // The page's text boxes are windows of their own and would show through the dialog.
         for (auto& [control, place] : controls_) place.second = false;
     }
@@ -1983,8 +1987,7 @@ void App::paint_sidebar(float height) {
     view_item(glyph::kAllClips, L"All clips", counts.all, LibraryView::All, "all");
     view_item(glyph::kFavorite, L"Favorites", counts.favorites, LibraryView::Favorites, "favorites");
     view_item(glyph::kRecent, L"Recent", counts.recent, LibraryView::Recent, "recent");
-    nav_item(Rect{x, y, w, kNavHeight}, glyph::kShare, L"Shared", 0, false, Action::Page, "uploads", std::nullopt, true);
-    y += kNavHeight + 1;
+    view_item(glyph::kShare, L"Shared", counts.shared, LibraryView::Shared, "shared");
     view_item(glyph::kTrash, L"Trash", counts.trash, LibraryView::Trash, "trash");
 
     // The bottom cards claim their space first; collections get what is left.
@@ -2236,6 +2239,7 @@ void App::paint_library(const Rect& area) {
             case LibraryView::Recent: text = std::format(L"Clips from the last {} days show up here.", kRecentDays); break;
             case LibraryView::Trash: text = L"Clips you delete wait here before they go to the Recycle Bin."; break;
             case LibraryView::Collection: text = L"Right-click a clip and choose Collections to add it here."; break;
+            case LibraryView::Shared: text = L"Open a clip and press Share to get a link for Discord."; break;
         }
         g.icon(glyph::kVideo, Rect{grid_area_.x, grid_area_.y + 70, grid_area_.w, 40}, 28, kOff);
         g.text(title, Rect{grid_area_.x, grid_area_.y + 116, grid_area_.w, 26}, TextStyle{16, Weight::Semibold, true},
@@ -2420,7 +2424,9 @@ void App::paint_saved_bar(const Rect& area) {
     bx += 84 + 2;
     button(Rect{bx, by, 118, kControl}, L"Open folder", glyph::kFolder, Action::SavedFolder, {});
     bx += 118 + 2;
-    button(Rect{bx, by, 86, kControl}, L"Share", glyph::kShare, Action::SavedFolder, "share");
+    button(Rect{bx, by, 86, kControl}, L"Share", glyph::kShare, exists && !bar.file.empty() ? Action::SavedShare
+                                                                                          : Action::SavedFolder,
+           "share");
     bx += 86 + 2;
     if (exists && clip != nullptr && !clip->trashed_at) {
         button(Rect{bx, by, 84, kControl}, L"Delete", glyph::kTrash, Action::SavedTrash, {}, false, true);
@@ -2505,7 +2511,7 @@ void App::on_click(float x, float y, bool right) {
 }
 
 void App::on_wheel(float delta) {
-    if (export_ && !menu_) return;  // the page behind the Export window stays put
+    if (dialog_open() && !menu_) return;  // the page behind the Export or Share window stays put
     if (menu_) {
         menu_->scroll = std::max(0.0f, menu_->scroll + delta / 3);  // paint_menu clamps the end
         hover_.reset();
@@ -2534,8 +2540,11 @@ bool App::on_key(WPARAM key) {
         if (key == VK_ESCAPE) close_menu();
         return true;  // keys do not reach the page under an open menu
     }
-    if (export_) {
-        if (key == VK_ESCAPE) close_export();
+    if (dialog_open()) {
+        if (key == VK_ESCAPE) {
+            close_export();
+            close_share();
+        }
         return true;  // the clip page under the Export window does not react
     }
     if (page_ == Page::Clip && clip_view_) {
@@ -2590,7 +2599,7 @@ void App::run(const Hit& hit, bool right, POINT screen) {
             break;
         }
         case Action::Search:
-            if (!export_) SetFocus(search_box_);  // not behind the Export window
+            if (!dialog_open()) SetFocus(search_box_);  // not behind the Export or Share window
             break;
         case Action::Minimize: ShowWindow(window_, SW_MINIMIZE); break;
         case Action::Maximize: ShowWindow(window_, IsZoomed(window_) ? SW_RESTORE : SW_MAXIMIZE); break;
@@ -2600,6 +2609,7 @@ void App::run(const Hit& hit, bool right, POINT screen) {
                 collection_menu(hit.arg, screen);
             } else if (hit.arg == "all") set_view(LibraryView::All);
             else if (hit.arg == "favorites") set_view(LibraryView::Favorites);
+            else if (hit.arg == "shared") set_view(LibraryView::Shared);
             else if (hit.arg == "recent") set_view(LibraryView::Recent);
             else if (hit.arg == "trash") set_view(LibraryView::Trash);
             else set_view(LibraryView::Collection, hit.arg);
@@ -2647,6 +2657,12 @@ void App::run(const Hit& hit, bool right, POINT screen) {
         case Action::SavedFolder:
             if (saved_bar_) shell::show_in_folder(saved_bar_->path);
             break;
+        case Action::SavedShare:
+            if (saved_bar_ && library_.find(saved_bar_->file) != nullptr) {
+                open_clip(saved_bar_->file);
+                open_share();
+            }
+            break;
         case Action::SavedTrash:
             if (saved_bar_ && !saved_bar_->file.empty()) {
                 move_to_trash(saved_bar_->file);
@@ -2659,6 +2675,7 @@ void App::run(const Hit& hit, bool right, POINT screen) {
         case Action::MoreCollections: more_collections_menu(anchor); break;
         case Action::Clip:
             if (hit.arg.starts_with("ex-")) run_export(hit.arg, anchor);
+            else if (hit.arg.starts_with("sh-")) run_share(hit.arg, anchor);
             else run_clip(hit.arg, anchor);
             break;
         case Action::Record: run_record(hit.arg, anchor); break;
@@ -2759,6 +2776,12 @@ void App::clip_menu(const std::string& file, POINT) {
                                       new_files_.erase(file);
                                       if (clips_folder_available()) shell::open(clip_path(file));
                                   }});
+    if (const ClipEntry* c = library_.find(file); c != nullptr && share_link_live(*c, now_unix())) {
+        const std::wstring url = to_wide(c->share_url);
+        menu.items.push_back(MenuItem{L"Copy share link", [this, url] {
+                                          if (copy_text(url)) show_notice(L"Link copied. Paste it in Discord.");
+                                      }});
+    }
     menu.items.push_back(MenuItem{L"Show in folder", [this, file] {
                                       if (clips_folder_available()) shell::show_in_folder(clip_path(file));
                                   }});

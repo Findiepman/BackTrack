@@ -25,7 +25,7 @@ if not exist "%OUT%\core" mkdir "%OUT%\core"
 cl %FLAGS% /c src\core\*.cpp /Fo%OUT%\core\ >nul || (echo Compiling core failed & exit /b 1)
 
 set FAILED=0
-for %%t in (ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests AudioFifoTests AudioMixTests NoiseSuppressorTests ThemeColorsTests CaptureMathTests UpdateCheckTests ExportPlanTests) do (
+for %%t in (ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests AudioFifoTests AudioMixTests NoiseSuppressorTests ThemeColorsTests CaptureMathTests UpdateCheckTests ExportPlanTests ShareUploadTests) do (
     if exist %OUT%\%%t.exe del /q %OUT%\%%t.exe
     cl %FLAGS% "/DBT_SOURCE_DIR=\"%ROOT%\"" tests\%%t.cpp %OUT%\core\*.obj /Fo%OUT%\ /Fe%OUT%\%%t.exe >nul || (echo Compiling %%t failed & set FAILED=1)
     if exist %OUT%\%%t.exe %OUT%\%%t.exe || set FAILED=1

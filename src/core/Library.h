@@ -33,6 +33,9 @@ struct ClipEntry {
     std::string source;  // what was recorded, e.g. "Display 1"; empty for clips found on disk
     std::optional<std::int64_t> trashed_at;  // Unix seconds; set while the clip is in the Trash
     std::vector<double> bookmarks;  // seconds from the clip's start, sorted (the bookmark hotkey)
+    std::string share_url;  // the link from Share; empty: never shared
+    std::int64_t shared_at = 0;  // Unix seconds
+    std::int64_t share_expires = 0;  // Unix seconds the host deletes it; 0: it stays
 };
 
 struct Collection {
@@ -48,7 +51,7 @@ struct FolderFile {
     std::int64_t modified = 0;  // Unix seconds
 };
 
-enum class LibraryView { All, Favorites, Recent, Trash, Collection };
+enum class LibraryView { All, Favorites, Recent, Trash, Collection, Shared };
 enum class ClipSort { Newest, Oldest, Longest, Shortest, Largest, Name };
 
 struct LibraryQuery {
@@ -83,6 +86,7 @@ struct LibraryCounts {
     std::size_t favorites = 0;
     std::size_t recent = 0;
     std::size_t trash = 0;
+    std::size_t shared = 0;  // with a link that still works
     std::int64_t bytes = 0;  // every clip on disk, Trash included
 };
 
@@ -113,6 +117,8 @@ public:
     bool set_title(std::string_view file, std::string_view title);
     bool set_notes(std::string_view file, std::string_view notes);
     bool set_bookmarks(std::string_view file, std::vector<double> seconds);  // cleaned up by clean_bookmarks
+    // After an upload: the link, when, and when the host deletes it (0: never).
+    bool set_shared(std::string_view file, std::string_view url, std::int64_t at, std::int64_t expires);
     bool add_tag(std::string_view file, std::string_view tag);  // trimmed; empty or duplicate ignored
     bool remove_tag(std::string_view file, std::string_view tag);
     bool move_to_trash(std::string_view file, std::int64_t now);
@@ -174,5 +180,8 @@ std::vector<double> clean_bookmarks(std::vector<double> seconds, double length);
 // The bookmarks that fall inside a piece [start, start + length) of a longer timeline, as offsets
 // from its start: a saved clip out of the replay buffer, a trimmed clip out of its original.
 std::vector<double> bookmarks_within(const std::vector<double>& marks, double start, double length);
+
+// A link that still works at `now` (Litterbox links stop after 72 hours).
+bool share_link_live(const ClipEntry& clip, std::int64_t now);
 
 }  // namespace bt

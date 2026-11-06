@@ -20,6 +20,7 @@ constexpr std::array<std::string_view, 4> kCornerNames = {"top_left", "top_right
 constexpr std::array<std::string_view, 5> kThemeNames = {"night", "harbor", "plum", "moss", "daylight"};
 constexpr std::array<std::string_view, 2> kDensityNames = {"comfortable", "compact"};
 constexpr std::array<std::string_view, 3> kThumbnailNames = {"small", "medium", "large"};
+constexpr std::array<std::string_view, 2> kShareHostNames = {"catbox", "litterbox"};
 
 // §5.2: shorter than 5 s is barely more than one GOP, longer than 300 s at 20 Mbit/s keeps
 // 750 MB in memory.
@@ -235,6 +236,10 @@ public:
             boolean(s_.notification);
         } else if (id == "feedback.saved_bar") {
             boolean(s_.saved_bar);
+        } else if (id == "sharing.host") {
+            choice(s_.share_host, kShareHostNames);
+        } else if (id == "sharing.copy_link") {
+            boolean(s_.share_copy_link);
         } else if (id == "overlay.show") {
             boolean(s_.overlay);
         } else if (id == "overlay.position") {
@@ -629,6 +634,13 @@ notification = true
 ; Show the "Saved" bar in the window.
 saved_bar = true
 
+[sharing]
+; Where Share uploads a clip: catbox (kept; anyone with the link can watch it, it cannot be
+; deleted) or litterbox (deleted after 72 hours).
+host = catbox
+; Copy the link when an upload finishes.
+copy_link = true
+
 [overlay]
 ; A small status chip on top of the screen. It is never part of recordings.
 show = true
@@ -709,7 +721,7 @@ struct KnownKey {
 };
 
 // In the order of the default file, so appended keys and sections follow it.
-constexpr std::array<KnownKey, 41> kKnownKeys = {{
+constexpr std::array<KnownKey, 43> kKnownKeys = {{
     {"general", "start_minimized", [](const Settings& s) { return bool_text(s.start_minimized); }},
     {"general", "auto_update", [](const Settings& s) { return bool_text(s.auto_update); }},
     {"clip", "seconds", [](const Settings& s) { return std::to_string(s.clip_seconds); }},
@@ -744,6 +756,8 @@ constexpr std::array<KnownKey, 41> kKnownKeys = {{
     {"feedback", "sound", [](const Settings& s) { return bool_text(s.sound); }},
     {"feedback", "notification", [](const Settings& s) { return bool_text(s.notification); }},
     {"feedback", "saved_bar", [](const Settings& s) { return bool_text(s.saved_bar); }},
+    {"sharing", "host", [](const Settings& s) { return name_of(s.share_host, kShareHostNames); }},
+    {"sharing", "copy_link", [](const Settings& s) { return bool_text(s.share_copy_link); }},
     {"overlay", "show", [](const Settings& s) { return bool_text(s.overlay); }},
     {"overlay", "position", [](const Settings& s) { return name_of(s.overlay_corner, kCornerNames); }},
     {"overlay", "opacity", [](const Settings& s) { return std::to_string(s.overlay_opacity); }},
