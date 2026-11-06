@@ -48,6 +48,10 @@
 #include <utility>
 #include <vector>
 
+namespace bt {
+struct RepairResult;
+}
+
 namespace bt::ui {
 
 struct AppPaths {
@@ -232,6 +236,23 @@ private:
         bool copied = false;  // the link went to the clipboard
     };
 
+    // "Repair clips from other programs" in Settings › Storage (RepairClips.cpp).
+    struct RepairView {
+        enum class Stage { Scanning, Found, Working, Done };
+        Stage stage = Stage::Scanning;
+        std::filesystem::path folder;  // the clips folder the check ran on
+        std::vector<std::string> files;  // Found, Working: the clips that need a repair
+        std::int64_t total_bytes = 0;  // their size
+        std::int64_t free_bytes = -1;  // free on the clips drive; -1 unknown
+        std::size_t next = 0;  // Working: index into files
+        std::string current;  // Working: the clip being repaired
+        std::shared_ptr<std::atomic<double>> clip_progress = std::make_shared<std::atomic<double>>(0.0);
+        std::shared_ptr<std::atomic<bool>> cancel = std::make_shared<std::atomic<bool>>(false);
+        std::size_t repaired = 0;
+        std::size_t skipped = 0;
+        std::vector<std::pair<std::string, std::string>> failed;  // file, why
+    };
+
     // Values a Settings page row can show and change; built in SettingsPage.cpp.
     struct SettingRow;
 
@@ -373,6 +394,19 @@ private:
     void paint_share(float width, float height);
     bool copy_text(const std::wstring& text);  // to the clipboard
     bool dialog_open() const { return export_ || share_; }
+    bool clip_in_use(const std::string& file) const;  // open on the clip page, exported or shared
+    void start_repair_scan(bool quiet);  // quiet: after a folder change, only a notice when some need it
+    void start_repair();
+    void cancel_repair();
+    void repair_next();
+    void finish_repair();
+    void complete_repair_clip(const std::shared_ptr<RepairView>& view, const std::string& file,
+                              const std::filesystem::path& source, const std::filesystem::path& repaired,
+                              const RepairResult& result);
+    void run_repair(const std::string& what);
+    bool repairing() const { return repair_ && repair_->stage == RepairView::Stage::Working; }
+    float repair_row_height() const;
+    void paint_repair_row(const Rect& area);
     std::vector<std::string> clip_order() const;  // the files of the library view the clip page came from
     void request_filmstrip();
     std::vector<SettingRow> setting_rows();
@@ -503,6 +537,7 @@ private:
     std::optional<ClipView> clip_view_;
     std::shared_ptr<ExportView> export_;  // the Export window, while it is open
     std::shared_ptr<ShareView> share_;  // the Share window, while it is open
+    std::shared_ptr<RepairView> repair_;  // a repair check or run, and its result until checked again
     std::string clip_title_drawn_;  // the title the side panel shows, to notice a rename elsewhere
     bool trimming_ = false;
     LPARAM next_player_tag_ = 1;

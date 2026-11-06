@@ -343,8 +343,8 @@ CleanupPolicy App::cleanup_policy() const {
 void App::change_clips_folder() {
     // Also when the configured folder is gone for good (unplugged drive): this is the way out.
     if (shell_busy_ || finished_) return;
-    if (trimming_ || recycling_) {
-        show_notice(L"Wait a moment until the clip being saved or removed is done, then change the folder.");
+    if (trimming_ || recycling_ || repairing()) {
+        show_notice(L"Wait a moment until the clip being saved, removed or repaired is done, then change the folder.");
         return;
     }
     const bool have_folder = !recorder_->output_dir_is_fallback();
@@ -438,7 +438,14 @@ void App::change_clips_folder() {
         throw;
     }
     restart_recorder();  // now, so the library shows the new folder at once
-    if (quit_pending_) quit();
+    if (quit_pending_) {
+        quit();
+        return;
+    }
+    if (repair_) repair_->cancel->store(true);
+    repair_.reset();  // a check of the old folder says nothing about the new one
+    scan_folder();
+    start_repair_scan(true);  // clips from another program in it: say they can be repaired
 }
 
 void App::cancel_hotkey_capture() {
@@ -1198,6 +1205,20 @@ std::vector<App::SettingRow> App::setting_rows() {
         add(std::move(row));
     }
 
+    {
+        SettingRow row;
+        row.id = "repair";
+        row.section = "storage";
+        row.kind = Kind::Custom;
+        row.label = L"Repair clips from other programs";
+        row.description = L"Mixes the mic of Medal and similar apps into the main sound. Originals go to \"Before repair\".";
+        row.keywords = L"repair medal mic microphone audio sound track fix";
+        row.full = true;
+        row.height = repair_row_height();
+        row.paint = [this](const Rect& area) { paint_repair_row(area); };
+        add(std::move(row));
+    }
+
     // Sharing & Accounts: links through catbox.moe (core/ShareUpload.h); accounts later.
     enum_row("sharing", "shareHost", L"Upload shared clips to",
              L"catbox.moe keeps a clip (it cannot be deleted again); Litterbox deletes it after 3 days. Anyone with "
@@ -1403,6 +1424,10 @@ void App::run_setting(const std::string& what, const Rect& anchor) {
     }
     if (what == "folder-change") {
         change_clips_folder();
+        return;
+    }
+    if (what.starts_with("repair-")) {
+        run_repair(what);
         return;
     }
     if (what == "folder-open") {

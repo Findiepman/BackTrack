@@ -386,6 +386,7 @@ void App::run_ui_tasks() {
 
 void App::release() {
     if (export_) export_->cancel->store(true);  // stops within a second; the worker is joined below
+    if (repair_) repair_->cancel->store(true);
     if (share_) {
         share_->cancel->store(true);
         share_->abort->abort();  // a stalled upload must not hold up quitting
@@ -863,7 +864,7 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
         case kMsgSaved: take_saved(); return 0;
         case kMsgWork: run_ui_tasks(); return 0;
         case kMsgExport:
-            if (dialog_open()) invalidate();
+            if (dialog_open() || (repairing() && page_ == Page::Settings)) invalidate();
             return 0;
         case kMsgUpdate:
             if (page_ == Page::Settings) invalidate();  // the update row shows the state
@@ -1239,7 +1240,8 @@ void App::run_cleanup() {
         // Nor the clip being exported: it waits for the next run instead of ending the export.
         return cleanup_skipped_.contains(file) ||
                (export_ && export_->stage == ExportView::Stage::Running && export_->file == file) ||
-               (share_ && share_->stage == ShareView::Stage::Working && share_->file == file);
+               (share_ && share_->stage == ShareView::Stage::Working && share_->file == file) ||
+               (repairing() && repair_->current == file);
     });
     if (due.empty()) return;
     if (editing_) end_edit(true);
@@ -2697,6 +2699,10 @@ void App::move_to_trash(const std::string& file) {
 
 void App::recycle_now(const std::string& file) {
     if (!clips_folder_available() || recycling_ || library_.find(file) == nullptr) return;
+    if (repairing() && repair_->current == file) {
+        show_notice(L"This clip is being repaired. Delete it when the repair is done.");
+        return;
+    }
     if (clip_view_ && clip_view_->file == file) close_clip();  // the player holds the file open
     recycling_ = true;
     const std::vector<fs::path> failed = shell::recycle({clip_path(file)});
