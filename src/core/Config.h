@@ -7,6 +7,13 @@
 namespace bt {
 
 enum class EncoderPreference { Auto, Hardware, Software };
+// The encoder's speed/quality trade-off at the same bitrate (CODECAPI_AVEncCommonQualityVsSpeed).
+enum class QualityPreset { Performance, Balanced, Quality };
+enum class OverlayCorner { TopLeft, TopRight, BottomLeft, BottomRight };
+// The colour presets of the mockup (ST_PRESETS), in its order.
+enum class ThemeId { Night, Harbor, Plum, Moss, Daylight };
+enum class Density { Comfortable, Compact };
+enum class ThumbnailSize { Small, Medium, Large };
 
 // Ordered by severity so "level <= threshold" means "should be logged".
 enum class LogLevel { Error, Warning, Info, Debug };
@@ -15,8 +22,10 @@ enum class LogLevel { Error, Warning, Info, Debug };
 struct Settings {
     // [general]
     bool start_minimized = false;  // when started with Windows, open in the tray
+    bool auto_update = true;  // download new versions and install them when Backtrack closes
     // [clip]
-    int clip_seconds = 30;
+    int clip_seconds = 30;  // the replay buffer's length
+    int save_seconds = 0;  // what the save hotkey keeps; 0 or more than clip_seconds: the whole buffer
     std::string output_dir = "%USERPROFILE%\\Videos\\Backtrack";
     std::string filename = "clip_%Y-%m-%d_%H-%M-%S.mp4";
     // [storage]
@@ -26,15 +35,22 @@ struct Settings {
     std::string save_hotkey = "F8";  // always a string parse_hotkey accepts
     std::string mic_mute_hotkey = "Alt+F7";  // empty: no mute key; else a Global hotkey
     std::string push_to_talk_key = "V";  // a Held key (parse_hotkey with HotkeyUse::Held)
+    std::string overlay_hotkey = "Alt+O";  // shows or hides the overlay; empty: no key
+    std::string bookmark_hotkey = "Alt+B";  // marks a moment in the replay buffer; empty: no key
     // [video]
     int monitor = 0;
     int fps = 60;
     int video_bitrate_kbps = 20000;
     EncoderPreference encoder = EncoderPreference::Auto;
+    int resolution = 0;  // output height: 0 = the display's own size, else 720, 1080 or 1440 (never scaled up)
+    QualityPreset quality = QualityPreset::Balanced;
+    bool capture_cursor = true;  // draw the mouse pointer into the video
     // [audio]
     bool audio_enabled = true;  // what you hear (game, voice chat, music)
     int audio_bitrate_kbps = 160;
     int system_volume = 100;  // percent, 0..200, of what you hear in the clip
+    std::string system_device;  // playback endpoint id to record; empty: the Windows default (followed when it changes)
+    bool separate_tracks = false;  // besides the mixed track: one with only the system sound, one with only the mic
     bool mic_enabled = true;
     std::string mic_device;  // Windows endpoint id; empty: the Windows default microphone (followed when it changes)
     int mic_volume = 100;  // percent, 0..200
@@ -44,6 +60,15 @@ struct Settings {
     bool sound = true;
     bool notification = true;
     bool saved_bar = true;  // the "Saved" bar in the window
+    // [overlay]: a small status chip on top of the screen, never part of recordings
+    bool overlay = true;
+    OverlayCorner overlay_corner = OverlayCorner::TopRight;
+    int overlay_opacity = 85;  // percent, 20..100
+    // [appearance]
+    ThemeId theme = ThemeId::Night;
+    Density density = Density::Comfortable;
+    ThumbnailSize thumbnail_size = ThumbnailSize::Medium;
+    bool reduce_motion = false;
     // [logging]
     LogLevel log_level = LogLevel::Info;
 

@@ -358,6 +358,22 @@ Settings non_default_settings() {
     s.notification = false;
     s.saved_bar = false;
     s.log_level = LogLevel::Debug;
+    s.auto_update = false;
+    s.save_seconds = 60;
+    s.overlay_hotkey = "";
+    s.bookmark_hotkey = "Ctrl+Alt+B";
+    s.resolution = 720;
+    s.quality = QualityPreset::Quality;
+    s.capture_cursor = false;
+    s.system_device = "{0.0.0.00000000}.{aa1a3b0e-1111-4c44-9d9d-0123456789ab}";
+    s.separate_tracks = true;
+    s.overlay = false;
+    s.overlay_corner = OverlayCorner::BottomLeft;
+    s.overlay_opacity = 40;
+    s.theme = ThemeId::Daylight;
+    s.density = Density::Compact;
+    s.thumbnail_size = ThumbnailSize::Large;
+    s.reduce_motion = true;
     return s;
 }
 
@@ -439,7 +455,8 @@ void writer_keeps_everything_else() {
                                    "turbo = yes\r\nencoder=auto\r\n"));
     CHECK(bt_test::contains(after, "# hash\r\n[gpu]\r\nboost = 1\r\n"));
     // Missing [video] keys go after the last key line of the section, before the comment.
-    CHECK(bt_test::contains(after, "encoder=auto\r\nmonitor = 0\r\nbitrate_kbps = 20000\r\n# hash"));
+    CHECK(bt_test::contains(after, "encoder=auto\r\nmonitor = 0\r\nbitrate_kbps = 20000\r\nresolution = native\r\n"
+                                   "quality = balanced\r\ncursor = true\r\n# hash"));
     // No bare LF anywhere.
     for (std::size_t i = 0; i < after.size(); ++i) {
         if (after[i] == '\n') CHECK(i > 0 && after[i - 1] == '\r');
@@ -471,7 +488,7 @@ void writer_duplicates_and_missing() {
     // Repeated section: the later block holds the key load_settings uses.
     const std::string sections = update_ini("[clip]\nseconds = 20\n[audio]\n[clip]\nseconds = 40\n", s);
     CHECK(sections.starts_with("[clip]\nseconds = 20\n[audio]\nenabled = true\nbitrate_kbps = 160\nsystem_volume = 100\n"
-                               "mic = true\nmic_device = \nmic_volume = 100\nnoise_suppression = true\n"
+                               "system_device = \nseparate_tracks = false\nmic = true\nmic_device = \nmic_volume = 100\nnoise_suppression = true\n"
                                "push_to_talk = false\n[clip]\nseconds = 60\n"));
     if (!sections.starts_with("[clip]\nseconds = 20\n[audio]\nenabled = true\nbitrate_kbps = 160\nsystem_volume = 100\n")) {
         std::printf("    written:\n%s\n", sections.c_str());
@@ -552,7 +569,75 @@ void mic_settings() {
     CHECK(bad.warnings.size() == 2);
 }
 
+void round_eleven_settings() {
+    // Defaults keep the old behaviour where there was one: whole buffer saved, one sound track.
+    const Settings d{};
+    CHECK(d.save_seconds == 0 && !d.separate_tracks && d.system_device.empty() && d.resolution == 0);
+    CHECK(d.quality == QualityPreset::Balanced && d.capture_cursor && d.overlay && d.auto_update);
+    CHECK(d.overlay_corner == OverlayCorner::TopRight && d.overlay_opacity == 85);
+    CHECK(d.theme == ThemeId::Night && d.density == Density::Comfortable && d.thumbnail_size == ThumbnailSize::Medium);
+
+    const LoadedSettings loaded = load_settings(
+        "[general]\nauto_update = no\n[clip]\nsave_seconds = 15\n[hotkey]\noverlay =\nbookmark = ctrl+b\n"
+        "[video]\nresolution = 1080\nquality = Performance\ncursor = false\n"
+        "[audio]\nsystem_device = {x}\nseparate_tracks = yes\n"
+        "[overlay]\nshow = off\nposition = BOTTOM_RIGHT\nopacity = 55\n"
+        "[appearance]\ntheme = plum\ndensity = compact\nthumbnail_size = small\nreduce_motion = on\n");
+    dump_warnings(loaded);
+    CHECK(loaded.warnings.empty());
+    const Settings& s = loaded.settings;
+    CHECK(!s.auto_update && s.save_seconds == 15 && s.overlay_hotkey.empty() && s.bookmark_hotkey == "Ctrl+B");
+    CHECK(s.resolution == 1080 && s.quality == QualityPreset::Performance && !s.capture_cursor);
+    CHECK(s.system_device == "{x}" && s.separate_tracks);
+    CHECK(!s.overlay && s.overlay_corner == OverlayCorner::BottomRight && s.overlay_opacity == 55);
+    CHECK(s.theme == ThemeId::Plum && s.density == Density::Compact && s.thumbnail_size == ThumbnailSize::Small);
+    CHECK(s.reduce_motion);
+
+    // Bad values keep the defaults with one warning each; numbers are clamped or snapped.
+    const LoadedSettings bad = load_settings(
+        "[clip]\nsave_seconds = 900\n[video]\nresolution = 1000\nquality = ultra\n"
+        "[overlay]\nposition = middle\nopacity = 5\n[appearance]\ntheme = neon\nthumbnail_size = 3\n"
+        "[hotkey]\nbookmark = B\n");
+    CHECK_EQ(bad.settings.save_seconds, 300);
+    CHECK_EQ(bad.settings.resolution, 1080);
+    CHECK(bad.settings.quality == QualityPreset::Balanced);
+    CHECK(bad.settings.overlay_corner == OverlayCorner::TopRight);
+    CHECK_EQ(bad.settings.overlay_opacity, 20);
+    CHECK(bad.settings.theme == ThemeId::Night && bad.settings.thumbnail_size == ThumbnailSize::Medium);
+    CHECK(bad.settings.bookmark_hotkey == "Alt+B");  // a plain letter is no global hotkey
+    CHECK_EQ(bad.warnings.size(), std::size_t{8});
+    CHECK(any_warning(bad, "theme = 'neon' should be night, harbor, plum, moss or daylight, keeping night"));
+    CHECK_EQ(load_settings("[video]\nresolution = NATIVE\n").settings.resolution, 0);
+
+    for (const auto q : {QualityPreset::Performance, QualityPreset::Balanced, QualityPreset::Quality}) {
+        Settings t;
+        t.quality = q;
+        round_trips(default_ini_text(), t);
+    }
+    for (const auto c : {OverlayCorner::TopLeft, OverlayCorner::TopRight, OverlayCorner::BottomLeft,
+                         OverlayCorner::BottomRight}) {
+        Settings t;
+        t.overlay_corner = c;
+        round_trips(default_ini_text(), t);
+    }
+    for (const auto th : {ThemeId::Night, ThemeId::Harbor, ThemeId::Plum, ThemeId::Moss, ThemeId::Daylight}) {
+        Settings t;
+        t.theme = th;
+        round_trips(default_ini_text(), t);
+    }
+    for (const int r : {0, 720, 1080, 1440}) {
+        Settings t;
+        t.resolution = r;
+        round_trips(default_ini_text(), t);
+    }
+    // A file from 0.3.0 gets the new sections appended, and reads back without warnings.
+    const std::string old = update_ini("[feedback]\nsound = true\n\n[logging]\nlevel = info\n", Settings{});
+    CHECK(bt_test::contains(old, "[overlay]\nshow = true\nposition = top_right\nopacity = 85\n"));
+    CHECK(load_settings(old).warnings.empty());
+}
+
 int main() {
+    round_eleven_settings();
     mic_settings();
     empty_and_missing();
     default_file_is_clean();

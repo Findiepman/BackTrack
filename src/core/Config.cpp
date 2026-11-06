@@ -14,12 +14,25 @@
 namespace bt {
 namespace {
 
+// The words of each choice in the ini, in the enum's order.
+constexpr std::array<std::string_view, 3> kQualityNames = {"performance", "balanced", "quality"};
+constexpr std::array<std::string_view, 4> kCornerNames = {"top_left", "top_right", "bottom_left", "bottom_right"};
+constexpr std::array<std::string_view, 5> kThemeNames = {"night", "harbor", "plum", "moss", "daylight"};
+constexpr std::array<std::string_view, 2> kDensityNames = {"comfortable", "compact"};
+constexpr std::array<std::string_view, 3> kThumbnailNames = {"small", "medium", "large"};
+
 // §5.2: shorter than 5 s is barely more than one GOP, longer than 300 s at 20 Mbit/s keeps
 // 750 MB in memory.
 constexpr long long kMinClipSeconds = 5;
 constexpr long long kMaxClipSeconds = 300;
 
 constexpr std::array<int, 4> kAllowedFps = {30, 60, 120, 144};
+
+// Output heights; 0 = the display's own size.
+constexpr std::array<int, 4> kAllowedResolutions = {0, 720, 1080, 1440};
+
+constexpr long long kMinOverlayOpacity = 20;
+constexpr long long kMaxOverlayOpacity = 100;
 
 // The Microsoft AAC encoder accepts exactly these bitrates (12000, 16000, 20000 and 24000 bytes
 // per second) and rejects the media type for anything else.
@@ -156,12 +169,16 @@ public:
         const std::string id = e_.section + "." + e_.key;
         if (id == "general.start_minimized") {
             boolean(s_.start_minimized);
+        } else if (id == "general.auto_update") {
+            boolean(s_.auto_update);
         } else if (id == "storage.max_gb") {
             clamped_int(s_.max_gb, 0, kMaxStorageGb);
         } else if (id == "storage.delete_after_days") {
             clamped_int(s_.delete_after_days, 0, kMaxDeleteAfterDays);
         } else if (id == "clip.seconds") {
             clamped_int(s_.clip_seconds, kMinClipSeconds, kMaxClipSeconds);
+        } else if (id == "clip.save_seconds") {
+            clamped_int(s_.save_seconds, 0, kMaxClipSeconds);
         } else if (id == "clip.output_dir") {
             non_empty_string(s_.output_dir);
         } else if (id == "clip.filename") {
@@ -172,6 +189,10 @@ public:
             other_hotkey(s_.mic_mute_hotkey, HotkeyUse::Global, true);
         } else if (id == "hotkey.push_to_talk") {
             other_hotkey(s_.push_to_talk_key, HotkeyUse::Held, false);
+        } else if (id == "hotkey.overlay") {
+            other_hotkey(s_.overlay_hotkey, HotkeyUse::Global, true);
+        } else if (id == "hotkey.bookmark") {
+            other_hotkey(s_.bookmark_hotkey, HotkeyUse::Global, true);
         } else if (id == "video.monitor") {
             clamped_int(s_.monitor, 0, kMaxMonitorIndex);
         } else if (id == "video.fps") {
@@ -180,12 +201,23 @@ public:
             clamped_int(s_.video_bitrate_kbps, kMinVideoKbps, kMaxVideoKbps);
         } else if (id == "video.encoder") {
             encoder();
+        } else if (id == "video.resolution") {
+            resolution();
+        } else if (id == "video.quality") {
+            choice(s_.quality, kQualityNames);
+        } else if (id == "video.cursor") {
+            boolean(s_.capture_cursor);
         } else if (id == "audio.enabled") {
             boolean(s_.audio_enabled);
         } else if (id == "audio.bitrate_kbps") {
             snapped_int(s_.audio_bitrate_kbps, kAllowedAudioKbps);
         } else if (id == "audio.system_volume") {
             clamped_int(s_.system_volume, 0, kMaxVolumePercent);
+        } else if (id == "audio.system_device") {
+            warn_if_comment_cut();
+            s_.system_device = e_.value;  // empty is allowed: the Windows default
+        } else if (id == "audio.separate_tracks") {
+            boolean(s_.separate_tracks);
         } else if (id == "audio.mic") {
             boolean(s_.mic_enabled);
         } else if (id == "audio.mic_device") {
@@ -203,6 +235,20 @@ public:
             boolean(s_.notification);
         } else if (id == "feedback.saved_bar") {
             boolean(s_.saved_bar);
+        } else if (id == "overlay.show") {
+            boolean(s_.overlay);
+        } else if (id == "overlay.position") {
+            choice(s_.overlay_corner, kCornerNames);
+        } else if (id == "overlay.opacity") {
+            clamped_int(s_.overlay_opacity, kMinOverlayOpacity, kMaxOverlayOpacity);
+        } else if (id == "appearance.theme") {
+            choice(s_.theme, kThemeNames);
+        } else if (id == "appearance.density") {
+            choice(s_.density, kDensityNames);
+        } else if (id == "appearance.thumbnail_size") {
+            choice(s_.thumbnail_size, kThumbnailNames);
+        } else if (id == "appearance.reduce_motion") {
+            boolean(s_.reduce_motion);
         } else if (id == "logging.level") {
             log_level();
         } else {
@@ -349,6 +395,33 @@ private:
         target = hotkey_to_string(*parsed.hotkey);
     }
 
+    // One of a fixed list of words, by the enum's order.
+    template <typename Enum, std::size_t N>
+    void choice(Enum& target, const std::array<std::string_view, N>& names) {
+        const std::string v = to_lower(e_.value);
+        for (std::size_t i = 0; i < N; ++i) {
+            if (v == names[i]) {
+                target = static_cast<Enum>(i);
+                return;
+            }
+        }
+        std::string list;
+        for (std::size_t i = 0; i < N; ++i) {
+            list += std::string(names[i]) + (i + 2 < N ? ", " : i + 2 == N ? " or " : "");
+        }
+        warn(std::format("{} = '{}' should be {}, keeping {}", e_.key, e_.value, list,
+                         names[static_cast<std::size_t>(target)]));
+    }
+
+    // "native" or a height; heights in between snap to the nearest offered one.
+    void resolution() {
+        if (to_lower(e_.value) == "native") {
+            s_.resolution = 0;
+            return;
+        }
+        snapped_int(s_.resolution, kAllowedResolutions);
+    }
+
     void encoder() {
         const std::string v = to_lower(e_.value);
         if (v == "auto") {
@@ -479,10 +552,14 @@ std::string_view default_ini_text() {
 [general]
 ; When Backtrack starts with Windows, open in the tray.
 start_minimized = false
+; Download new versions in the background and install them when Backtrack closes.
+auto_update = true
 
 [clip]
-; How many seconds to keep in memory and save when the hotkey is pressed.
+; How many seconds to keep in memory (the replay buffer).
 seconds = 30
+; How many of those the save hotkey keeps. 0 is all of them.
+save_seconds = 0
 ; Where clips are saved. Environment variables are expanded.
 output_dir = %USERPROFILE%\Videos\Backtrack
 ; File name pattern. Supports strftime placeholders.
@@ -504,6 +581,10 @@ mic_mute = Alt+F7
 ; Held down to record the microphone when push_to_talk is on. Plain letters work here too,
 ; and CapsLock, Tab, Backquote, Up/Down/Left/Right, Mouse3/Mouse4/Mouse5: other programs still get it.
 push_to_talk = V
+; Shows or hides the overlay. Empty: no key.
+overlay = Alt+O
+; Marks a moment; it shows on the timeline of the clip it ends up in. Empty: no key.
+bookmark = Alt+B
 
 [video]
 ; Which monitor to record, 0 is the primary monitor.
@@ -512,6 +593,12 @@ fps = 60
 bitrate_kbps = 20000
 ; auto, hardware or software
 encoder = auto
+; native, 1440, 1080 or 720 (the height of the video; never larger than the display)
+resolution = native
+; performance, balanced or quality: how hard the encoder works for the same bitrate
+quality = balanced
+; Draw the mouse pointer into the video.
+cursor = true
 
 [audio]
 ; Record what you hear (the default playback device).
@@ -519,6 +606,10 @@ enabled = true
 bitrate_kbps = 160
 ; Volume of what you hear in the clip, in percent (0 to 200).
 system_volume = 100
+; Which playback device: empty is the Windows default (followed when it changes).
+system_device =
+; Besides the mixed track, store the system sound and the microphone on tracks of their own.
+separate_tracks = false
 ; Record the microphone, mixed into the same sound track.
 mic = true
 ; Which microphone: empty is the Windows default (followed when it changes).
@@ -537,6 +628,24 @@ sound = true
 notification = true
 ; Show the "Saved" bar in the window.
 saved_bar = true
+
+[overlay]
+; A small status chip on top of the screen. It is never part of recordings.
+show = true
+; top_left, top_right, bottom_left or bottom_right
+position = top_right
+; In percent, 20 to 100.
+opacity = 85
+
+[appearance]
+; night, harbor, plum, moss or daylight
+theme = night
+; comfortable or compact
+density = comfortable
+; small, medium or large
+thumbnail_size = medium
+; Turn off animations.
+reduce_motion = false
 
 [logging]
 ; error, warning, info or debug
@@ -583,6 +692,12 @@ std::string encode_string(std::string_view raw) {
     return "\"" + v.substr(0, v.find('"')) + "\"";
 }
 
+template <typename Enum, std::size_t N>
+std::string name_of(Enum value, const std::array<std::string_view, N>& names) {
+    const auto i = static_cast<std::size_t>(value);
+    return std::string(i < N ? names[i] : names[0]);
+}
+
 std::string bool_text(bool b) {
     return b ? "true" : "false";
 }
@@ -594,9 +709,11 @@ struct KnownKey {
 };
 
 // In the order of the default file, so appended keys and sections follow it.
-constexpr std::array<KnownKey, 25> kKnownKeys = {{
+constexpr std::array<KnownKey, 41> kKnownKeys = {{
     {"general", "start_minimized", [](const Settings& s) { return bool_text(s.start_minimized); }},
+    {"general", "auto_update", [](const Settings& s) { return bool_text(s.auto_update); }},
     {"clip", "seconds", [](const Settings& s) { return std::to_string(s.clip_seconds); }},
+    {"clip", "save_seconds", [](const Settings& s) { return std::to_string(s.save_seconds); }},
     {"clip", "output_dir", [](const Settings& s) { return encode_string(s.output_dir); }},
     {"clip", "filename", [](const Settings& s) { return encode_string(s.filename); }},
     {"storage", "max_gb", [](const Settings& s) { return std::to_string(s.max_gb); }},
@@ -604,13 +721,21 @@ constexpr std::array<KnownKey, 25> kKnownKeys = {{
     {"hotkey", "save", [](const Settings& s) { return encode_string(s.save_hotkey); }},
     {"hotkey", "mic_mute", [](const Settings& s) { return encode_string(s.mic_mute_hotkey); }},
     {"hotkey", "push_to_talk", [](const Settings& s) { return encode_string(s.push_to_talk_key); }},
+    {"hotkey", "overlay", [](const Settings& s) { return encode_string(s.overlay_hotkey); }},
+    {"hotkey", "bookmark", [](const Settings& s) { return encode_string(s.bookmark_hotkey); }},
     {"video", "monitor", [](const Settings& s) { return std::to_string(s.monitor); }},
     {"video", "fps", [](const Settings& s) { return std::to_string(s.fps); }},
     {"video", "bitrate_kbps", [](const Settings& s) { return std::to_string(s.video_bitrate_kbps); }},
     {"video", "encoder", [](const Settings& s) { return std::string(encoder_name(s.encoder)); }},
+    {"video", "resolution",
+     [](const Settings& s) { return s.resolution == 0 ? std::string("native") : std::to_string(s.resolution); }},
+    {"video", "quality", [](const Settings& s) { return name_of(s.quality, kQualityNames); }},
+    {"video", "cursor", [](const Settings& s) { return bool_text(s.capture_cursor); }},
     {"audio", "enabled", [](const Settings& s) { return bool_text(s.audio_enabled); }},
     {"audio", "bitrate_kbps", [](const Settings& s) { return std::to_string(s.audio_bitrate_kbps); }},
     {"audio", "system_volume", [](const Settings& s) { return std::to_string(s.system_volume); }},
+    {"audio", "system_device", [](const Settings& s) { return encode_string(s.system_device); }},
+    {"audio", "separate_tracks", [](const Settings& s) { return bool_text(s.separate_tracks); }},
     {"audio", "mic", [](const Settings& s) { return bool_text(s.mic_enabled); }},
     {"audio", "mic_device", [](const Settings& s) { return encode_string(s.mic_device); }},
     {"audio", "mic_volume", [](const Settings& s) { return std::to_string(s.mic_volume); }},
@@ -619,6 +744,13 @@ constexpr std::array<KnownKey, 25> kKnownKeys = {{
     {"feedback", "sound", [](const Settings& s) { return bool_text(s.sound); }},
     {"feedback", "notification", [](const Settings& s) { return bool_text(s.notification); }},
     {"feedback", "saved_bar", [](const Settings& s) { return bool_text(s.saved_bar); }},
+    {"overlay", "show", [](const Settings& s) { return bool_text(s.overlay); }},
+    {"overlay", "position", [](const Settings& s) { return name_of(s.overlay_corner, kCornerNames); }},
+    {"overlay", "opacity", [](const Settings& s) { return std::to_string(s.overlay_opacity); }},
+    {"appearance", "theme", [](const Settings& s) { return name_of(s.theme, kThemeNames); }},
+    {"appearance", "density", [](const Settings& s) { return name_of(s.density, kDensityNames); }},
+    {"appearance", "thumbnail_size", [](const Settings& s) { return name_of(s.thumbnail_size, kThumbnailNames); }},
+    {"appearance", "reduce_motion", [](const Settings& s) { return bool_text(s.reduce_motion); }},
     {"logging", "level", [](const Settings& s) { return std::string(log_level_name(s.log_level)); }},
 }};
 
