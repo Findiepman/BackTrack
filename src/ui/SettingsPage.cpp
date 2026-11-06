@@ -873,9 +873,45 @@ std::vector<App::SettingRow> App::setting_rows() {
     }
 
     // Audio.
-    soon_row("audio", "outDev", Kind::Select, L"System audio source",
-             L"Backtrack records your default playback device and follows it when it changes.",
-             {L"Default playback device"});
+    {
+        // The Windows default first (followed when it changes), then every playback device by name.
+        SettingRow row;
+        row.id = "outDev";
+        row.section = "audio";
+        row.kind = Kind::Select;
+        row.label = L"System audio source";
+        const AudioLevels levels = recorder_->audio_levels();
+        row.description = levels.system_fallback
+                              ? L"The chosen device is not connected: recording the Windows default until it is back."
+                              : L"What you hear on this device is recorded.";
+        row.keywords = L"speakers headphones output playback device sound";
+        std::wstring default_name;
+        for (const PlaybackDevice& d : playback_devices_) {
+            if (d.is_default) default_name = to_wide(d.name);
+        }
+        row.options.push_back(default_name.empty() ? std::wstring(L"Windows default")
+                                                   : L"Windows default (" + default_name + L")");
+        std::vector<std::string> ids{std::string()};
+        for (const PlaybackDevice& d : playback_devices_) {
+            row.options.push_back(to_wide(d.name));
+            ids.push_back(to_utf8(d.id));
+            if (to_utf8(d.id) == settings_.system_device) row.selected = static_cast<int>(row.options.size()) - 1;
+        }
+        if (!settings_.system_device.empty() && row.selected == 0) {
+            // Unplugged: it is used again when it comes back.
+            row.options.push_back(L"Unplugged device");
+            ids.push_back(settings_.system_device);
+            row.selected = static_cast<int>(row.options.size()) - 1;
+        }
+        row.changed = !settings_.system_device.empty();
+        row.choose = [this, ids](int choice) {
+            if (choice >= 0 && static_cast<std::size_t>(choice) < ids.size()) {
+                change_settings([&](Settings& s) { s.system_device = ids[static_cast<std::size_t>(choice)]; });
+            }
+        };
+        row.reset = [](Settings& s) { s.system_device.clear(); };
+        add(std::move(row));
+    }
     {
         // The Windows default first (followed when it changes), then every microphone by name.
         SettingRow row;

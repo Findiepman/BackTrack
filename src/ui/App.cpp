@@ -1657,6 +1657,11 @@ void App::refresh_devices() {
     } catch (const std::exception& e) {
         log::warn("Could not list the microphones: {}", e.what());
     }
+    try {
+        playback_devices_ = list_playback_devices();
+    } catch (const std::exception& e) {
+        log::warn("Could not list the playback devices: {}", e.what());
+    }
 }
 
 void App::set_view(LibraryView view, std::string collection) {

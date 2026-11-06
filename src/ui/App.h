@@ -474,6 +474,7 @@ private:
     std::optional<Hotkey> registered_keys_[kGlobalHotkeys];  // parsed once, for the raw input path
     std::chrono::steady_clock::time_point last_shortcut_[kGlobalHotkeys + 1]{};  // by hotkey id: a press seen both ways acts once
     std::vector<MicDevice> microphones_;  // refreshed when the Record or Settings page opens
+    std::vector<PlaybackDevice> playback_devices_;  // the same, for the system audio source
     std::wstring hotkey_message_;  // why the last pressed combination cannot be used
     std::optional<std::chrono::steady_clock::time_point> restart_due_;  // settings wait a moment, then restart once
     std::string ini_problem_;  // the last write of backtrack.ini failed
