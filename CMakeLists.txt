@@ -39,6 +39,7 @@ add_library(backtrack_core STATIC
     src/core/ThemeColors.cpp
     src/core/CaptureMath.cpp
     src/core/UpdateCheck.cpp
+    src/core/ExportPlan.cpp
 )
 target_include_directories(backtrack_core PUBLIC src)
 target_link_libraries(backtrack_core PUBLIC bt_options)
@@ -85,6 +86,7 @@ add_executable(backtrack WIN32
     src/platform/FrameReader.cpp
     src/platform/Filmstrip.cpp
     src/platform/Trim.cpp
+    src/platform/Exporter.cpp
     src/platform/Shell.cpp
     src/platform/VideoPlayer.cpp
     src/platform/IniFile.cpp
@@ -128,6 +130,12 @@ add_executable(media_check tools/media_check.cpp src/platform/Log.cpp src/platfo
 target_include_directories(media_check PRIVATE src)
 target_link_libraries(media_check PRIVATE backtrack_core mfplat mfuuid mfreadwrite ole32 propsys)
 
+# Development tool: runs an export from the command line (tools/export_check.cpp). Not shipped.
+add_executable(export_check tools/export_check.cpp src/platform/Log.cpp src/platform/Exporter.cpp
+               src/platform/FrameReader.cpp)
+target_include_directories(export_check PRIVATE src)
+target_link_libraries(export_check PRIVATE backtrack_core d3d11 mfplat mfuuid mfreadwrite ole32 propsys windowscodecs)
+
 # Development tool: the recording engine without the window and its single-instance lock, to check
 # sound and picture while Backtrack itself runs (tools/record_check.cpp). Not shipped.
 add_executable(record_check tools/record_check.cpp src/platform/Log.cpp src/platform/ScreenCapture.cpp
@@ -146,7 +154,7 @@ target_compile_definitions(update_check PRIVATE BT_VERSION="${PROJECT_VERSION}")
 target_link_libraries(update_check PRIVATE backtrack_core winhttp bcrypt shell32 ole32 advapi32)
 
 enable_testing()
-foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests TrimPlanTests AudioFifoTests AudioMixTests NoiseSuppressorTests ThemeColorsTests CaptureMathTests UpdateCheckTests)
+foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests TrimPlanTests AudioFifoTests AudioMixTests NoiseSuppressorTests ThemeColorsTests CaptureMathTests UpdateCheckTests ExportPlanTests)
     add_executable(${test_name} tests/${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE backtrack_core)
     target_compile_definitions(${test_name} PRIVATE BT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
