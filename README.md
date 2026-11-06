@@ -84,8 +84,9 @@ file is never overwritten.
   crash): the next clip then begins at that moment.
 - Pausing keeps what was recorded before the pause. A clip saved after resuming joins the time
   before and after the pause without a gap.
-- Sound is what you hear on the default playback device. Switching the default device (plugging in
-  a headset) is picked up automatically. Bluetooth headphones are fine: their playback delay is
+- Sound is what you hear on the default playback device (or the one picked in Settings > Audio).
+  Switching the default device (plugging in a headset) is picked up automatically. A picked device
+  that is not connected is replaced by the default until it is back; the Record page says so. Bluetooth headphones are fine: their playback delay is
   taken out, so sound and picture stay in sync in the clip.
 - The microphone is mixed into the same sound track. Your voice is in the clip about 50 ms after
   you said it (the microphone's own buffer, noise suppression and the step that keeps the two sound
@@ -173,6 +174,8 @@ and the tray menu still work.
 | `enabled` | `true` | Record what you hear. `false` leaves it out of clips (with `mic = false` too, clips have no sound). |
 | `bitrate_kbps` | `160` | Sound quality: 96, 128, 160 or 192. Others are rounded to the nearest. |
 | `system_volume` | `100` | Volume of what you hear in the clip, 0 to 200 percent. |
+| `system_device` | empty | Which playback device to record (a Windows device id; the Settings page fills it in). Empty is the Windows default playback device, followed when it changes. A chosen device that is not connected is replaced by the default until it is. |
+| `separate_tracks` | `false` | With the microphone and what you hear both recorded: besides the mixed track, put each on a track of its own (3 sound tracks: "Game + mic", "Game", "Mic"), for video editors. The mix stays the first track, the one Discord, phones and Windows play. |
 | `mic` | `true` | Record the microphone, mixed into the same sound track. |
 | `mic_device` | empty | Which microphone (a Windows device id; the Settings page fills it in). Empty is the Windows default microphone, followed when it changes. A chosen microphone that is not connected is replaced by the default until it is. |
 | `mic_volume` | `100` | Volume of the microphone in the clip, 0 to 200 percent. |

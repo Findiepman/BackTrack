@@ -61,7 +61,12 @@ struct MixPeaks {
 // advance one step per frame. While system_gain is settled at exactly 1 and the microphone adds
 // nothing (empty, or mic_gain settled at 0) the samples are not touched at all, so the sound is
 // bit for bit what it was without a microphone.
+//
+// Separate tracks: `system_part` and `mic_part` (each empty, or as large as `stereo`) receive the
+// two parts on their own, from the same gains on the same frame: stereo * system_gain, and the
+// microphone * mic_gain on both channels, each saturated to int16. `stereo` gets exactly the mix
+// it gets without them, so the mixed track is bit for bit the same with separate tracks on or off.
 MixPeaks mix_block(std::span<std::int16_t> stereo, std::span<const float> mic, GainRamp& system_gain,
-                   GainRamp& mic_gain);
+                   GainRamp& mic_gain, std::span<std::int16_t> system_part = {}, std::span<std::int16_t> mic_part = {});
 
 }  // namespace bt

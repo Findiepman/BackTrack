@@ -8,9 +8,11 @@
 #include <wmcodecdsp.h>
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <memory>
 #include <optional>
+#include <utility>
 
 namespace bt {
 namespace {
@@ -41,6 +43,9 @@ constexpr ULONGLONG kReopenDelayMs = 2000;
 // A device that fails again within this time of opening is retried after kReopenDelayMs instead of
 // at once, so a flapping USB DAC or a format change still settling cannot cause a reopen loop.
 constexpr ULONGLONG kSettleMs = 1000;
+// A chosen playback device that is connected but cannot be opened is tried again this often;
+// each try briefly reopens the default (the gap is filled with silence), so not more often.
+constexpr ULONGLONG kUnusableRetryMs = 30000;
 
 // After a flush the first AAC packet may start up to two frames (priming) away from the input.
 constexpr Time100ns kAacFlushTolerance = 2 * kTicksPerSecond * kAacFrameSamples / kOutputRate;
@@ -106,12 +111,41 @@ std::wstring id_of(IMMDevice* device) {
     return id.get();
 }
 
-std::wstring default_device_id(IMMDeviceEnumerator* enumerator) {
+bool is_active_render(IMMDevice* device) {
+    DWORD state = 0;
+    if (FAILED(device->GetState(&state)) || state != DEVICE_STATE_ACTIVE) {
+        return false;
+    }
+    // An id from the settings file could be a microphone; loopback needs a playback device.
+    ComPtr<IMMEndpoint> endpoint;
+    EDataFlow flow = eCapture;
+    return SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&endpoint))) && SUCCEEDED(endpoint->GetDataFlow(&flow)) &&
+           flow == eRender;
+}
+
+// The device to record now: the chosen one when it is connected, else the Windows default
+// (`fallback` then says so when one was chosen). Throws when there is no playback device at all.
+ComPtr<IMMDevice> pick_device(IMMDeviceEnumerator* enumerator, const std::wstring& wanted, bool& fallback) {
+    fallback = false;
+    if (!wanted.empty()) {
+        ComPtr<IMMDevice> device;
+        if (SUCCEEDED(enumerator->GetDevice(wanted.c_str(), &device)) && is_active_render(device.Get())) {
+            return device;
+        }
+        fallback = true;
+    }
     ComPtr<IMMDevice> device;
-    if (FAILED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device))) {
+    BT_CHECK_HR(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device));
+    return device;
+}
+
+std::wstring pick_device_id(IMMDeviceEnumerator* enumerator, const std::wstring& wanted) {
+    try {
+        bool fallback = false;
+        return id_of(pick_device(enumerator, wanted, fallback).Get());
+    } catch (const std::exception&) {
         return {};
     }
-    return id_of(device.Get());
 }
 
 ComPtr<IMFMediaType> pcm_type() {
@@ -137,6 +171,45 @@ ComPtr<IMFSample> make_buffer_sample(DWORD bytes) {
     return sample;
 }
 
+// One AAC-LC encoder for 48 kHz 16-bit stereo, started and ready for samples.
+ComPtr<IMFTransform> make_aac_encoder(int bitrate_kbps, ComPtr<IMFMediaType>& output_type, DWORD& output_size) {
+    ComPtr<IMFTransform> aac;
+    BT_CHECK_HR(CoCreateInstance(CLSID_AACMFTEncoder, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&aac)));
+    const ComPtr<IMFMediaType> input = pcm_type();
+    ComPtr<IMFMediaType> output;
+    BT_CHECK_HR(MFCreateMediaType(&output));
+    BT_CHECK_HR(output->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio));
+    BT_CHECK_HR(output->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC));
+    BT_CHECK_HR(output->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, kOutputBits));
+    BT_CHECK_HR(output->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, kOutputRate));
+    BT_CHECK_HR(output->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, kOutputChannels));
+    BT_CHECK_HR(output->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+                                  static_cast<UINT32>(bitrate_kbps) * kBitsPerKilobit / 8));
+    BT_CHECK_HR(output->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, kAacPayloadRaw));
+    BT_CHECK_HR(output->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, kAacProfileLevel));
+
+    // The AAC encoder documents input first; some Windows builds only accept output first.
+    HRESULT hr = aac->SetInputType(0, input.Get(), 0);
+    if (SUCCEEDED(hr)) {
+        hr = aac->SetOutputType(0, output.Get(), 0);
+    }
+    if (FAILED(hr)) {
+        BT_CHECK_HR(aac->SetOutputType(0, output.Get(), 0));
+        BT_CHECK_HR(aac->SetInputType(0, input.Get(), 0));
+    }
+    BT_CHECK_HR(aac->GetOutputCurrentType(0, &output_type));
+    UINT32 config_size = 0;
+    if (FAILED(output_type->GetBlobSize(MF_MT_USER_DATA, &config_size)) || config_size == 0) {
+        throw std::runtime_error("the AAC encoder gave no AudioSpecificConfig (MF_MT_USER_DATA)");
+    }
+    MFT_OUTPUT_STREAM_INFO info{};
+    BT_CHECK_HR(aac->GetOutputStreamInfo(0, &info));
+    output_size = info.cbSize != 0 ? info.cbSize : kAacFallbackOutputBytes;
+    BT_CHECK_HR(aac->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0));
+    BT_CHECK_HR(aac->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0));
+    return aac;
+}
+
 Time100ns frames_to_time(std::uint64_t frames, UINT32 rate) {
     return static_cast<Time100ns>(frames * static_cast<std::uint64_t>(kTicksPerSecond) / rate);
 }
@@ -157,8 +230,63 @@ std::string device_name(IMMDevice* device) {
 
 }  // namespace
 
-// Turns "the default playback device changed" into a flag for the audio thread. The callback
-// runs on a Windows thread and must not block or call back into the audio API.
+std::vector<PlaybackDevice> list_playback_devices() {
+    // The UI thread is usually STA already; then COM stays as it is (RPC_E_CHANGED_MODE).
+    const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    struct Uninitialize {
+        bool active;
+        ~Uninitialize() {
+            if (active) {
+                CoUninitialize();
+            }
+        }
+    } uninitialize{SUCCEEDED(co)};
+
+    std::vector<PlaybackDevice> devices;
+    try {
+        ComPtr<IMMDeviceEnumerator> enumerator;
+        BT_CHECK_HR(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator)));
+        std::wstring default_id;
+        ComPtr<IMMDevice> default_device;
+        if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &default_device))) {
+            default_id = id_of(default_device.Get());
+        }
+        ComPtr<IMMDeviceCollection> collection;
+        BT_CHECK_HR(enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &collection));
+        UINT count = 0;
+        BT_CHECK_HR(collection->GetCount(&count));
+        for (UINT i = 0; i < count; ++i) {
+            ComPtr<IMMDevice> device;
+            if (FAILED(collection->Item(i, &device))) {
+                continue;
+            }
+            PlaybackDevice entry;
+            entry.id = id_of(device.Get());
+            if (entry.id.empty()) {
+                continue;
+            }
+            entry.name = device_name(device.Get());
+            entry.is_default = entry.id == default_id;
+            devices.push_back(std::move(entry));
+        }
+    } catch (const std::exception& e) {
+        log::warn("Cannot list the playback devices: {}", e.what());
+    }
+    std::stable_partition(devices.begin(), devices.end(), [](const PlaybackDevice& d) { return d.is_default; });
+    return devices;
+}
+
+const char* AudioCapture::track_name(std::size_t track) {
+    switch (track) {
+        case kMixTrack: return "Game + mic";
+        case kSystemTrack: return "Game";
+        case kMicTrack: return "Mic";
+        default: return "";
+    }
+}
+
+// Turns "the playback devices changed" into a flag for the audio thread. The callback runs on a
+// Windows thread and must not block or call back into the audio API.
 class AudioCapture::DeviceNotifier final : public IMMNotificationClient {
 public:
     DeviceNotifier(std::atomic<bool>* changed, HANDLE wake) : changed_(changed), wake_(wake) {}
@@ -185,17 +313,32 @@ public:
     }
     STDMETHODIMP OnDefaultDeviceChanged(EDataFlow flow, ERole role, LPCWSTR) override {
         if (flow == eRender && role == eConsole) {
-            changed_->store(true);
-            SetEvent(wake_);
+            signal();
         }
         return S_OK;
     }
-    STDMETHODIMP OnDeviceAdded(LPCWSTR) override { return S_OK; }
-    STDMETHODIMP OnDeviceRemoved(LPCWSTR) override { return S_OK; }
-    STDMETHODIMP OnDeviceStateChanged(LPCWSTR, DWORD) override { return S_OK; }
+    // Plugged in, unplugged, enabled or disabled: a chosen device may have come back. The thread
+    // checks whether the device it should record is still the one it records (cheap, and rare).
+    STDMETHODIMP OnDeviceAdded(LPCWSTR) override {
+        signal();
+        return S_OK;
+    }
+    STDMETHODIMP OnDeviceRemoved(LPCWSTR) override {
+        signal();
+        return S_OK;
+    }
+    STDMETHODIMP OnDeviceStateChanged(LPCWSTR, DWORD) override {
+        signal();
+        return S_OK;
+    }
     STDMETHODIMP OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override { return S_OK; }
 
 private:
+    void signal() {
+        changed_->store(true);
+        SetEvent(wake_);
+    }
+
     std::atomic<ULONG> refs_{1};
     std::atomic<bool>* changed_;
     HANDLE wake_;
@@ -205,6 +348,7 @@ AudioCapture::AudioCapture(int bitrate_kbps, Time100ns max_gap_fill, const Audio
                            PacketCallback on_packet)
     : on_packet_(std::move(on_packet)),
       max_gap_fill_(max_gap_fill),
+      wanted_device_(mix.system_device),
       system_sound_(mix.system_sound),
       system_volume_(mix.system_volume),
       mic_volume_(mix.mic_volume),
@@ -230,40 +374,18 @@ AudioCapture::AudioCapture(int bitrate_kbps, Time100ns max_gap_fill, const Audio
     wake_event_.reset(CreateEventW(nullptr, FALSE, FALSE, nullptr));
     BT_CHECK_WIN32(static_cast<bool>(wake_event_));
 
-    BT_CHECK_HR(CoCreateInstance(CLSID_AACMFTEncoder, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&aac_)));
-    const ComPtr<IMFMediaType> input = pcm_type();
-    ComPtr<IMFMediaType> output;
-    BT_CHECK_HR(MFCreateMediaType(&output));
-    BT_CHECK_HR(output->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio));
-    BT_CHECK_HR(output->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC));
-    BT_CHECK_HR(output->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, kOutputBits));
-    BT_CHECK_HR(output->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, kOutputRate));
-    BT_CHECK_HR(output->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, kOutputChannels));
-    BT_CHECK_HR(output->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
-                                  static_cast<UINT32>(bitrate_kbps) * kBitsPerKilobit / 8));
-    BT_CHECK_HR(output->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, kAacPayloadRaw));
-    BT_CHECK_HR(output->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, kAacProfileLevel));
-
-    // The AAC encoder documents input first; some Windows builds only accept output first.
-    HRESULT hr = aac_->SetInputType(0, input.Get(), 0);
-    if (SUCCEEDED(hr)) {
-        hr = aac_->SetOutputType(0, output.Get(), 0);
+    // Separate tracks only when there are two sources to separate: with one of them off the mix
+    // is that one source already, and a second track would only repeat it or be silent.
+    const bool separate = mix.separate_tracks && mix.system_sound && mix.mic;
+    if (mix.separate_tracks && !separate) {
+        log::info("Separate sound tracks need both the game sound and the microphone; clips have the one mixed track");
     }
-    if (FAILED(hr)) {
-        BT_CHECK_HR(aac_->SetOutputType(0, output.Get(), 0));
-        BT_CHECK_HR(aac_->SetInputType(0, input.Get(), 0));
+    tracks_.resize(separate ? 3 : 1);
+    for (AacTrack& track : tracks_) {
+        track.encoder = make_aac_encoder(bitrate_kbps, track.output_type, track.output_size);
     }
-    BT_CHECK_HR(aac_->GetOutputCurrentType(0, &output_type_));
-    UINT32 config_size = 0;
-    if (FAILED(output_type_->GetBlobSize(MF_MT_USER_DATA, &config_size)) || config_size == 0) {
-        throw std::runtime_error("the AAC encoder gave no AudioSpecificConfig (MF_MT_USER_DATA)");
-    }
-    MFT_OUTPUT_STREAM_INFO info{};
-    BT_CHECK_HR(aac_->GetOutputStreamInfo(0, &info));
-    aac_output_size_ = info.cbSize != 0 ? info.cbSize : kAacFallbackOutputBytes;
-    BT_CHECK_HR(aac_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0));
-    BT_CHECK_HR(aac_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0));
-    log::info("Audio encoder: AAC-LC {} kbit/s, {} Hz stereo", bitrate_kbps, kOutputRate);
+    log::info("Audio encoder: AAC-LC {} kbit/s, {} Hz stereo{}", bitrate_kbps, kOutputRate,
+              separate ? ", 3 tracks (mix, game sound, microphone)" : "");
 }
 
 AudioCapture::~AudioCapture() {
@@ -314,6 +436,11 @@ AudioStats AudioCapture::stats() const {
         s.mic_fifo = mic_fifo_->stats();
     }
     return s;
+}
+
+std::string AudioCapture::system_name() const {
+    std::lock_guard lock(name_mutex_);
+    return system_name_;
 }
 
 void AudioCapture::set_volumes(int system_percent, int mic_percent) {
@@ -393,6 +520,8 @@ void AudioCapture::mix(IMFSample* pcm) {
     } unlock{buffer.Get()};
     const std::size_t frames = length / kOutputBlockAlign;
     if (frames == 0) {
+        mix_system_.clear();
+        mix_voice_.clear();
         return;
     }
     // Copied out and back rather than cast: the buffer is raw bytes from Media Foundation.
@@ -409,12 +538,53 @@ void AudioCapture::mix(IMFSample* pcm) {
         }
         voice = mix_mic_;
     }
-    const MixPeaks peaks = mix_block(mix_pcm_, voice, system_gain_, mic_gain_);
+    std::span<std::int16_t> system_part;
+    std::span<std::int16_t> mic_part;
+    if (tracks_.size() > kMicTrack) {
+        mix_system_.resize(mix_pcm_.size());
+        mix_voice_.resize(mix_pcm_.size());
+        system_part = mix_system_;
+        mic_part = mix_voice_;
+    }
+    const MixPeaks peaks = mix_block(mix_pcm_, voice, system_gain_, mic_gain_, system_part, mic_part);
     std::memcpy(bytes, mix_pcm_.data(), frames * kOutputBlockAlign);
     system_meter_.add(peaks.system, frames);
     mic_meter_.add(peaks.mic, frames);
     system_level_ = system_meter_.level();
     mic_level_ = mic_meter_.level();
+}
+
+std::array<ComPtr<IMFSample>, 2> AudioCapture::part_samples(IMFSample* mixed) {
+    std::array<ComPtr<IMFSample>, 2> samples;
+    if (tracks_.size() <= kMicTrack || mix_system_.empty()) {
+        return samples;
+    }
+    // The same time, duration and flags as the mixed block, so every track's stamps are the same.
+    LONGLONG time = 0;
+    LONGLONG duration = 0;
+    const bool has_time = SUCCEEDED(mixed->GetSampleTime(&time));
+    const bool has_duration = SUCCEEDED(mixed->GetSampleDuration(&duration));
+    const std::vector<std::int16_t>* parts[] = {&mix_system_, &mix_voice_};
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+        const auto bytes = static_cast<DWORD>(parts[i]->size() * sizeof(std::int16_t));
+        const ComPtr<IMFSample> sample = make_buffer_sample(bytes);
+        BT_CHECK_HR(mixed->CopyAllItems(sample.Get()));
+        ComPtr<IMFMediaBuffer> buffer;
+        BT_CHECK_HR(sample->GetBufferByIndex(0, &buffer));
+        BYTE* target = nullptr;
+        BT_CHECK_HR(buffer->Lock(&target, nullptr, nullptr));
+        std::memcpy(target, parts[i]->data(), bytes);
+        BT_CHECK_HR(buffer->Unlock());
+        BT_CHECK_HR(buffer->SetCurrentLength(bytes));
+        if (has_time) {
+            BT_CHECK_HR(sample->SetSampleTime(time));
+        }
+        if (has_duration) {
+            BT_CHECK_HR(sample->SetSampleDuration(duration));
+        }
+        samples[i] = sample;
+    }
+    return samples;
 }
 
 void AudioCapture::thread_main() {
@@ -475,6 +645,7 @@ void AudioCapture::run_loop() {
     } close_on_exit{this};
 
     ULONGLONG next_open = 0;
+    ULONGLONG failed_at = 0;  // when the last open failed
     while (true) {
         if (!open_ && GetTickCount64() >= next_open) {
             try {
@@ -484,8 +655,15 @@ void AudioCapture::run_loop() {
                     log::warn("Cannot record sound yet ({}), retrying", e.what());
                 }
                 close_device();
-                next_open = GetTickCount64() + kReopenDelayMs;
+                failed_at = GetTickCount64();
+                next_open = failed_at + kReopenDelayMs;
             }
+        }
+        if (open_ && !unusable_device_.empty() && GetTickCount64() >= unusable_until_) {
+            // The chosen device could not be opened a while ago (in use exclusively by another
+            // program, still waking up): see whether it works now.
+            unusable_device_.clear();
+            device_changed_ = true;
         }
         const HANDLE handles[] = {stop_event_.get(), wake_event_.get()};
         const DWORD wait = WaitForMultipleObjects(2, handles, FALSE, kPollIntervalMs);
@@ -494,11 +672,22 @@ void AudioCapture::run_loop() {
         }
         if (device_changed_.exchange(false)) {
             // When the old device disappeared, the read below already failed and reopened on the
-            // new default; Windows announces that same switch a moment later.
-            if (open_ && !device_id_.empty() && default_device_id(enumerator.Get()) == device_id_) {
+            // new default; Windows announces that same switch a moment later. Any other device
+            // coming or going (a microphone, a second screen's speakers) changes nothing either.
+            if (!open_) {
+                // A device may have come back: try sooner, but not within kSettleMs of a failed
+                // open, so a device that keeps coming and going cannot cause a reopen loop.
+                next_open = std::min(next_open, failed_at + kSettleMs);
                 continue;
             }
-            log::info("Default playback device changed, switching sound recording to it");
+            // Empty: the lookup failed for a moment; the device recording now stays. A chosen
+            // device that could not be opened is only tried again once its wait is over.
+            const std::wstring wanted = pick_device_id(enumerator.Get(), wanted_device_);
+            if (wanted.empty() || wanted == device_id_ ||
+                (wanted == unusable_device_ && GetTickCount64() < unusable_until_)) {
+                continue;
+            }
+            log::info("The playback device to record changed, switching sound recording to it");
             close_device();
             next_open = 0;
             continue;
@@ -573,10 +762,9 @@ void AudioCapture::keep_mic_flowing() {
         // would land minutes away from when it was said, so it goes.
         log::info("Sound was not read for {:.1f} s", static_cast<double>(behind) / kTicksPerSecond);
         BT_CHECK_HR(resampler_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0));
-        BT_CHECK_HR(aac_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0));
+        flush_aac();
         segment_base_ += behind - max_gap_fill_;
         aac_expected_after_flush_ = timeline();
-        check_aac_after_flush_ = true;
         if (mic_fifo_) mic_fifo_->reset_consumer();
         fill_gap(static_cast<UINT32>(static_cast<std::uint64_t>(max_gap_fill_) * device_rate_ / kTicksPerSecond));
         counters_.silence_inserted_ms += static_cast<std::uint64_t>(max_gap_fill_ / kTicksPerMillisecond);
@@ -608,10 +796,38 @@ void AudioCapture::fill_gap(UINT32 frames) {
     }
 }
 void AudioCapture::open_device(IMMDeviceEnumerator* enumerator) {
-    ComPtr<IMMDevice> device;
-    BT_CHECK_HR(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device));
-    const std::string name = device_name(device.Get());
-    device_id_ = id_of(device.Get());
+    bool fallback = false;
+    ComPtr<IMMDevice> device = pick_device(enumerator, wanted_device_, fallback);
+    const bool waiting = !fallback && !unusable_device_.empty() && GetTickCount64() < unusable_until_;
+    if (!fallback && !wanted_device_.empty() && !waiting) {
+        try {
+            open_endpoint(device.Get(), false);
+            unusable_device_.clear();
+            return;
+        } catch (const std::exception& e) {
+            // Connected but not usable (another program holds it exclusively, a Bluetooth device
+            // still waking up): the default is recorded meanwhile, and this one tried again later.
+            log::warn("Cannot record the chosen playback device ({}); recording the Windows default meanwhile",
+                      e.what());
+            close_device();
+            unusable_device_ = id_of(device.Get());
+            unusable_until_ = GetTickCount64() + kUnusableRetryMs;
+        }
+    }
+    if (!fallback && !wanted_device_.empty()) {
+        device.Reset();
+        BT_CHECK_HR(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device));
+        fallback = true;
+        if (id_of(device.Get()) == unusable_device_) {
+            throw std::runtime_error("the chosen playback device, which is the default, cannot be opened");
+        }
+    }
+    open_endpoint(device.Get(), fallback);
+}
+
+void AudioCapture::open_endpoint(IMMDevice* device, bool fallback) {
+    const std::string name = device_name(device);
+    device_id_ = id_of(device);
 
     BT_CHECK_HR(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
                                  reinterpret_cast<void**>(capture_client_audio_.ReleaseAndGetAddressOf())));
@@ -681,6 +897,17 @@ void AudioCapture::open_device(IMMDeviceEnumerator* enumerator) {
     open_ = true;
     ++counters_.device_opens;
     log::info("Recording sound from {} ({} Hz, {} channels)", name, format->nSamplesPerSec, format->nChannels);
+    // Only now, so the UI never names a device that is not recording. Logged once while it lasts,
+    // and again if it comes back later (an unusable device was logged in open_device).
+    if (!fallback) {
+        warned_missing_ = false;
+    } else if (!warned_missing_ && unusable_device_.empty()) {
+        warned_missing_ = true;
+        log::warn("The chosen playback device is not connected; recording the Windows default ({}) until it is", name);
+    }
+    system_fallback_ = fallback;
+    std::lock_guard lock(name_mutex_);
+    system_name_ = name;
 }
 
 void AudioCapture::close_device() {
@@ -705,6 +932,7 @@ void AudioCapture::close_device() {
         }
     }
     open_ = false;
+    system_fallback_ = false;
 }
 
 void AudioCapture::drop_render_stream() {
@@ -844,12 +1072,11 @@ void AudioCapture::handle_packet(const BYTE* data, UINT32 frames, DWORD flags, U
         // stamps after the jump come from the new input times, not from samples they still hold.
         log::info("Sound was missing for {:.1f} s", static_cast<double>(drift) / kTicksPerSecond);
         BT_CHECK_HR(resampler_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0));
-        BT_CHECK_HR(aac_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0));
+        flush_aac();
         segment_base_ += drift - max_gap_fill_;
         // Whether the AAC encoder takes its stamps from the input after a flush is not
         // documented; the first packet after it is checked against where the timeline is.
         aac_expected_after_flush_ = timeline();
-        check_aac_after_flush_ = true;
         if (mic_fifo_) {
             // The microphone queued the start of the outage; the fill below is its end. That old
             // voice would land minutes away from when it was said, so it goes.
@@ -935,27 +1162,62 @@ void AudioCapture::drain_resampler() {
             return;
         }
         mix(output.Get());
-        encode_aac(output.Get());
+        // Separate tracks: every track must get every block. The part samples are made before
+        // anything is encoded, and a failure partway through (only an encoder can fail then)
+        // leaves tracks_out_of_step_ set, so the next block first flushes all encoders and they
+        // start again from the same input time, whether they stamp from their input or count.
+        const std::array<ComPtr<IMFSample>, 2> parts = part_samples(output.Get());
+        if (tracks_out_of_step_) {
+            log::warn("The sound tracks fell out of step after an error; starting their encoders again");
+            flush_aac();
+            LONGLONG time = 0;
+            aac_expected_after_flush_ = SUCCEEDED(output->GetSampleTime(&time)) ? time : timeline();
+            tracks_out_of_step_ = false;
+        }
+        tracks_out_of_step_ = tracks_.size() > 1;
+        encode_aac(kMixTrack, output.Get());
+        for (std::size_t i = 0; i < parts.size(); ++i) {
+            if (parts[i]) {
+                encode_aac(kSystemTrack + i, parts[i].Get());
+            }
+        }
+        tracks_out_of_step_ = false;
     }
 }
 
-void AudioCapture::encode_aac(IMFSample* pcm) {
-    HRESULT hr = aac_->ProcessInput(0, pcm, 0);
+void AudioCapture::flush_aac() {
+    // All or none marked: a failure on one encoder still flushes and checks the others.
+    HRESULT failed = S_OK;
+    for (AacTrack& track : tracks_) {
+        const HRESULT hr = track.encoder->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+        if (FAILED(hr) && SUCCEEDED(failed)) {
+            failed = hr;
+        }
+        track.check_after_flush = true;
+    }
+    tracks_out_of_step_ = false;  // they all start again from the same input
+    BT_CHECK_HR(failed);
+}
+
+void AudioCapture::encode_aac(std::size_t track, IMFSample* pcm) {
+    IMFTransform* aac = tracks_[track].encoder.Get();
+    HRESULT hr = aac->ProcessInput(0, pcm, 0);
     if (hr == MF_E_NOTACCEPTING) {
-        drain_aac();
-        hr = aac_->ProcessInput(0, pcm, 0);
+        drain_aac(track);
+        hr = aac->ProcessInput(0, pcm, 0);
     }
     BT_CHECK_HR(hr);
-    drain_aac();
+    drain_aac(track);
 }
 
-void AudioCapture::drain_aac() {
+void AudioCapture::drain_aac(std::size_t track) {
+    AacTrack& aac = tracks_[track];
     while (true) {
-        const ComPtr<IMFSample> output = make_buffer_sample(aac_output_size_);
+        const ComPtr<IMFSample> output = make_buffer_sample(aac.output_size);
         MFT_OUTPUT_DATA_BUFFER out{};
         out.pSample = output.Get();
         DWORD status = 0;
-        const HRESULT hr = aac_->ProcessOutput(0, 1, &out, &status);
+        const HRESULT hr = aac.encoder->ProcessOutput(0, 1, &out, &status);
         if (out.pEvents != nullptr) {
             out.pEvents->Release();
         }
@@ -974,14 +1236,14 @@ void AudioCapture::drain_aac() {
         if (FAILED(output->GetSampleDuration(&duration)) || duration <= 0) {
             duration = frames_to_time(kAacFrameSamples, kOutputRate);
         }
-        pts += aac_offset_;
-        if (check_aac_after_flush_) {
-            check_aac_after_flush_ = false;
+        pts += aac.offset;
+        if (aac.check_after_flush) {
+            aac.check_after_flush = false;
             const Time100ns difference = aac_expected_after_flush_ - pts;
             if (difference > kAacFlushTolerance || difference < -kAacFlushTolerance) {
                 log::warn("AAC encoder kept its own timing after a flush ({} ms off), correcting it",
                           difference / kTicksPerMillisecond);
-                aac_offset_ += difference;
+                aac.offset += difference;
                 pts += difference;
             }
         }
@@ -998,8 +1260,10 @@ void AudioCapture::drain_aac() {
             continue;
         }
         Packet packet{pts, duration, true, make_packet_bytes(std::vector<std::uint8_t>(data, data + length))};
-        ++counters_.packets_out;
-        on_packet_(std::move(packet));
+        if (track == kMixTrack) {
+            ++counters_.packets_out;
+        }
+        on_packet_(track, std::move(packet));
     }
 }
 

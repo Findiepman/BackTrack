@@ -5,8 +5,9 @@
 #
 # Finds every white flash of the beacon square (top-left corner) and every 1 kHz tone onset, pairs
 # them and prints audio time minus video time for each pair. Positive = sound later than picture.
+# -Track picks the sound track (0 = the first, the mix; with separate tracks 1 = game sound, 2 = mic).
 
-param([Parameter(Mandatory = $true)][string]$Clip)
+param([Parameter(Mandatory = $true)][string]$Clip, [int]$Track = 0)
 
 $ErrorActionPreference = 'Continue'
 
@@ -25,7 +26,7 @@ foreach ($line in $video) {
 }
 
 # Audio: band-pass around 1 kHz, then the end of each silence is a tone onset.
-$audio = & ffmpeg -hide_banner -nostats -i $Clip -vn -af "highpass=f=800,lowpass=f=1250,silencedetect=n=-40dB:d=0.1" -f null - 2>&1
+$audio = & ffmpeg -hide_banner -nostats -i $Clip -map "0:a:$Track" -af "highpass=f=800,lowpass=f=1250,silencedetect=n=-40dB:d=0.1" -f null - 2>&1
 # silencedetect also reports the end of the file as the end of a silence; that is no tone.
 $duration = [double](& ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 $Clip)
 $tones = @()
