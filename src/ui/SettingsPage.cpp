@@ -626,7 +626,10 @@ std::vector<App::SettingRow> App::setting_rows() {
                 disabled = true;
                 break;
             case UpdateStage::Ready:
-                what = std::format(L"Version {} is ready. It installs when you quit Backtrack.", to_wide(update.version));
+                // Installing on quit is part of automatic updates; without them only the button installs.
+                what = settings_.auto_update
+                           ? std::format(L"Version {} is ready. It installs when you quit Backtrack.", to_wide(update.version))
+                           : std::format(L"Version {} is ready. Press Install now to update.", to_wide(update.version));
                 label = L"Install now";
                 arg = "update-install";
                 break;

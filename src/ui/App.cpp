@@ -1231,7 +1231,11 @@ void App::run_cleanup() {
     std::vector<std::string> due = library_.due_for_removal(policy, now_unix());
     // A clip that could not be removed (in use, no Recycle Bin, the user said no) waits for the
     // next run instead of a warning or a question every hour.
-    std::erase_if(due, [this](const std::string& file) { return cleanup_skipped_.contains(file); });
+    std::erase_if(due, [this](const std::string& file) {
+        // Nor the clip being exported: it waits for the next run instead of ending the export.
+        return cleanup_skipped_.contains(file) ||
+               (export_ && export_->stage == ExportView::Stage::Running && export_->file == file);
+    });
     if (due.empty()) return;
     if (editing_) end_edit(true);
     if (clip_view_ && std::find(due.begin(), due.end(), clip_view_->file) != due.end()) {
@@ -1848,6 +1852,8 @@ void App::paint() {
     }
     paint_sidebar(h);
     paint_title_bar(w);
+    // The title bar's search box is a window of its own above the scrim: off while the dialog is open.
+    if ((IsWindowEnabled(search_box_) != FALSE) == static_cast<bool>(export_)) EnableWindow(search_box_, !export_);
     if (export_) {
         paint_export(w, h);
         // The page's text boxes are windows of their own and would show through the dialog.
@@ -2499,6 +2505,7 @@ void App::on_click(float x, float y, bool right) {
 }
 
 void App::on_wheel(float delta) {
+    if (export_ && !menu_) return;  // the page behind the Export window stays put
     if (menu_) {
         menu_->scroll = std::max(0.0f, menu_->scroll + delta / 3);  // paint_menu clamps the end
         hover_.reset();
@@ -2582,7 +2589,9 @@ void App::run(const Hit& hit, bool right, POINT screen) {
             invalidate();
             break;
         }
-        case Action::Search: SetFocus(search_box_); break;
+        case Action::Search:
+            if (!export_) SetFocus(search_box_);  // not behind the Export window
+            break;
         case Action::Minimize: ShowWindow(window_, SW_MINIMIZE); break;
         case Action::Maximize: ShowWindow(window_, IsZoomed(window_) ? SW_RESTORE : SW_MAXIMIZE); break;
         case Action::Close: PostMessageW(window_, WM_CLOSE, 0, 0); break;

@@ -50,6 +50,9 @@ void App::open_export() {
     view->options.in_seconds = clip_view_->in;
     view->options.out_seconds = clip_view_->out > 0 && clip_view_->out < length - 0.05 ? clip_view_->out : 0.0;
     view->options.height = 1080;
+    // Settings > Encoder = processor: the graphics card's encoder is not used for exports either
+    // (it may be the reason the player picked that).
+    view->options.hardware = settings_.encoder != EncoderPreference::Software;
     export_ = view;
     // What the file is (size, frame rate, sound) for the estimate: quick, but it opens the file.
     const fs::path source = clip_path(view->file);
@@ -70,7 +73,10 @@ void App::open_export() {
 
 void App::close_export() {
     if (!export_) return;
-    if (export_->stage == ExportView::Stage::Running) export_->cancel->store(true);  // finishes on the worker
+    if (export_->stage == ExportView::Stage::Running) {
+        export_->cancel->store(true);  // finishes on the worker
+        show_notice(L"The export was cancelled.");  // also when something else closed the clip page
+    }
     export_.reset();
     invalidate();
 }
@@ -110,6 +116,12 @@ void App::run_export(const std::string& what, const Rect& anchor) {
         const fs::path folder = recorder_->output_dir() / L"Exports";
         fs::create_directories(folder, ec);
         const fs::path destination = free_export_path(folder, clip_path(view->file).stem().wstring(), o.format);
+        if (destination.empty()) {
+            view->stage = ExportView::Stage::Failed;
+            view->message = "There is no free file name left in the Exports folder. Remove some exports first.";
+            invalidate();
+            return;
+        }
         view->stage = ExportView::Stage::Running;
         view->progress->store(0.0);
         const fs::path source = clip_path(view->file);
