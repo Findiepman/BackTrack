@@ -98,7 +98,6 @@ public:
             WinHttpCloseHandle(request);
         } else {
             abort_.request_ = request;
-            request_ = request;
         }
     }
     ~UploadRequestGuard() {
@@ -108,13 +107,16 @@ public:
     }
     UploadRequestGuard(const UploadRequestGuard&) = delete;
     UploadRequestGuard& operator=(const UploadRequestGuard&) = delete;
-    // Null when it was aborted before it could be used. Once abort() closed it, calls on it fail
-    // with ERROR_WINHTTP_OPERATION_CANCELLED or ERROR_INVALID_HANDLE; the caller then asks aborted().
-    HINTERNET get() const { return request_; }
+    // The handle for the next call, or null once abort() closed it: a call on null fails at once,
+    // where a call on the closed value could reach another handle that WinHTTP gave the same value
+    // since (the updater's). Only the moment between this and the call itself stays open.
+    HINTERNET get() const {
+        std::lock_guard lock(abort_.mutex_);
+        return static_cast<HINTERNET>(abort_.request_);
+    }
 
 private:
     UploadAbort& abort_;
-    HINTERNET request_ = nullptr;
 };
 
 UploadResult upload_clip(const std::filesystem::path& file, ShareHost host, const UploadProgress& progress,
@@ -216,9 +218,13 @@ UploadResult upload_clip(const std::filesystem::path& file, ShareHost host, cons
         std::string body;
         char buffer[1024];
         DWORD got = 0;
-        while (body.size() < kMaxReplyBytes && WinHttpReadData(request.get(), buffer, sizeof(buffer), &got) && got > 0) {
+        while (body.size() < kMaxReplyBytes) {
+            if (!WinHttpReadData(request.get(), buffer, sizeof(buffer), &got)) return failed(GetLastError());
+            if (got == 0) break;
             body.append(buffer, got);
         }
+        // Cancelled while the reply came in: whatever arrived is not trusted as an answer.
+        if (abort.aborted()) return failed(ERROR_WINHTTP_OPERATION_CANCELLED);
         if (status == 407) {
             result.message = "A proxy on this network wants a password before anything can be uploaded.";
             return result;
