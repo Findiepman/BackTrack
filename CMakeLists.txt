@@ -38,6 +38,7 @@ add_library(backtrack_core STATIC
     src/core/NoiseSuppressor.cpp
     src/core/ThemeColors.cpp
     src/core/CaptureMath.cpp
+    src/core/UpdateCheck.cpp
 )
 target_include_directories(backtrack_core PUBLIC src)
 target_link_libraries(backtrack_core PUBLIC bt_options)
@@ -87,6 +88,7 @@ add_executable(backtrack WIN32
     src/platform/Shell.cpp
     src/platform/VideoPlayer.cpp
     src/platform/IniFile.cpp
+    src/platform/Updater.cpp
     src/ui/App.cpp
     src/ui/Widgets.cpp
     src/ui/ClipPage.cpp
@@ -102,7 +104,7 @@ target_include_directories(backtrack PRIVATE src ${CMAKE_CURRENT_BINARY_DIR}/gen
 add_dependencies(backtrack backtrack_shaders)
 target_compile_definitions(backtrack PRIVATE BT_VERSION="${PROJECT_VERSION}")
 target_link_libraries(backtrack PRIVATE backtrack_core d3d11 dxgi mfplat mfuuid mfreadwrite winmm avrt wmcodecdspuuid
-                      shell32 ole32 d2d1 dwrite dxguid dwmapi comctl32 windowscodecs propsys shcore)
+                      shell32 ole32 d2d1 dwrite dxguid dwmapi comctl32 windowscodecs propsys shcore winhttp bcrypt)
 
 # The icon file built into the exe, drawn by the same code as the window's logo.
 add_executable(make_icon tools/make_icon.cpp src/ui/Icon.cpp src/ui/Logo.cpp)
@@ -136,8 +138,15 @@ add_dependencies(record_check backtrack_shaders)
 target_link_libraries(record_check PRIVATE backtrack_core d3d11 dxgi mfplat mfuuid mfreadwrite winmm avrt
                       wmcodecdspuuid shell32 ole32 propsys)
 
+# Development tool: the updater without the window, against the real GitHub API
+# (tools/update_check.cpp). Not shipped.
+add_executable(update_check tools/update_check.cpp src/platform/Log.cpp src/platform/Updater.cpp)
+target_include_directories(update_check PRIVATE src)
+target_compile_definitions(update_check PRIVATE BT_VERSION="${PROJECT_VERSION}")
+target_link_libraries(update_check PRIVATE backtrack_core winhttp bcrypt shell32 ole32 advapi32)
+
 enable_testing()
-foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests TrimPlanTests AudioFifoTests AudioMixTests NoiseSuppressorTests ThemeColorsTests CaptureMathTests)
+foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests TrimPlanTests AudioFifoTests AudioMixTests NoiseSuppressorTests ThemeColorsTests CaptureMathTests UpdateCheckTests)
     add_executable(${test_name} tests/${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE backtrack_core)
     target_compile_definitions(${test_name} PRIVATE BT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
