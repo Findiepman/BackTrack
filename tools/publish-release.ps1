@@ -101,7 +101,8 @@ try {
         Remove-Item $notesFile.FullName -ErrorAction SilentlyContinue
     }
     # GitHub adds a "digest" (sha256) to the asset; installed copies check the download against it.
-    $digest = & gh api "repos/$repo/releases/tags/$tag" --jq ".assets[] | select(.name == `"$setupName`") | .digest"
+    # Windows PowerShell drops bare double quotes inside an argument to a native program; \" survives.
+    $digest = & gh api "repos/$repo/releases/tags/$tag" --jq ".assets[] | select(.name == \`"$setupName\`") | .digest"
     if ($digest -and $digest -ne "sha256:$hash") { Write-Warning "GitHub's digest $digest differs from the local file's sha256:$hash" }
     Step "Published https://github.com/$repo/releases/tag/$tag (GitHub digest: $digest)"
 } finally {
