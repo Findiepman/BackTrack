@@ -61,6 +61,10 @@ std::string connection_problem(DWORD error, std::wstring_view host) {
     }
 }
 
+std::string cancelled_text() {
+    return "The upload was cancelled.";
+}
+
 std::string random_boundary() {
     unsigned char bytes[16] = {};
     BCryptGenRandom(nullptr, bytes, sizeof(bytes), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
@@ -71,8 +75,50 @@ std::string random_boundary() {
 
 }  // namespace
 
+void UploadAbort::abort() {
+    std::lock_guard lock(mutex_);
+    aborted_ = true;
+    if (request_ != nullptr) {
+        WinHttpCloseHandle(static_cast<HINTERNET>(request_));  // the blocked call on the worker returns now
+        request_ = nullptr;
+    }
+}
+
+bool UploadAbort::aborted() const {
+    std::lock_guard lock(mutex_);
+    return aborted_;
+}
+
+// Owns the request handle together with UploadAbort: whichever comes first closes it, once.
+class UploadRequestGuard {
+public:
+    UploadRequestGuard(UploadAbort& abort, HINTERNET request) : abort_(abort) {
+        std::lock_guard lock(abort_.mutex_);
+        if (abort_.aborted_) {
+            WinHttpCloseHandle(request);
+        } else {
+            abort_.request_ = request;
+            request_ = request;
+        }
+    }
+    ~UploadRequestGuard() {
+        std::lock_guard lock(abort_.mutex_);
+        if (abort_.request_ != nullptr) WinHttpCloseHandle(static_cast<HINTERNET>(abort_.request_));
+        abort_.request_ = nullptr;
+    }
+    UploadRequestGuard(const UploadRequestGuard&) = delete;
+    UploadRequestGuard& operator=(const UploadRequestGuard&) = delete;
+    // Null when it was aborted before it could be used. Once abort() closed it, calls on it fail
+    // with ERROR_WINHTTP_OPERATION_CANCELLED or ERROR_INVALID_HANDLE; the caller then asks aborted().
+    HINTERNET get() const { return request_; }
+
+private:
+    UploadAbort& abort_;
+    HINTERNET request_ = nullptr;
+};
+
 UploadResult upload_clip(const std::filesystem::path& file, ShareHost host, const UploadProgress& progress,
-                         const std::atomic<bool>& cancel) {
+                         UploadAbort& abort) {
     UploadResult result;
     const ShareEndpoint endpoint = share_endpoint(host);
     try {
@@ -87,7 +133,10 @@ UploadResult upload_clip(const std::filesystem::path& file, ShareHost host, cons
             ~Closer() { CloseHandle(h); }
         } closer{opened};
         LARGE_INTEGER size{};
-        GetFileSizeEx(opened, &size);
+        if (!GetFileSizeEx(opened, &size)) {
+            result.message = "The share copy could not be read for the upload.";
+            return result;
+        }
         const auto file_bytes = static_cast<std::uint64_t>(size.QuadPart);
         if (file_bytes == 0 || file_bytes > endpoint.max_bytes) {
             result.message = std::format("The clip is {:.0f} MB; {} takes at most {} MB.", file_bytes / 1e6,
@@ -106,15 +155,23 @@ UploadResult upload_clip(const std::filesystem::path& file, ShareHost host, cons
         WinHttpSetTimeouts(session.get(), kResolveTimeoutMs, kConnectTimeoutMs, kSendTimeoutMs, kReceiveTimeoutMs);
         const Internet connect(WinHttpConnect(session.get(), std::wstring(endpoint.host).c_str(),
                                               INTERNET_DEFAULT_HTTPS_PORT, 0));
-        const Internet request(connect.get() == nullptr
-                                   ? nullptr
-                                   : WinHttpOpenRequest(connect.get(), L"POST", std::wstring(endpoint.path).c_str(),
-                                                        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                                        WINHTTP_FLAG_SECURE));
-        if (request.get() == nullptr) {
+        const HINTERNET opened_request =
+            connect.get() == nullptr ? nullptr
+                                     : WinHttpOpenRequest(connect.get(), L"POST", std::wstring(endpoint.path).c_str(),
+                                                          nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                                          WINHTTP_FLAG_SECURE);
+        if (opened_request == nullptr) {
             result.message = connection_problem(GetLastError(), endpoint.host);
             return result;
         }
+        const UploadRequestGuard request(abort, opened_request);
+        // Every failure below may be the abort closing the handle under a blocked call.
+        const auto failed = [&](DWORD error) {
+            result.cancelled = abort.aborted();
+            result.message = result.cancelled ? cancelled_text() : connection_problem(error, endpoint.host);
+            return result;
+        };
+        if (request.get() == nullptr) return failed(ERROR_WINHTTP_OPERATION_CANCELLED);
         // The reply must come from the host itself: a redirect could hand back any address.
         DWORD redirects = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
         WinHttpSetOption(request.get(), WINHTTP_OPTION_REDIRECT_POLICY, &redirects, sizeof(redirects));
@@ -124,8 +181,7 @@ UploadResult upload_clip(const std::filesystem::path& file, ShareHost host, cons
         // Over 4 GB cannot be announced here, but no host accepts that much anyway (checked above).
         if (!WinHttpSendRequest(request.get(), headers.c_str(), static_cast<DWORD>(-1L), WINHTTP_NO_REQUEST_DATA, 0,
                                 static_cast<DWORD>(total), 0)) {
-            result.message = connection_problem(GetLastError(), endpoint.host);
-            return result;
+            return failed(GetLastError());
         }
         std::uint64_t sent = 0;
         const auto write = [&](const void* data, DWORD bytes) {
@@ -138,11 +194,7 @@ UploadResult upload_clip(const std::filesystem::path& file, ShareHost host, cons
         bool ok = write(form.head.data(), static_cast<DWORD>(form.head.size()));
         std::vector<char> piece(kPiece);
         for (std::uint64_t left = file_bytes; ok && left > 0;) {
-            if (cancel) {
-                result.cancelled = true;
-                result.message = "The upload was cancelled.";
-                return result;  // closing the request ends the half-sent upload; catbox keeps nothing
-            }
+            if (abort.aborted()) return failed(ERROR_WINHTTP_OPERATION_CANCELLED);  // a half-sent upload is not kept
             DWORD read = 0;
             if (!ReadFile(opened, piece.data(), static_cast<DWORD>(std::min<std::uint64_t>(left, kPiece)), &read,
                           nullptr) ||
@@ -154,19 +206,22 @@ UploadResult upload_clip(const std::filesystem::path& file, ShareHost host, cons
             left -= read;
         }
         if (ok) ok = write(form.tail.data(), static_cast<DWORD>(form.tail.size()));
-        if (!ok || !WinHttpReceiveResponse(request.get(), nullptr)) {
-            result.message = connection_problem(GetLastError(), endpoint.host);
-            return result;
-        }
+        if (!ok || !WinHttpReceiveResponse(request.get(), nullptr)) return failed(GetLastError());
         DWORD status = 0;
         DWORD status_size = sizeof(status);
-        WinHttpQueryHeaders(request.get(), WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_size, WINHTTP_NO_HEADER_INDEX);
+        if (!WinHttpQueryHeaders(request.get(), WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                 WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_size, WINHTTP_NO_HEADER_INDEX)) {
+            return failed(GetLastError());
+        }
         std::string body;
         char buffer[1024];
         DWORD got = 0;
         while (body.size() < kMaxReplyBytes && WinHttpReadData(request.get(), buffer, sizeof(buffer), &got) && got > 0) {
             body.append(buffer, got);
+        }
+        if (status == 407) {
+            result.message = "A proxy on this network wants a password before anything can be uploaded.";
+            return result;
         }
         if (status == 413 || status == 412) {
             result.message = std::format("{} says the clip is too big.", to_utf8(std::wstring(endpoint.host)));

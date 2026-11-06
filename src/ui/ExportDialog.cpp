@@ -38,7 +38,7 @@ std::wstring megabytes(std::uint64_t bytes) {
 }  // namespace
 
 void App::open_export() {
-    if (!clip_view_ || export_) return;
+    if (!clip_view_ || export_ || share_) return;
     const ClipEntry* clip = library_.find(clip_view_->file);
     if (clip == nullptr || !clips_folder_available()) return;
     if (clip_view_->player) clip_view_->player->pause();

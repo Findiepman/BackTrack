@@ -30,11 +30,30 @@ namespace {
 
 namespace fs = std::filesystem;
 
-// Where the share copy waits for its upload; deleted right after.
-fs::path share_copy_path() {
+fs::path share_copy_folder() {
     wchar_t temp[MAX_PATH + 1] = {};
     const DWORD length = GetTempPathW(MAX_PATH + 1, temp);
-    const fs::path folder = (length > 0 && length <= MAX_PATH ? fs::path(temp) : fs::temp_directory_path()) / L"Backtrack";
+    return (length > 0 && length <= MAX_PATH ? fs::path(temp) : fs::temp_directory_path()) / L"Backtrack";
+}
+
+// Share copies a crash or a forced shutdown left behind (they can be hundreds of MB). An hour
+// old: never the one a running share is still writing.
+void sweep_share_copies() {
+    std::error_code ec;
+    const auto cutoff = fs::file_time_type::clock::now() - std::chrono::hours(1);
+    for (fs::directory_iterator it(share_copy_folder(), ec), end; !ec && it != end; it.increment(ec)) {
+        const std::wstring name = it->path().filename().wstring();
+        std::error_code time_ec;
+        if (name.starts_with(L"share-") && it->last_write_time(time_ec) < cutoff && !time_ec) {
+            std::error_code remove_ec;
+            fs::remove(it->path(), remove_ec);
+        }
+    }
+}
+
+// Where the share copy waits for its upload; deleted right after.
+fs::path share_copy_path() {
+    const fs::path folder = share_copy_folder();
     std::error_code ec;
     fs::create_directories(folder, ec);
     unsigned char bytes[8] = {};
@@ -44,7 +63,9 @@ fs::path share_copy_path() {
     return folder / (name + L".mp4");
 }
 
-// Balanced at 1080p when that fits the host; else the exporter's "fits a size" mode does.
+// Balanced at 1080p when that clearly fits the host; else the exporter's "fits a size" mode, which
+// checks the real size and encodes again if it overshot. Balanced is not size-checked, and hardware
+// encoders overshoot by up to ~30 %, so it only gets the job well below the limit.
 ExportOptions share_options(const ExportOptions& range, const ExportSource& source, ShareHost host, bool hardware) {
     ExportOptions o = range;
     o.format = ExportFormat::Mp4;
@@ -53,7 +74,7 @@ ExportOptions share_options(const ExportOptions& range, const ExportSource& sour
     o.audio = true;
     o.hardware = hardware;
     const ExportPlan plan = plan_export(o, source);
-    if (!plan.problem.empty() || plan.estimated_bytes > share_size_limit(host)) {
+    if (!plan.problem.empty() || plan.estimated_bytes > share_size_limit(host) / 100 * 70) {
         o.quality = ExportQuality::FitsDiscord;
         o.byte_budget = share_size_limit(host);
     }
@@ -86,6 +107,7 @@ void App::open_share() {
     const ClipEntry* clip = library_.find(clip_view_->file);
     if (clip == nullptr || !clips_folder_available()) return;
     if (clip_view_->player) clip_view_->player->pause();
+    sweep_share_copies();
     auto view = std::make_shared<ShareView>();
     view->file = clip_view_->file;
     view->title = display_title(*clip);
@@ -115,6 +137,7 @@ void App::close_share() {
     if (!share_) return;
     if (share_->stage == ShareView::Stage::Working) {
         share_->cancel->store(true);
+        share_->abort->abort();
         show_notice(share_->finished->load() ? L"The clip was shared; its link is under Shared." : L"Sharing was cancelled.");
     }
     share_.reset();
@@ -150,8 +173,8 @@ void App::run_share(const std::string& what, const Rect&) {
         run_in_background([this, view, source, options, host, window]() -> std::function<void()> {
             auto last = std::chrono::steady_clock::now();
             const auto report = [&](double fraction, bool uploading) {
+                view->progress->store(fraction);  // before the phase: never the copy's 100 % as the upload's
                 view->uploading->store(uploading);
-                view->progress->store(fraction);
                 const auto now = std::chrono::steady_clock::now();
                 if (now - last > std::chrono::milliseconds(100)) {
                     last = now;
@@ -168,7 +191,7 @@ void App::run_share(const std::string& what, const Rect&) {
                 cancelled = made.cancelled;
                 message = made.message;
             } else {
-                const UploadResult sent = upload_clip(copy, host, [&](double f) { report(f, true); }, *view->cancel);
+                const UploadResult sent = upload_clip(copy, host, [&](double f) { report(f, true); }, *view->abort);
                 cancelled = sent.cancelled;
                 message = sent.message;
                 url = sent.url;
@@ -185,15 +208,19 @@ void App::run_share(const std::string& what, const Rect&) {
                     const std::int64_t now = now_unix();
                     const std::int64_t keeps = share_endpoint(host).keeps_seconds;
                     if (library_.set_shared(view->file, url, now, keeps > 0 ? now + keeps : 0)) save_library();
-                    if (settings_.share_copy_link && copy_text(to_wide(url)) && share_ != view) {
-                        show_notice(L"Link copied. Paste it in Discord.");
+                    if (view->cancel->load()) {
+                        // Cancelled while the host was already storing it: it is online now. Say so,
+                        // and leave the clipboard alone.
+                        show_notice(L"The clip had already been uploaded before the cancel; its link is under Shared.");
+                    } else if (settings_.share_copy_link && copy_text(to_wide(url))) {
+                        view->copied = true;
+                        if (share_ != view) show_notice(L"Link copied. Paste it in Discord.");
                     }
                 }
                 if (share_ != view) return;
                 view->stage = url.empty() ? ShareView::Stage::Failed : ShareView::Stage::Done;
                 view->url = url;
                 view->message = message;
-                view->copied = !url.empty() && settings_.share_copy_link;
                 invalidate();
             };
         });
@@ -283,8 +310,11 @@ void App::paint_share(float width, float height) {
         const bool uploading = view.uploading->load();
         // The copy is the first half of the bar, the upload the second.
         const double fraction = std::clamp(view.progress->load(), 0.0, 1.0) * 0.5 + (uploading ? 0.5 : 0.0);
-        g.text(uploading ? std::format(L"Uploading to {}...", share_endpoint(view.host).host)
-                         : std::wstring(L"Making the share copy..."),
+        // All bytes sent: the host is storing the file, which takes a moment for a big one.
+        const bool waiting = uploading && view.progress->load() >= 1.0;
+        g.text(waiting     ? std::format(L"Waiting for {}...", share_endpoint(view.host).host)
+               : uploading ? std::format(L"Uploading to {}...", share_endpoint(view.host).host)
+                           : std::wstring(L"Making the share copy..."),
                Rect{px, y, pw * 0.7f, 22}, TextStyle{14, Weight::Semibold}, kInk);
         g.text(std::format(L"{}%", std::lround(fraction * 100)), Rect{px + pw * 0.7f, y, pw * 0.3f, 22},
                TextStyle{14, Weight::Bold, false, true}, kInk, Align::End);

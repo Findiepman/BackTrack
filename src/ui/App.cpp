@@ -386,7 +386,10 @@ void App::run_ui_tasks() {
 
 void App::release() {
     if (export_) export_->cancel->store(true);  // stops within a second; the worker is joined below
-    if (share_) share_->cancel->store(true);
+    if (share_) {
+        share_->cancel->store(true);
+        share_->abort->abort();  // a stalled upload must not hold up quitting
+    }
     {
         // A trim that is being written finishes (never a half file); queued jobs are dropped.
         std::lock_guard lock(worker_mutex_);

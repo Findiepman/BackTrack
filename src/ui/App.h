@@ -26,6 +26,7 @@
 #include "platform/Recorder.h"
 #include "core/ExportPlan.h"
 #include "platform/Updater.h"
+#include "platform/Uploader.h"
 #include "platform/VideoPlayer.h"
 #include "ui/Graphics.h"
 #include "ui/Overlay.h"
@@ -223,7 +224,8 @@ private:
         Stage stage = Stage::Form;
         std::shared_ptr<std::atomic<double>> progress = std::make_shared<std::atomic<double>>(0.0);
         std::shared_ptr<std::atomic<bool>> uploading = std::make_shared<std::atomic<bool>>(false);
-        std::shared_ptr<std::atomic<bool>> cancel = std::make_shared<std::atomic<bool>>(false);
+        std::shared_ptr<std::atomic<bool>> cancel = std::make_shared<std::atomic<bool>>(false);  // the share copy
+        std::shared_ptr<UploadAbort> abort = std::make_shared<UploadAbort>();  // the upload, at once
         std::shared_ptr<std::atomic<bool>> finished = std::make_shared<std::atomic<bool>>(false);  // the link exists
         std::string url;
         std::string message;  // Failed: why
