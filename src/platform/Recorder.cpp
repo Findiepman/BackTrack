@@ -8,6 +8,7 @@
 
 #include <ctime>
 #include <cwctype>
+#include <future>
 
 namespace bt {
 namespace {
@@ -35,6 +36,31 @@ constexpr std::size_t kMaxDeviceResetsBeforeSoftware = 2;
 // A software encoder that cannot start is retried this often, not on every supervisor tick.
 constexpr Time100ns kEncoderRetryDelay = 5 * kTicksPerSecond;
 
+// Frames going into the video encoder with no packet coming out for this long: the encoder hung
+// (AMD's does under GPU load, silently). Its normal hiccups last a few frames.
+constexpr Time100ns kEncoderStallTimeout = 5 * kTicksPerSecond;
+// Two stalls within this window: the hardware encoder keeps hanging, the software one takes over.
+constexpr Time100ns kEncoderStallWindow = 10 * 60 * kTicksPerSecond;
+constexpr std::size_t kMaxStallsBeforeSoftware = 2;
+// How long the recorder waits for an old encoder to shut down. A hung driver can block in there
+// for good; recording (or quitting) must not wait for it.
+constexpr auto kEncoderShutdownLimit = std::chrono::seconds(6);
+// From the third stall within kEncoderStallWindow, rebuilds wait this long: each stall can leave a
+// hung encoder (a thread and a hardware session) behind, and those must not pile up.
+constexpr std::size_t kStallsBeforeBackoff = 3;
+constexpr Time100ns kStallBackoff = 60 * kTicksPerSecond;
+// The newest video in the buffer older than this (while recording): the video is not coming in.
+constexpr Time100ns kVideoFreshness = 3 * kTicksPerSecond;
+// A sound thread that ended on an error is started again after this, doubling up to the maximum
+// while it keeps failing (a dead audio service must not fill the log every 5 s).
+constexpr Time100ns kAudioRestartDelay = 5 * kTicksPerSecond;
+constexpr Time100ns kAudioRestartMax = 5 * 60 * kTicksPerSecond;
+// How long the supervisor waits for encoder_mutex_ while the capture thread hands a frame over (a
+// software encoder copies the whole frame under it).
+constexpr auto kEncoderLockWait = std::chrono::milliseconds(200);
+
+std::atomic<int> g_encoders_left_behind{0};
+
 // §9: counters to the log once a minute at debug level.
 constexpr Time100ns kCounterLogInterval = 60 * kTicksPerSecond;
 constexpr auto kSupervisorTick = std::chrono::milliseconds(500);
@@ -55,6 +81,52 @@ std::size_t byte_cap(int seconds, int kbps) {
         std::max(static_cast<std::size_t>(kbps) * kCapBitrateFactor, kCapFloorKbps);
     return (static_cast<std::size_t>(seconds) + kCapSlackSeconds) * ceiling_kbps * kBitsPerKilobit / kBitsPerByte;
 }
+
+// Shuts an encoder down on a thread of its own and waits at most kEncoderShutdownLimit. One that
+// hangs in its driver is left behind (logged) so the caller carries on; its packet callback goes
+// through the Recorder's PacketGate, so it cannot reach a Recorder that is gone.
+void retire_encoder(std::unique_ptr<VideoEncoder> encoder) {
+    if (!encoder) {
+        return;
+    }
+    const std::string name = encoder->name();
+    auto done = std::make_shared<std::promise<void>>();
+    std::future<void> finished = done->get_future();
+    // Whoever gets here second (the caller after its wait, or the thread once finished) settles
+    // the count, so an encoder that finishes late is no longer counted as left behind.
+    auto settled = std::make_shared<std::atomic<bool>>(false);
+    try {
+        std::thread([encoder = std::move(encoder), done, settled]() mutable {
+            try {
+                ComApartment com(COINIT_MULTITHREADED);
+                encoder.reset();
+            } catch (...) {
+                encoder.reset();  // without COM set up here; the encoder's own calls report failures
+            }
+            done->set_value();
+            if (settled->exchange(true)) {
+                --g_encoders_left_behind;  // the caller gave up on it and counted it
+            }
+        }).detach();
+    } catch (const std::system_error& e) {
+        // No thread: the lambda (and the encoder in it) was destroyed here, synchronously.
+        log::warn("Cannot shut the video encoder down on its own thread ({}); it was shut down here", e.what());
+        return;
+    }
+    if (finished.wait_for(kEncoderShutdownLimit) == std::future_status::timeout && !settled->exchange(true)) {
+        ++g_encoders_left_behind;
+        log::warn("{} did not shut down within {} s; left behind so recording can go on", name,
+                  std::chrono::duration_cast<std::chrono::seconds>(kEncoderShutdownLimit).count());
+    }
+}
+
+}  // namespace
+
+int encoders_left_behind() {
+    return g_encoders_left_behind.load();
+}
+
+namespace {
 
 std::filesystem::path expand_environment(const std::string& text) {
     const std::wstring wide = to_wide(text);
@@ -156,13 +228,17 @@ Recorder::Recorder(const Settings& settings, const std::filesystem::path& app_di
       on_saved_(std::move(on_saved)),
       output_dir_(prepare_output_dir(settings.output_dir, app_dir, output_dir_fallback_)),
       encoder_preference_(settings.encoder),
+      stall_watch_(kEncoderStallTimeout),
       video_buffer_(seconds_to_100ns(settings.clip_seconds), byte_cap(settings.clip_seconds, settings.video_bitrate_kbps)) {
     log::info("Clips are saved to {}", to_utf8(output_dir_.wstring()));
-    remove_stale_temp_files(output_dir_, L"");
     // The Videos folder is where a clip goes when the clips folder was gone. Other programs use it
-    // too, so only files starting like Backtrack's own names are touched there.
+    // too, so only files starting like Backtrack's own names are touched there, also when it is
+    // the clips folder itself (the fallback, or chosen as such).
     const std::wstring name_prefix = to_wide(settings_.filename.substr(0, settings_.filename.find('%')));
-    if (videos_folder() != output_dir_ && !name_prefix.empty()) {
+    if (videos_folder() != output_dir_) {
+        remove_stale_temp_files(output_dir_, L"");
+    }
+    if (!name_prefix.empty()) {
         remove_stale_temp_files(videos_folder(), name_prefix);
     }
     if (!settings_.audio_enabled && !settings_.mic_enabled) {
@@ -212,6 +288,8 @@ Recorder::Recorder(const Settings& settings, const std::filesystem::path& app_di
 
 Recorder::~Recorder() {
     stop();
+    std::lock_guard lock(packet_gate_->mutex);
+    packet_gate_->open = false;  // an encoder left behind by retire_encoder delivers nothing now
 }
 
 void Recorder::start() {
@@ -234,6 +312,10 @@ void Recorder::start() {
 }
 
 void Recorder::stop() {
+    // Torn down after pipeline_mutex_ is released: a hung encoder may take kEncoderShutdownLimit,
+    // and status, pause or save must not wait for that.
+    std::unique_ptr<VideoEncoder> encoder;
+    std::unique_ptr<ScreenCapture> capture;
     if (supervisor_.joinable()) {
         {
             std::lock_guard lock(wake_mutex_);
@@ -253,19 +335,21 @@ void Recorder::stop() {
         if (capture_) {
             capture_->stop();
         }
-        std::unique_ptr<VideoEncoder> encoder;
         {
             std::lock_guard encoder_lock(encoder_mutex_);
             encoder = std::move(encoder_);
         }
-        encoder.reset();  // before the capture: its input textures come from the capture's allocator
-        capture_.reset();
+        encoder_kind_ = EncoderKind::None;
+        capture = std::move(capture_);
         if (audio_) {
             audio_->stop();
         }
         pipeline_up_ = false;
         started_ = false;
+        restarting_after_stall_ = false;
     }
+    retire_encoder(std::move(encoder));  // before the capture: its input textures come from the capture's allocator
+    capture.reset();
     if (writer_.joinable()) {
         {
             std::lock_guard lock(writer_mutex_);
@@ -369,13 +453,23 @@ bool Recorder::save_clip(std::string& reason, int seconds) {
         reason = std::string("Cannot save: ") + e.what();
         return false;
     }
+    if (job.video.empty() && video_buffer_.stats().packets > 0) {
+        // Only video from before the clip's time is left: the video stopped coming in. Never
+        // saved as a clip (it once gave an hour old second of video next to today's sound).
+        reason = "Not saved: no video was recorded in that time (details in backtrack.log)";
+        log::warn("Save refused: the newest video in the buffer is older than the clip's start");
+        return false;
+    }
     if (job.video.empty() || !job.video_type) {
         reason = "Nothing to save yet: there is no video in the buffer";
         return false;
     }
     job.start = job.video.front().pts;
     const Time100ns length = job.video.back().pts + job.video.back().duration - job.video.front().pts;
-    if (length < kMinimumClip) {
+    // A short request (save_seconds = 1) may come out a little under a second: the encoder's last
+    // packet trails the clock. Only a clip under half of what was asked is "nothing yet".
+    const int asked = seconds > 0 && seconds < settings_.clip_seconds ? seconds : settings_.clip_seconds;
+    if (length < std::min(kMinimumClip, seconds_to_100ns(asked) / 2)) {
         reason = "Nothing to save yet: less than a second has been recorded";
         return false;
     }
@@ -398,9 +492,9 @@ BufferStatus Recorder::buffer_status() {
     if (video.packets > 0 && video.newest_pts > video.oldest_pts) {
         status.seconds = static_cast<double>(video.newest_pts - video.oldest_pts) / 1e7;
     }
-    std::lock_guard lock(encoder_mutex_);
-    status.encoder_running = encoder_ != nullptr;
-    status.hardware_encoder = encoder_ != nullptr && encoder_->hardware();
+    const EncoderKind kind = encoder_kind_;
+    status.encoder_running = kind != EncoderKind::None;
+    status.hardware_encoder = kind == EncoderKind::Hardware;
     return status;
 }
 
@@ -414,6 +508,9 @@ std::string Recorder::status_text() const {
     if (paused_) {
         return "Paused";
     }
+    if (encoder_blocked_) {
+        return "Video stuck in the graphics driver: restart Backtrack";
+    }
     if (!pipeline_up_ || !have_frames_) {
         // Also at the lock screen or with the monitor asleep at startup: no frame has come yet.
         return "Waiting for the screen, retrying";
@@ -424,13 +521,21 @@ std::string Recorder::status_text() const {
     if (encoder_unavailable_) {
         return "Video encoder failed, retrying";
     }
-    std::string encoder;
+    if (restarting_after_stall_) {
+        return "Video encoder stopped, restarting it";
+    }
+    const EncoderKind kind = encoder_kind_;
+    if (kind == EncoderKind::None) {
+        return "Starting the video encoder";
+    }
+    const std::string encoder = kind == EncoderKind::Hardware ? "hardware" : "software";
     {
-        std::lock_guard lock(encoder_mutex_);
-        if (!encoder_) {
-            return "Starting the video encoder";
+        // The last line of defence: whatever stops the video (not only a stalled encoder), the
+        // status must not say "Recording" while only the sound is.
+        const ClipBufferStats video = video_buffer_.stats();
+        if (video.packets > 0 && recording_now() - video.newest_pts > kVideoFreshness) {
+            return "Video is not being recorded, retrying";
         }
-        encoder = encoder_->hardware() ? "hardware" : "software";
     }
     const bool sound = audio_ && audio_->recording();
     const MicStatus mic = audio_ ? audio_->mic_status() : MicStatus::Off;
@@ -494,6 +599,13 @@ void Recorder::simulate_capture_loss() {
     }
 }
 
+void Recorder::simulate_encoder_stall() {
+    std::lock_guard lock(encoder_mutex_);
+    if (encoder_) {
+        encoder_->simulate_stall();
+    }
+}
+
 void Recorder::wake_supervisor() {
     {
         std::lock_guard lock(wake_mutex_);
@@ -519,6 +631,27 @@ void Recorder::supervisor_main() {
             }
             if (!rebuild_pipeline_) {
                 ensure_encoder();
+            }
+            if (!rebuild_pipeline_) {
+                check_encoder_stall();
+            }
+            if (audio_ && !audio_->failed()) {
+                // Healthy past the planned restart time: it really runs again. Earlier, a restart
+                // that fails again a little later would reset the backoff every time.
+                if (qpc_now() >= next_audio_restart_) audio_restart_delay_ = kAudioRestartDelay;
+            } else if (audio_ && qpc_now() >= next_audio_restart_) {
+                // The sound thread ended on an error; nothing else starts it again until a pause.
+                audio_restart_delay_ = std::clamp(audio_restart_delay_ * 2, kAudioRestartDelay, kAudioRestartMax);
+                next_audio_restart_ = qpc_now() + audio_restart_delay_;
+                std::lock_guard lock(pipeline_mutex_);
+                if (started_ && !paused_ && audio_->failed()) {
+                    log::warn("Sound recording stopped on an error; starting it again");
+                    try {
+                        audio_->start(paused_total_);
+                    } catch (const std::exception& e) {
+                        log::error("Cannot restart sound recording: {}", e.what());
+                    }
+                }
             }
             if (qpc_now() >= next_counter_log_) {
                 log_counters();
@@ -550,6 +683,7 @@ void Recorder::rebuild_pipeline() {
         {
             std::lock_guard encoder_lock(encoder_mutex_);
             old_encoder = std::move(encoder_);
+            encoder_kind_ = EncoderKind::None;
         }
         old_capture = std::move(capture_);
     }
@@ -560,7 +694,7 @@ void Recorder::rebuild_pipeline() {
     if (old_capture && FAILED(old_capture->device()->GetDeviceRemovedReason())) {
         device_resets_.push_back(now);
     }
-    old_encoder.reset();  // before its capture: the encoder's input textures come from it
+    retire_encoder(std::move(old_encoder));  // before its capture: the encoder's input textures come from it
     old_capture.reset();
     {
         // A new graphics device means a new encoder with its own SPS/PPS: old packets cannot be
@@ -601,23 +735,113 @@ void Recorder::rebuild_pipeline() {
                   device_resets_.size());
         encoder_preference_ = EncoderPreference::Software;
     }
+    const Time100ns since_stall_window = qpc_now() - kEncoderStallWindow;
+    std::erase_if(encoder_stalls_, [since_stall_window](Time100ns at) { return at < since_stall_window; });
+    if (encoder_stalls_.size() >= kMaxStallsBeforeSoftware && !stall_forced_software_ &&
+        encoder_preference_ != EncoderPreference::Software) {
+        log::warn("The hardware video encoder stopped working {} times within {} minutes; using the software "
+                  "encoder until Backtrack restarts",
+                  encoder_stalls_.size(), kEncoderStallWindow / kTicksPerSecond / 60);
+        stall_forced_software_ = true;
+    }
+    if (stall_forced_software_) {
+        encoder_preference_ = EncoderPreference::Software;
+    }
     // The flags are set before the thread starts: it may report Failed on its very first tick,
     // and that report must win over "the pipeline is up".
     rebuild_pipeline_ = false;
     rebuild_encoder_ = true;
     pipeline_up_ = true;
-    pipeline_retry_delay_ = kPipelineRetryInitial;
     if (paused_) {
         return;  // resume() starts it
     }
     try {
         capture_->start(paused_total_);
+        pipeline_retry_delay_ = kPipelineRetryInitial;  // only once it really started
     } catch (const std::exception& e) {
         log::error("Cannot start screen capture: {}", e.what());
         pipeline_up_ = false;
         rebuild_pipeline_ = true;
-        next_pipeline_attempt_ = now + pipeline_retry_delay_;
+        // From now, not from the top: retiring the old encoder may have taken seconds.
+        next_pipeline_attempt_ = qpc_now() + pipeline_retry_delay_;
+        pipeline_retry_delay_ = std::min(pipeline_retry_delay_ * 2, kPipelineRetryMax);
     }
+}
+
+// §9: the video must never stop silently while the sound goes on. Supervisor thread only.
+void Recorder::check_encoder_stall() {
+    if (!capture_ || paused_ || !pipeline_up_) {
+        stall_watch_.reset();
+        return;
+    }
+    if (video_generation_ != watched_generation_) {
+        watched_generation_ = video_generation_;  // a new encoder: its counters start again
+        stall_watch_.reset();
+    }
+    const CaptureStats capture = capture_->stats();
+    VideoEncoderStats encoder;
+    std::string name;
+    {
+        // The capture thread is inside on_frame for a moment per frame. Inside it for the whole
+        // stall time, it is stuck in the encoder's driver: nothing here can free it (joining it
+        // would hang this thread too), so the status says so.
+        const Time100ns since = in_encoder_since_;
+        const Time100ns now = qpc_now();
+        if (since != 0 && now - since >= kEncoderStallTimeout) {
+            if (!encoder_blocked_) {
+                encoder_blocked_ = true;
+                log::error("The video encoder has been stuck inside the graphics driver for {:.0f} s; no video is "
+                           "recorded. Restart Backtrack (or the PC if that does not help)",
+                           static_cast<double>(now - since) / kTicksPerSecond);
+            }
+            return;
+        }
+        if (encoder_blocked_) {
+            encoder_blocked_ = false;
+            log::info("The video encoder is answering again");
+        }
+        std::unique_lock lock(encoder_mutex_, std::defer_lock);
+        if (!lock.try_lock_for(kEncoderLockWait)) {
+            return;  // a frame hand-over still going on: the next tick looks again
+        }
+        if (!encoder_ || encoder_->failed()) {
+            stall_watch_.reset();  // ensure_encoder deals with these
+            return;
+        }
+        encoder = encoder_->stats();
+        name = encoder_->name();
+    }
+    // Frames dropped because the encoder still holds every input texture count as offered: a hung
+    // encoder that keeps them all would otherwise look like a capture with nothing to give.
+    const std::uint64_t offered = capture.delivered + capture.allocator_empty;
+    const Time100ns now = qpc_now();
+    if (!stall_watch_.stalled(now, offered, encoder.packets_out)) {
+        return;
+    }
+    // Logged at warning level with the counters, whatever the log level: this must be explainable.
+    log::warn("{} stopped giving back video ({:.1f} s without a packet while frames kept coming); restarting the "
+              "video recording. Capture: {} ticks, {} delivered, {} dropped (encoder behind), {} capture losses. "
+              "Encoder: {} frames in, {} dropped (queue full), {} input errors, {} packets out",
+              name, static_cast<double>(stall_watch_.waiting_for(now)) / kTicksPerSecond, capture.ticks,
+              capture.delivered, capture.allocator_empty, capture.access_lost, encoder.frames_in,
+              encoder.frames_dropped, encoder.input_errors, encoder.packets_out);
+    stall_watch_.reset();
+    encoder_stalls_.push_back(now);
+    restarting_after_stall_ = true;
+    const Time100ns since_stall_window = now - kEncoderStallWindow;
+    std::erase_if(encoder_stalls_, [since_stall_window](Time100ns at) { return at < since_stall_window; });
+    // A whole new pipeline, not only a new encoder: a hung encoder keeps the capture's input
+    // textures, and a new encoder on the same allocator would starve. rebuild_pipeline clears
+    // the video buffer, so nothing from before the stall is joined to what comes after.
+    if (encoder_stalls_.size() >= kStallsBeforeBackoff) {
+        log::warn("The video encoder stopped {} times within {} minutes; the next restart waits {} s",
+                  encoder_stalls_.size(), kEncoderStallWindow / kTicksPerSecond / 60, kStallBackoff / kTicksPerSecond);
+        next_pipeline_attempt_ = now + kStallBackoff;
+    } else {
+        next_pipeline_attempt_ = 0;
+    }
+    rebuild_pipeline_ = true;
+    wake_supervisor();
 }
 
 void Recorder::ensure_encoder() {
@@ -649,7 +873,11 @@ void Recorder::ensure_encoder() {
 
     std::unique_ptr<VideoEncoder> old;
     {
-        std::lock_guard lock(encoder_mutex_);
+        std::unique_lock lock(encoder_mutex_, std::defer_lock);
+        if (!lock.try_lock_for(kEncoderLockWait)) {
+            rebuild_encoder_ = true;  // the capture thread is inside the encoder: next tick
+            return;
+        }
         if (encoder_ && encoder_->size() == size && !encoder_->failed()) {
             return;
         }
@@ -664,8 +892,9 @@ void Recorder::ensure_encoder() {
             }
         }
         old = std::move(encoder_);  // the capture thread drops frames until the new one is in
+        encoder_kind_ = EncoderKind::None;
     }
-    old.reset();  // drains outside the lock, so the capture thread never waits for it
+    retire_encoder(std::move(old));  // drains outside the lock, so the capture thread never waits for it
 
     std::uint64_t generation = 0;
     {
@@ -679,8 +908,14 @@ void Recorder::ensure_encoder() {
                                                     encoder_preference_, adapter, settings_.quality};
         auto encoder = std::make_unique<VideoEncoder>(
             encoder_settings, manager,
-            [this, generation](Packet&& packet, IMFMediaType* type) { on_video_packet(generation, std::move(packet), type); });
+            [this, generation, gate = packet_gate_](Packet&& packet, IMFMediaType* type) {
+                std::lock_guard gate_lock(gate->mutex);
+                if (gate->open) {
+                    on_video_packet(generation, std::move(packet), type);
+                }
+            });
         std::lock_guard lock(encoder_mutex_);
+        encoder_kind_ = encoder->hardware() ? EncoderKind::Hardware : EncoderKind::Software;
         encoder_ = std::move(encoder);
         encoder_unavailable_ = false;
     } catch (const std::exception& e) {
@@ -698,6 +933,11 @@ void Recorder::ensure_encoder() {
 }
 
 void Recorder::on_frame(IMFSample* sample, Time100ns pts) {
+    in_encoder_since_ = qpc_now();
+    struct Leave {
+        std::atomic<Time100ns>& since;
+        ~Leave() { since = 0; }
+    } leave{in_encoder_since_};
     std::lock_guard lock(encoder_mutex_);
     if (!encoder_ || encoder_->failed() || !(encoder_->size() == capture_->frame_size())) {
         ++frames_without_encoder_;
@@ -758,6 +998,7 @@ void Recorder::on_video_packet(std::uint64_t generation, Packet&& packet, IMFMed
         video_type_ = type;
     }
     video_buffer_.push(std::move(packet));
+    restarting_after_stall_ = false;
 }
 
 void Recorder::on_audio_packet(std::size_t track, Packet&& packet) {
@@ -779,8 +1020,8 @@ void Recorder::log_counters() {
                    c.access_lost, c.delivered, frames_without_encoder_.load());
     }
     {
-        std::lock_guard lock(encoder_mutex_);
-        if (encoder_) {
+        std::unique_lock lock(encoder_mutex_, std::defer_lock);
+        if (lock.try_lock_for(kEncoderLockWait) && encoder_) {
             const VideoEncoderStats e = encoder_->stats();
             log::debug("Encoder: {} frames in, {} dropped (queue full), {} input errors, {} packets out, {} keyframes, "
                        "{:.1f} MB",

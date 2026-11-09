@@ -84,6 +84,10 @@ public:
 
     VideoEncoderStats stats() const;
 
+    // Test hook: from now on ignore the encoder's requests for input and its output, as a hardware
+    // encoder that hung in its driver does (no error, nothing comes out).
+    void simulate_stall() { simulate_stall_ = true; }
+
     // True once the encoder stopped working (event queue error, MEError, worker crash). The owner
     // rebuilds it; packets stop until then.
     bool failed() const { return failed_; }
@@ -129,6 +133,7 @@ private:
     UniqueHandle event_loop_done_;
     std::atomic<bool> shutting_down_{false};
     std::atomic<bool> failed_{false};
+    std::atomic<bool> simulate_stall_{false};
     std::mutex input_mutex_;  // serialises ProcessInput between the capture thread and events
     std::deque<ComPtr<IMFSample>> pending_;
     int need_input_ = 0;  // METransformNeedInput events not yet answered

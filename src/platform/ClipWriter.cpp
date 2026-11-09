@@ -319,10 +319,13 @@ ClipWriteResult write_clip(const ClipWriteRequest& request) {
         } catch (const std::exception& e) {
             log::debug("Moving the MP4 index failed: {}", e.what());
         }
+        if (fast_start && !MoveFileExW(fast.c_str(), request.path.c_str(), MOVEFILE_WRITE_THROUGH)) {
+            // The finished clip is still in the plain file: rename that instead of losing both.
+            log::warn("Could not rename the fast-start copy of {} (error {}); keeping the plain file",
+                      to_utf8(request.path.filename().wstring()), GetLastError());
+            fast_start = false;
+        }
         if (fast_start) {
-            // Renamed first, deleted second: if the rename fails, the original is still there and
-            // the catch below cleans up only temporary files.
-            BT_CHECK_WIN32(MoveFileExW(fast.c_str(), request.path.c_str(), MOVEFILE_WRITE_THROUGH));
             DeleteFileW(temp.c_str());
         } else {
             DeleteFileW(fast.c_str());

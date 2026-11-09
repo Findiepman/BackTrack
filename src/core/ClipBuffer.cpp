@@ -63,6 +63,12 @@ void ClipBuffer::evict_locked() {
 
 std::vector<Packet> ClipBuffer::extract(Time100ns start, Time100ns end) const {
     std::lock_guard lock(mutex_);
+    if (packets_.empty() || packets_.back().pts < start) {
+        // Nothing in the buffer is from the clip's time: the video stopped coming (a stalled
+        // encoder) and what is left is older footage. Handing out its last GOP gave clips with
+        // one second of whatever was on screen an hour earlier, next to today's sound.
+        return {};
+    }
     constexpr std::size_t kNone = static_cast<std::size_t>(-1);
     std::size_t first = kNone;
     for (std::size_t i = 0; i < packets_.size() && packets_[i].pts <= start; ++i) {

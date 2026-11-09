@@ -60,6 +60,9 @@ struct AppPaths {
     std::filesystem::path log;
     std::filesystem::path library;  // library.json
     std::filesystem::path cache;  // thumbnails
+    // backtrack.ini existed but could not be read at startup (locked): the app runs on defaults
+    // and must never write them over the user's values this run.
+    bool ini_unreadable = false;
 };
 
 // Saved clips travel from the recorder's writer thread to the window through here. It also plays
@@ -426,6 +429,7 @@ private:
     void add_bookmark();
     void refresh_overlay();  // what the in-screen chip shows, and where
     void flash_overlay(std::wstring text, Color dot);
+    void flash_problem(std::wstring text);  // shown even with the overlay setting off
     RECT recorded_monitor_rect() const;  // in screen pixels
     void apply_audio_live();  // volumes, noise suppression, push-to-talk: no restart needed
     void refresh_devices();  // monitors_ and microphones_
@@ -527,6 +531,9 @@ private:
     std::wstring notice_;  // a short problem report in the header bar (failed recycle)
     std::chrono::steady_clock::time_point notice_until_{};
     bool library_writable_ = true;  // false when library.json exists but could not be read
+    bool library_rebuilt_ = false;  // library.json was damaged, or missing with clips: no automatic removal this run
+    bool library_missing_ = false;  // no library.json at start
+    bool cleanup_paused_logged_ = false;
     bool max_pressed_ = false;  // the maximize button was pressed; releasing on it toggles
     bool recycling_ = false;  // shell::recycle is waiting (it keeps the window responsive meanwhile)
     std::set<std::string> cleanup_skipped_;  // could not be removed this run; not retried hourly
@@ -557,6 +564,7 @@ private:
     };
     std::map<std::uint32_t, RawKey> raw_keys_down_;  // physical keys down, from the raw input
     std::optional<Hotkey> registered_keys_[kGlobalHotkeys];  // parsed once, for the raw input path
+    std::chrono::steady_clock::time_point last_forwarded_[kGlobalHotkeys + 1]{};  // keys sent to our own text boxes
     std::chrono::steady_clock::time_point last_shortcut_[kGlobalHotkeys + 1]{};  // by hotkey id: a press seen both ways acts once
     std::vector<MicDevice> microphones_;  // refreshed when the Record or Settings page opens
     std::vector<PlaybackDevice> playback_devices_;  // the same, for the system audio source

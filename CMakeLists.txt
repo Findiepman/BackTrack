@@ -1,5 +1,5 @@
 ﻿cmake_minimum_required(VERSION 3.25)
-project(Backtrack VERSION 0.5.0 LANGUAGES CXX)
+project(Backtrack VERSION 0.5.1 LANGUAGES CXX)
 
 if(NOT MSVC)
     message(FATAL_ERROR "Backtrack is built with MSVC (Visual Studio 2022 Build Tools).")
@@ -172,7 +172,7 @@ target_include_directories(share_check PRIVATE src)
 target_link_libraries(share_check PRIVATE backtrack_core winhttp bcrypt)
 
 enable_testing()
-foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests TrimPlanTests AudioFifoTests AudioMixTests NoiseSuppressorTests ThemeColorsTests CaptureMathTests UpdateCheckTests ExportPlanTests ShareUploadTests RepairPlanTests)
+foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests TrimPlanTests AudioFifoTests AudioMixTests NoiseSuppressorTests ThemeColorsTests CaptureMathTests UpdateCheckTests ExportPlanTests ShareUploadTests RepairPlanTests StallWatchTests)
     add_executable(${test_name} tests/${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE backtrack_core)
     target_compile_definitions(${test_name} PRIVATE BT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

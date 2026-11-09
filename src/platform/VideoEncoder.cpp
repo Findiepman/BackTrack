@@ -519,6 +519,9 @@ void VideoEncoder::on_event(IMFAsyncResult* result) {
         try {
             if (type == METransformDrainComplete) {
                 keep_listening = false;
+            } else if (simulate_stall_ && !shutting_down_ &&
+                       (type == METransformNeedInput || type == METransformHaveOutput)) {
+                // simulate_stall(): the request is never answered.
             } else if (shutting_down_) {
                 // Draining: pull remaining output so the encoder can finish, but deliver nothing.
                 if (type == METransformHaveOutput) {

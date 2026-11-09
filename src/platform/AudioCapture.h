@@ -245,6 +245,7 @@ private:
     std::atomic<bool> device_changed_{false};
     std::atomic<bool> running_{false};
     std::atomic<bool> failed_{false};
+    bool last_live_gate_ = true;  // capture thread: the mic gate at the last mix that was not a gap fill
     std::thread thread_;
 
     // Mix. The options and the meters are atomics shared with any thread; the rest is the audio

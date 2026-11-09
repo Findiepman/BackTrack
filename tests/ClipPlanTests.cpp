@@ -168,9 +168,29 @@ void file_names() {
     CHECK_EQ(numbered_clip_name("noext", 2), std::string("noext_2"));
 }
 
+// The user's clips of 2026-11-08: one second of video, then the sound 3550 s later, written as a
+// file an hour long. Sound past the picture's end (plus a little slack) is left out.
+void audio_far_after_the_video_is_left_out() {
+    std::vector<Packet> v;
+    for (int i = 0; i < 60; ++i) v.push_back(video(i * kFrame, i == 0));
+    std::vector<Packet> late;
+    for (int i = 0; i < 100; ++i) late.push_back(audio(3550 * kTicksPerSecond + i * kAac));
+    const ClipPlan stale = plan_clip(v, late);
+    CHECK_EQ(stale.audio_samples, std::size_t{0});
+    CHECK_EQ(stale.duration, stale.video_duration);
+
+    // Sound that runs a little past the last frame is kept; sound seconds after it is not.
+    std::vector<Packet> a;
+    for (int i = 0; i < 100; ++i) a.push_back(audio(i * kAac));  // 21.3 s of sound against 1 s of video
+    const ClipPlan plan = plan_clip(v, a);
+    CHECK(plan.audio_samples > 0);
+    CHECK(plan.duration <= plan.video_duration + kTicksPerSecond / 2 + kAac);
+}
+
 }  // namespace
 
 int main() {
+    audio_far_after_the_video_is_left_out();
     refuses_clips_that_cannot_decode();
     rebases_to_the_first_keyframe();
     interleaves_and_trims_audio();

@@ -103,7 +103,9 @@ try {
     # GitHub adds a "digest" (sha256) to the asset; installed copies check the download against it.
     # Windows PowerShell drops bare double quotes inside an argument to a native program; \" survives.
     $digest = & gh api "repos/$repo/releases/tags/$tag" --jq ".assets[] | select(.name == \`"$setupName\`") | .digest"
-    if ($digest -and $digest -ne "sha256:$hash") { Write-Warning "GitHub's digest $digest differs from the local file's sha256:$hash" }
+    # Installed copies refuse an update without a matching digest, so a release without one helps nobody.
+    if (-not $digest) { throw "GitHub gave the installer no digest; installed copies will not take it. Delete the release (gh release delete $tag --repo $repo --cleanup-tag) and publish again." }
+    if ($digest -ne "sha256:$hash") { throw "GitHub's digest $digest differs from the local file's sha256:$hash. Delete the release (gh release delete $tag --repo $repo --cleanup-tag) and check the file." }
     Step "Published https://github.com/$repo/releases/tag/$tag (GitHub digest: $digest)"
 } finally {
     Pop-Location

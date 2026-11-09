@@ -204,9 +204,17 @@ bool runs_from_install_folder(const fs::path& exe) {
 bool write_file_atomically(const fs::path& path, const std::string& text) {
     const fs::path temp = fs::path(path).concat(L".tmp");
     {
-        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
-        out << text;
-        if (!out.flush()) return false;
+        // Flushed to the disk before the rename: after a power cut the rename can otherwise point
+        // at an empty file, the record reads as empty and the downloaded installer is deleted.
+        UniqueHandle out(CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (!out) return false;
+        DWORD written = 0;
+        if (!WriteFile(out.get(), text.data(), static_cast<DWORD>(text.size()), &written, nullptr) ||
+            written != text.size() || !FlushFileBuffers(out.get())) {
+            out.reset();
+            DeleteFileW(temp.c_str());
+            return false;
+        }
     }
     return MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
 }
@@ -559,6 +567,7 @@ void Updater::run() {
         }
         const Job job = std::exchange(job_, Job::None);
         std::optional<Release> release = available_;
+        const UpdateState before_job = state_;
         busy_ = true;
         // Only stop_worker() sets it, and it sets stop_ first under this lock: a stop that came
         // before this point ended the loop above, so this never wipes out a cancel.
@@ -572,6 +581,29 @@ void Updater::run() {
             }
         } catch (const Cancelled&) {
             log::info("Update {} cancelled", job == Job::Download ? "download" : "check");
+            // The Settings page would otherwise keep showing "Checking" or "Downloading" with
+            // nothing running, and the download button stays refused until a manual check.
+            std::lock_guard state_lock(mutex_);
+            if (record_.ready) {
+                set_state(ready_state());
+            } else if (available_) {
+                UpdateState available;
+                available.stage = UpdateStage::Available;
+                available.version = available_->version.text();
+                available.notes = available_->notes;
+                available.page_url = available_->page_url;
+                available.can_install = available_->installer.has_value() && (installed_ || options_.download_anywhere);
+                set_state(std::move(available));
+            } else {
+                // check() and download() already showed Checking/Downloading before the job ran:
+                // with nothing found, the page goes back to "not checked", keeping any old error.
+                UpdateState idle = before_job;
+                if (idle.stage == UpdateStage::Checking || idle.stage == UpdateStage::Downloading) {
+                    idle.stage = UpdateStage::Idle;
+                    idle.fraction = 0.0;
+                }
+                set_state(std::move(idle));
+            }
         } catch (const std::exception& e) {
             log::error("Updater: {}", e.what());  // never ends the worker: the next check tries again
         }
@@ -715,6 +747,11 @@ void Updater::do_download(const Release& release) {
     try {
         if (folder_.empty()) throw UpdateError("Backtrack cannot find its folder for updates.", "no LOCALAPPDATA");
         if (asset.size > kMaxInstallerSize) throw UpdateError("The update is far larger than expected; it was not downloaded.", "asset too large");
+        if (asset.sha256.empty()) {
+            // Without GitHub's checksum only the size could be checked: never install that.
+            throw UpdateError("GitHub has no checksum for this update yet, so it was not downloaded. Backtrack tries again later.",
+                              "the release asset has no digest");
+        }
         std::error_code ec;
         fs::create_directories(folder_, ec);
         part.path = part_path;
@@ -767,7 +804,7 @@ void Updater::do_download(const Release& release) {
                               std::format("got {} of {} bytes", written, asset.size));
         }
         const std::string hash = sha.hex();
-        if (!asset.sha256.empty() && hash != asset.sha256) {
+        if (hash != asset.sha256) {
             throw UpdateError("The downloaded update did not match GitHub's checksum and was deleted.",
                               std::format("SHA-256 {} but GitHub says {}", hash, asset.sha256));
         }
@@ -795,7 +832,7 @@ void Updater::do_download(const Release& release) {
         clean_folder();
         available_.reset();
         log::info("Downloaded update {} ({}), {}", release.version.text(), size_text(asset.size),
-                  asset.sha256.empty() ? "size checked (GitHub gave no checksum)" : "SHA-256 matches GitHub's");
+                  "SHA-256 matches GitHub's");
         set_state(ready_state());
     } catch (const UpdateError& e) {
         log::warn("Update download failed: {}", e.what());
@@ -830,6 +867,12 @@ bool Updater::install(Relaunch relaunch, bool automatic) {
     {
         std::lock_guard lock(mutex_);
         if (!record_.ready || !installed_) return false;
+        if (busy_) {
+            // stop_worker() would wait for the running check or download, and a WinHTTP call
+            // only returns after its timeout: the window would freeze for seconds.
+            log::info("Not installing update {} now: an update check or download is running", record_.ready->version.text());
+            return false;
+        }
         if (automatic && record_.ready->install_attempts >= kMaxAutomaticInstallAttempts) {
             log::warn("Update {} is not installed automatically again: it failed {} times",
                       record_.ready->version.text(), record_.ready->install_attempts);

@@ -81,7 +81,11 @@ file is never overwritten.
   at the size it started with, with the new picture scaled in (black bars if the shape differs).
   Restart Backtrack to record at the new size.
 - The only time the buffer starts over is when the graphics driver restarts (a driver update or
-  crash): the next clip then begins at that moment.
+  crash), or when the video encoder stops answering (some graphics drivers do under heavy load):
+  Backtrack notices within 5 seconds, says "Video encoder stopped, restarting it" and records
+  again a moment later; the next clip begins then. If it happens twice within 10 minutes it
+  switches to the software encoder until Backtrack restarts. A clip never contains video older
+  than the time it covers: when there is none, the save is refused and the overlay says why.
 - Pausing keeps what was recorded before the pause. A clip saved after resuming joins the time
   before and after the pause without a gap.
 - Sound is what you hear on the default playback device (or the one picked in Settings > Audio).
@@ -137,7 +141,11 @@ To use `;` or `#` in a path, put the whole value in double quotes: `output_dir =
 | Key | Default | Meaning |
 |---|---|---|
 | `max_gb` | `0` | When clips take more than this many GB, the oldest go to the Recycle Bin. `0` is no limit. Favorites and clips in a collection are never removed. |
-| `delete_after_days` | `0` | Clips older than this go to the Recycle Bin. `0` is never. Favorites and clips in a collection are kept. |
+| `delete_after_days` | `0` | Clips older than this go to the Recycle Bin. `0` is never. Favorites and clips in a collection are kept; a clip taken back from the Trash counts its age from then. |
+
+Neither limit ever removes a clip saved (or restored from the Trash) in the last 24 hours. Both wait
+when the PC's clock is more than a year past the newest clip (a wrong clock), and for one run when
+`library.json` was missing or damaged (Backtrack does not know your favorites yet then).
 
 ### `[hotkey]`
 
@@ -154,6 +162,10 @@ keys). PrintScreen on its own is allowed, but Windows 11 gives it to the Snippin
 is turned off in Settings > Accessibility > Keyboard. If another program already uses the hotkey,
 the sidebar says the key is taken, the log says why, and the "Save last 30 s" button in the window
 and the tray menu still work.
+
+A hotkey without Ctrl/Alt/Shift (such as `Home`) also works while you hold a modifier in a game
+(Shift to sprint, Ctrl to crouch); that also means Ctrl+Home in other programs saves a clip. In
+Backtrack's own text boxes (search, rename, notes, tags) such a key does its normal job instead.
 
 ### `[video]`
 

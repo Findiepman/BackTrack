@@ -223,8 +223,19 @@ UploadResult upload_clip(const std::filesystem::path& file, ShareHost host, cons
             if (got == 0) break;
             body.append(buffer, got);
         }
-        // Cancelled while the reply came in: whatever arrived is not trusted as an answer.
-        if (abort.aborted()) return failed(ERROR_WINHTTP_OPERATION_CANCELLED);
+        // Cancelled while the reply came in. A complete reply with a link still counts: the clip is
+        // online whether or not the cancel came, and its link must not be lost (the share view
+        // says it was uploaded before the cancel). Anything else is not trusted as an answer.
+        if (abort.aborted()) {
+            if (status == 200) {
+                if (const auto url = parse_upload_reply(host, body)) {
+                    result.ok = true;
+                    result.url = *url;
+                    return result;
+                }
+            }
+            return failed(ERROR_WINHTTP_OPERATION_CANCELLED);
+        }
         if (status == 407) {
             result.message = "A proxy on this network wants a password before anything can be uploaded.";
             return result;

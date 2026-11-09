@@ -32,6 +32,7 @@ struct ClipEntry {
     int height = 0;
     std::string source;  // what was recorded, e.g. "Display 1"; empty for clips found on disk
     std::optional<std::int64_t> trashed_at;  // Unix seconds; set while the clip is in the Trash
+    std::int64_t restored_at = 0;  // Unix seconds it last came back from the Trash; 0: never
     std::vector<double> bookmarks;  // seconds from the clip's start, sorted (the bookmark hotkey)
     std::string share_url;  // the link from Share; empty: never shared
     std::int64_t shared_at = 0;  // Unix seconds
@@ -68,6 +69,11 @@ inline constexpr std::int64_t kRecentDays = 7;
 // The Trash is emptied (to the Windows Recycle Bin) this many days after a clip went in.
 inline constexpr std::int64_t kTrashDays = 30;
 inline constexpr std::int64_t kSecondsPerDay = 24 * 60 * 60;
+// Automatic removal never takes a clip saved (or restored from the Trash) within this time.
+inline constexpr std::int64_t kRemovalGraceSeconds = kSecondsPerDay;
+// The clock more than this past the newest date the library knows: it is wrong (a reset CMOS
+// battery, a bad time sync), and automatic removal waits instead of finding everything "old".
+inline constexpr std::int64_t kClockSanitySeconds = 365 * kSecondsPerDay;
 // The "version" written in library.json. A file with a higher one comes from a newer Backtrack.
 inline constexpr int kLibraryFileVersion = 1;
 // More bookmarks than this in one clip are damage (or a stuck key): the rest are dropped.
@@ -122,7 +128,7 @@ public:
     bool add_tag(std::string_view file, std::string_view tag);  // trimmed; empty or duplicate ignored
     bool remove_tag(std::string_view file, std::string_view tag);
     bool move_to_trash(std::string_view file, std::int64_t now);
-    bool restore(std::string_view file);
+    bool restore(std::string_view file, std::int64_t now);
 
     std::string create_collection(std::string_view name, int color);  // returns the new id
     bool rename_collection(std::string_view id, std::string_view name);

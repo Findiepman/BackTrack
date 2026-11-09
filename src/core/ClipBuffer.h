@@ -58,7 +58,8 @@ public:
 
     // Copies the packets for a clip covering [start, end]: from the last keyframe at or before
     // `start` (or the oldest keyframe when the buffer does not reach back that far) up to the last
-    // packet with pts <= end. Empty when the buffer holds no keyframe at or before `end`.
+    // packet with pts <= end. Empty when the buffer holds no keyframe at or before `end`, or when
+    // its newest packet is older than `start` (nothing from the clip's time, only stale video).
     std::vector<Packet> extract(Time100ns start, Time100ns end) const;
 
     ClipBufferStats stats() const;

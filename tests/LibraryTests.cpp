@@ -117,7 +117,7 @@ void views_and_counts() {
     CHECK_EQ(c.trash, std::size_t{1});
     CHECK_EQ(c.bytes, 120 * kMb);
 
-    CHECK(lib.restore("c.mp4"));
+    CHECK(lib.restore("c.mp4", kNow));
     CHECK_EQ(lib.counts(kNow).trash, std::size_t{0});
     CHECK(!lib.move_to_trash("nope.mp4", kNow));
 }
@@ -239,6 +239,36 @@ void cleanup() {
     by_size.max_bytes = 1;
     const std::vector<std::string> all = lib.due_for_removal(by_size, kNow);
     CHECK_EQ(all.size(), std::size_t{5});  // everything except the favorite and the collection clip
+}
+
+// The guards on automatic removal: a brand new clip, a clip just taken back from the Trash and a
+// clock that jumped years ahead never lead to clips being recycled.
+void cleanup_guards() {
+    Library lib;
+    lib.sync_with_folder({file("fav.mp4", 900 * kMb, kNow - 10 * kDay), file("just_saved.mp4", 10 * kMb, kNow - 60),
+                          file("old.mp4", 10 * kMb, kNow - 100 * kDay)});
+    lib.set_favorite("fav.mp4", true);
+    // Favorites alone are over the limit: the old clip goes, the one saved a minute ago stays.
+    CleanupPolicy by_size;
+    by_size.max_bytes = 100 * kMb;
+    CHECK_EQ(joined(lib.due_for_removal(by_size, kNow)), std::string("old.mp4"));
+
+    // Taken back from the Trash: the age limit counts from the restore.
+    CleanupPolicy by_age;
+    by_age.delete_after_days = 30;
+    lib.move_to_trash("old.mp4", kNow - kDay);
+    CHECK(lib.restore("old.mp4", kNow - 60));
+    CHECK(lib.due_for_removal(by_age, kNow).empty());
+    CHECK(lib.find("old.mp4")->created == kNow - 100 * kDay);  // its own date is kept for sorting
+    // ...and once that has passed, it goes as before (as does the clip saved a minute before kNow).
+    CHECK_EQ(joined(lib.due_for_removal(by_age, kNow + 31 * kDay)), std::string("just_saved.mp4,old.mp4"));
+    // The restore time survives a save and load.
+    const Library loaded = Library::from_json(lib.to_json());
+    CHECK_EQ(loaded.find("old.mp4")->restored_at, kNow - 60);
+
+    // The clock years ahead of anything the library knows: nothing is removed.
+    CHECK(lib.due_for_removal(by_age, kNow + 5 * 365 * kDay).empty());
+    CHECK(lib.due_for_removal(by_size, kNow + 5 * 365 * kDay).empty());
 }
 
 void json_round_trip() {
@@ -466,6 +496,7 @@ int main() {
     search_and_tags();
     collections();
     cleanup();
+    cleanup_guards();
     json_round_trip();
     damaged_json_is_tolerated();
     many_clips_sync();

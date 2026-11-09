@@ -24,6 +24,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -60,7 +61,8 @@ fs::path exe_directory() {
 }
 
 // §5.1: written with defaults when missing; never refuses to start because of the config.
-bt::Settings load_config(const fs::path& ini_path) {
+bt::Settings load_config(const fs::path& ini_path, bool& unreadable) {
+    unreadable = false;
     std::string text;
     std::error_code ec;
     if (!fs::exists(ini_path, ec) && !ec) {
@@ -77,6 +79,7 @@ bt::Settings load_config(const fs::path& ini_path) {
     } else {
         // Never overwrite a file we merely failed to read (locked by a sync tool, no permission).
         bt::log::warn("Could not read {}, using built-in defaults for this run", path_text(ini_path));
+        unreadable = true;
     }
     bt::LoadedSettings loaded = bt::load_settings(text);
     for (const std::string& warning : loaded.warnings) {
@@ -214,21 +217,54 @@ int run(int show_command) {
     paths.log = data_dir / L"backtrack.log";
     paths.library = data_dir / L"library.json";
     paths.cache = data_dir / L"cache" / L"thumbnails";
-    const bt::Settings settings = load_config(paths.ini);
+    const bt::Settings settings = load_config(paths.ini, paths.ini_unreadable);
     bt::log::init(paths.log, settings.log_level);
     bt::log::info("Backtrack starting");
     Options options = parse_options();
+
+    // Quitting must end the process. A thread stuck inside a graphics or sound driver cannot be
+    // joined, and Backtrack would stay alive without a window or tray icon, holding the
+    // single-instance lock so it cannot even be started again. Armed when Quit begins; after
+    // five minutes the log says so and the process ends. Clips are written well within it.
+    struct ExitWatchdog {
+        bt::UniqueHandle done{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+        std::thread thread;
+        void arm() {
+            if (!done || thread.joinable()) return;
+            constexpr DWORD kExitLimitMs = 300'000;
+            thread = std::thread([event = done.get(), kExitLimitMs] {
+                if (WaitForSingleObject(event, kExitLimitMs) == WAIT_TIMEOUT) {
+                    bt::log::error("Quitting took more than {} s (a driver did not let go); ending Backtrack now",
+                                   kExitLimitMs / 1000);
+                    TerminateProcess(GetCurrentProcess(), 3);
+                }
+            });
+        }
+        ~ExitWatchdog() {
+            if (thread.joinable()) {
+                SetEvent(done.get());
+                thread.join();
+            }
+        }
+    } exit_watchdog;
 
     bt::ComApartment com(COINIT_MULTITHREADED);
     BT_CHECK_HR(MFStartup(MF_VERSION, MFSTARTUP_FULL));
     struct MfShutdown {
         ~MfShutdown() {  // §6: after every pipeline object is gone
+            if (const int left = bt::encoders_left_behind(); left > 0) {
+                // A hung encoder is still shutting down on its own thread; Media Foundation going
+                // away under it could crash the exit. The process ending frees everything anyway.
+                bt::log::warn("Not shutting Media Foundation down: {} video encoder(s) never finished", left);
+                return;
+            }
             const HRESULT hr = MFShutdown();
             if (FAILED(hr)) {
                 bt::log::warn("MFShutdown failed: {}", bt::hresult_text(hr));
             }
         }
     } mf_shutdown;
+
 
     // Found by searching after pressing the Windows key. A copy run from elsewhere (a developer
     // build) leaves the shortcut alone when Backtrack is installed: it belongs to the installed one.
@@ -285,6 +321,7 @@ int run(int show_command) {
             bt::log::error("The message loop failed: {}", bt::hresult_text(HRESULT_FROM_WIN32(GetLastError())));
             code = 1;
         }
+        exit_watchdog.arm();
         app.finish();  // §6: every queued clip is written before Backtrack ends, and goes into the library
         // Quit from the tray (not a logoff, not an installer that closed us): a downloaded update
         // installs now, silently, without starting Backtrack again. Off when automatic updates are off.

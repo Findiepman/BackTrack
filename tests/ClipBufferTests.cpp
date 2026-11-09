@@ -212,9 +212,25 @@ void config_extremes() {
     }
 }
 
+// The user's report: the video stopped an hour ago (a stalled encoder), the sound did not. A save
+// must not hand out the last second of that old video as if it were the clip.
+void stale_video_is_not_a_clip() {
+    ClipBuffer buffer(60 * kSecond, 100'000'000);
+    push_seconds(buffer, 0, 90 * kFps);  // 90 s of video, then nothing
+    const Time100ns now = 3600 * kSecond;
+    CHECK(buffer.extract(now - 60 * kSecond, now).empty());
+    // Video that stopped only within the clip's time still gives what there is.
+    const Time100ns soon = 100 * kSecond;
+    const auto clip = buffer.extract(soon - 60 * kSecond, soon);
+    CHECK(!clip.empty());
+    CHECK(clip.front().keyframe);
+    CHECK(clip.back().pts >= soon - 60 * kSecond);
+}
+
 }  // namespace
 
 int main() {
+    stale_video_is_not_a_clip();
     config_extremes();
     empty_buffer();
     waits_for_first_keyframe();

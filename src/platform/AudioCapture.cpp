@@ -503,7 +503,15 @@ bool AudioCapture::foreground_elevated() {
 }
 
 void AudioCapture::mix(IMFSample* pcm) {
-    const bool gate = mic_ && !mic_muted_ && (!push_to_talk_ || push_to_talk_open());
+    bool gate = mic_ && !mic_muted_ && (!push_to_talk_ || push_to_talk_open());
+    if (gap_fill_) {
+        // Voice from an outage (a device switch) is replayed here in milliseconds. The key and the
+        // mute state now say nothing about when it was said: pressing push-to-talk during the
+        // replay let earlier words in. It is only kept when the mic was open before and is now.
+        gate = gate && last_live_gate_;
+    } else {
+        last_live_gate_ = gate;
+    }
     mic_gate_open_ = gate;
     push_to_talk_blocked_ = mic_ && push_to_talk_ && !mic_muted_ && !gate && foreground_elevated();
     system_gain_.set_target(system_sound_ ? static_cast<float>(system_volume_) / kPercent : 0.0f);
@@ -688,6 +696,11 @@ void AudioCapture::run_loop() {
                 continue;
             }
             log::info("The playback device to record changed, switching sound recording to it");
+            try {
+                read_packets();  // what the old device still holds (up to a poll), before it goes
+            } catch (const std::exception&) {
+                // Already gone: nothing left to read.
+            }
             close_device();
             next_open = 0;
             continue;
@@ -716,7 +729,14 @@ void AudioCapture::run_loop() {
                 log::info("Sound recording interrupted ({}), reopening the device", e.what());
             }
             close_device();
-            next_open = invalidated && settled ? 0 : GetTickCount64() + kReopenDelayMs;
+            if (invalidated && settled) {
+                next_open = 0;
+            } else {
+                // Counted as a failure too, so a device change notice right after cannot cut the
+                // pause short (the settle guard above measures from failed_at).
+                failed_at = GetTickCount64();
+                next_open = failed_at + kReopenDelayMs;
+            }
         }
         if (open_ && mic_ && !render_client_audio_) {
             try {

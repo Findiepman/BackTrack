@@ -183,6 +183,12 @@ private:
     bool pipeline_built_ = false;
     bool have_frame_ = false;
     bool lost_ = false;
+    Time100ns lost_since_ = 0;  // when lost_ was set
+    Time100ns next_lost_log_ = 0;
+    std::string retry_reason_;  // why the last re-open failed, for the "still lost" log line
+    // Set when a duplication is (re)opened: its first frame is copied whatever LastPresentTime
+    // says, so the image from before a loss (a game's last frame) cannot stay on.
+    bool force_copy_ = false;
     bool open_failure_logged_ = false;
     bool allocator_ready_ = false;  // set up once, for the size that never changes
     Time100ns monitor_missing_since_ = 0;  // 0 = the monitor is there

@@ -221,10 +221,13 @@ bool Library::move_to_trash(std::string_view file, std::int64_t now) {
     return true;
 }
 
-bool Library::restore(std::string_view file) {
+bool Library::restore(std::string_view file, std::int64_t now) {
     ClipEntry* clip = find(file);
     if (clip == nullptr) return false;
     clip->trashed_at.reset();
+    // The age limit counts from here: a 40 day old clip taken back from the Trash would otherwise
+    // be removed again by the next cleanup, within the hour.
+    clip->restored_at = now;
     return true;
 }
 
@@ -362,13 +365,25 @@ std::vector<std::string> Library::all_tags() const {
 
 std::vector<std::string> Library::due_for_removal(const CleanupPolicy& policy, std::int64_t now) const {
     std::vector<std::string> out;
+    // When the clip's age counts from: saved, or taken back from the Trash.
+    const auto kept_since = [](const ClipEntry& clip) { return std::max(clip.created, clip.restored_at); };
+    std::int64_t newest = 0;
+    for (const ClipEntry& clip : clips_) {
+        newest = std::max({newest, kept_since(clip), clip.trashed_at.value_or(0)});
+    }
+    if (newest > 0 && now > newest + kClockSanitySeconds) {
+        return out;  // the clock looks wrong: removing by age now could take everything
+    }
+    // Never a clip that is brand new: with favorites over the size limit, the size rule would
+    // otherwise recycle the clip saved a second ago.
+    const auto too_new = [&](const ClipEntry& clip) { return kept_since(clip) > now - kRemovalGraceSeconds; };
     std::vector<bool> taken(clips_.size(), false);
     std::int64_t total = 0;
     for (std::size_t i = 0; i < clips_.size(); ++i) {
         const ClipEntry& clip = clips_[i];
         const bool trash_expired = in_trash(clip) && *clip.trashed_at <= now - kTrashDays * kSecondsPerDay;
         const bool too_old = !in_trash(clip) && !protected_clip(clip) && policy.delete_after_days > 0 &&
-                             clip.created <= now - policy.delete_after_days * kSecondsPerDay;
+                             !too_new(clip) && kept_since(clip) <= now - policy.delete_after_days * kSecondsPerDay;
         if (trash_expired || too_old) {
             out.push_back(clip.file);
             taken[i] = true;
@@ -380,14 +395,16 @@ std::vector<std::string> Library::due_for_removal(const CleanupPolicy& policy, s
         // Trash first (oldest in first), then the oldest unprotected clips.
         std::vector<std::size_t> order;
         for (std::size_t i = 0; i < clips_.size(); ++i) {
-            if (!taken[i] && (in_trash(clips_[i]) || !protected_clip(clips_[i]))) order.push_back(i);
+            if (!taken[i] && (in_trash(clips_[i]) || (!protected_clip(clips_[i]) && !too_new(clips_[i])))) {
+                order.push_back(i);
+            }
         }
-        std::stable_sort(order.begin(), order.end(), [this](std::size_t a, std::size_t b) {
+        std::stable_sort(order.begin(), order.end(), [this, &kept_since](std::size_t a, std::size_t b) {
             const ClipEntry& x = clips_[a];
             const ClipEntry& y = clips_[b];
             if (in_trash(x) != in_trash(y)) return in_trash(x);
-            const std::int64_t tx = in_trash(x) ? *x.trashed_at : x.created;
-            const std::int64_t ty = in_trash(y) ? *y.trashed_at : y.created;
+            const std::int64_t tx = in_trash(x) ? *x.trashed_at : kept_since(x);
+            const std::int64_t ty = in_trash(y) ? *y.trashed_at : kept_since(y);
             return tx < ty;
         });
         for (const std::size_t i : order) {
@@ -428,6 +445,7 @@ Json Library::to_json() const {
         item.set("height", Json(clip.height));
         if (!clip.source.empty()) item.set("source", Json(clip.source));
         if (clip.trashed_at) item.set("trashed_at", Json(*clip.trashed_at));
+        if (clip.restored_at != 0) item.set("restored_at", Json(clip.restored_at));
         if (!clip.share_url.empty()) {
             item.set("share_url", Json(clip.share_url));
             item.set("shared_at", Json(clip.shared_at));
@@ -493,6 +511,7 @@ Library Library::from_json(const Json& json) {
         clip.height = static_cast<int>(std::clamp<std::int64_t>(item["height"].as_int(), 0, kMaxVideoDimension));
         clip.source = item["source"].as_string();
         if (item["trashed_at"].is_number()) clip.trashed_at = item["trashed_at"].as_int();
+        clip.restored_at = item["restored_at"].as_int(0);
         std::vector<double> marks;
         for (const Json& mark : item["bookmarks"].as_array()) {
             if (mark.is_number()) marks.push_back(mark.as_number());

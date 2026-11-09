@@ -38,6 +38,8 @@ constexpr Time100ns kMonitorRenameDelay = 5 * kTicksPerSecond;
 
 // §9: counters go to the log once a minute at debug level.
 constexpr Time100ns kCounterLogInterval = 60 * kTicksPerSecond;
+// While the capture stays lost, the last frame is recorded; this often the log says so.
+constexpr Time100ns kLostLogInterval = 60 * kTicksPerSecond;
 
 // After a driver crash (TDR) every call fails with one of these until the device is recreated,
 // so treating them as anything softer would look like recording while nothing is recorded.
@@ -378,9 +380,9 @@ void ScreenCapture::thread_main() {
 void ScreenCapture::capture_loop() {
     TickTimer timer(stop_event_.get());
     // A restart after stop() or Failed begins clean: no frame from before the stop is repeated,
-    // no stale "lost" state, and persistent failures get their full grace period again.
+    // and persistent failures get their full grace period again. lost_ is kept: a capture paused
+    // while lost must still report Recovered, or the owner's status stays on "lost" for good.
     have_frame_ = false;
-    lost_ = false;
     open_failure_logged_ = false;
     persistent_failure_since_ = 0;
     const Time100ns start = qpc_now();
@@ -418,6 +420,15 @@ void ScreenCapture::capture_loop() {
             log_counters();
             next_counter_log_ = now + kCounterLogInterval;
         }
+        if (lost_ && now >= next_lost_log_) {
+            // One line a minute: an hour of a frozen picture must be visible in the log.
+            if (next_lost_log_ != 0) {
+                log::info("Capture still lost after {} s ({}); {}", (now - lost_since_) / kTicksPerSecond,
+                          retry_reason_.empty() ? std::string("retrying") : retry_reason_,
+                          have_frame_ ? "the last frame keeps recording" : "no picture is recorded");
+            }
+            next_lost_log_ = now + kLostLogInterval;
+        }
         if (fell_back_ && now >= next_monitor_check_) {
             next_monitor_check_ = now + kMonitorRenameDelay;
             check_monitor_assignment();
@@ -447,6 +458,7 @@ void ScreenCapture::check_monitor_assignment() {
 
 bool ScreenCapture::try_open_duplication() {
     auto retry_later = [this](const std::string& why) {
+        retry_reason_ = why;
         if (!open_failure_logged_) {
             log::info("Cannot capture {} yet ({}), retrying", to_utf8(monitor_.device_name), why);
             open_failure_logged_ = true;
@@ -542,11 +554,14 @@ bool ScreenCapture::try_open_duplication() {
         opened_mode_ = mode;
     }
     duplication_ = duplication;
+    force_copy_ = true;
     open_failure_logged_ = false;
     retry_delay_ = kRetryInitialDelay;
     if (lost_) {
         lost_ = false;
-        log::info("Capture recovered");
+        next_lost_log_ = 0;
+        retry_reason_.clear();
+        log::info("Capture recovered after {:.1f} s", static_cast<double>(qpc_now() - lost_since_) / kTicksPerSecond);
         notify(CaptureEvent::Recovered);
     }
     return true;
@@ -613,7 +628,7 @@ void ScreenCapture::acquire_frame() {
     // stops the desktop from updating.
     bool copied = false;
     try {
-        if (info.LastPresentTime.QuadPart != 0 || !have_frame_) {
+        if (info.LastPresentTime.QuadPart != 0 || !have_frame_ || force_copy_) {
             ComPtr<ID3D11Texture2D> texture;
             BT_CHECK_HR(resource.As(&texture));
             D3D11_TEXTURE2D_DESC desc{};
@@ -625,6 +640,7 @@ void ScreenCapture::acquire_frame() {
             }
             context_->CopyResource(bgra_frame_.Get(), texture.Get());
             copied = true;
+            force_copy_ = false;
             frame_changed_ = true;
         }
         if (cursor_) {
@@ -667,6 +683,8 @@ void ScreenCapture::lose_duplication(HRESULT hr) {
     ++counters_.access_lost;
     if (!lost_) {
         lost_ = true;
+        lost_since_ = qpc_now();
+        next_lost_log_ = 0;
         log::info("Capture lost ({}), retrying while the last frame keeps recording", hresult_text(hr));
         notify(CaptureEvent::Lost);
     }

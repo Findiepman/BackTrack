@@ -8,6 +8,9 @@ namespace {
 // Longer than any path Windows accepts without the \\?\ prefix; strftime returns 0 beyond it.
 constexpr std::size_t kMaxExpandedName = 260;
 
+// How far the sound may run on past the end of the last video frame.
+constexpr Time100ns kAudioOverhang = kTicksPerSecond / 2;
+
 // A sample lasts until the next one starts. A frame the encoder dropped (or a tick the capture
 // skipped) leaves a gap in the timestamps; if the durations still said 1/fps, an MP4 writer that
 // builds its timing from durations would close every gap and the picture would run ahead of the
@@ -32,9 +35,14 @@ ClipPlan plan_clip_tracks(const std::vector<Packet>& video, std::span<const std:
         return plan;
     }
     const Time100ns base = video.front().pts;
+    // Sound after the picture's end is left out (a little slack for the last frame's sound). A
+    // clip whose video stopped early once got an hour of timeline: one second of picture and the
+    // sound starting 3550 s later.
+    const Time100ns video_end = video.back().pts + video.back().duration + kAudioOverhang;
 
     // Next packet of each audio track; the ones before the first video frame are skipped.
     std::vector<std::size_t> next(audio_tracks.size(), 0);
+    std::vector<std::size_t> end(audio_tracks.size(), 0);  // one past the last packet of each track that is kept
     std::size_t total = video.size();
     for (std::size_t t = 0; t < audio_tracks.size(); ++t) {
         const std::vector<Packet>& audio = audio_tracks[t];
@@ -43,6 +51,10 @@ ClipPlan plan_clip_tracks(const std::vector<Packet>& video, std::span<const std:
         }
         plan.audio_dropped += next[t];
         total += audio.size() - next[t];
+        end[t] = next[t];
+        while (end[t] < audio.size() && audio[end[t]].pts < video_end) {
+            ++end[t];
+        }
     }
 
     plan.samples.reserve(total);
@@ -53,7 +65,7 @@ ClipPlan plan_clip_tracks(const std::vector<Packet>& video, std::span<const std:
         constexpr std::size_t kNone = static_cast<std::size_t>(-1);
         std::size_t track = kNone;
         for (std::size_t t = 0; t < audio_tracks.size(); ++t) {
-            if (next[t] < audio_tracks[t].size() &&
+            if (next[t] < end[t] &&
                 (track == kNone || audio_tracks[t][next[t]].pts < audio_tracks[track][next[track]].pts)) {
                 track = t;
             }

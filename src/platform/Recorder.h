@@ -31,6 +31,7 @@
 #include "core/ClipBuffer.h"
 #include "core/Config.h"
 #include "core/Hotkey.h"
+#include "core/StallWatch.h"
 #include "platform/AudioCapture.h"
 #include "platform/MicCapture.h"
 #include "platform/ClipWriter.h"
@@ -45,6 +46,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -82,6 +84,10 @@ struct BufferStatus {
     bool hardware_encoder = false;
     bool encoder_running = false;
 };
+
+// Encoders that did not finish shutting down within the limit and were left behind on their own
+// thread. While any exist, Media Foundation must not be shut down at exit (main.cpp).
+int encoders_left_behind();
 
 class Recorder {
 public:
@@ -132,6 +138,9 @@ public:
     // Test hook: behave as if Windows took the screen away (UAC prompt).
     void simulate_capture_loss();
 
+    // Test hook: the video encoder stops answering, as AMD's hung under GPU load.
+    void simulate_encoder_stall();
+
 private:
     struct SaveJob {
         std::chrono::system_clock::time_point requested;
@@ -146,6 +155,7 @@ private:
     void supervisor_main();
     void rebuild_pipeline();
     void ensure_encoder();
+    void check_encoder_stall();
     void log_counters();
     void wake_supervisor();
 
@@ -180,12 +190,35 @@ private:
     Time100ns pipeline_retry_delay_ = 0;  // supervisor only
 
     // Encoder: capture thread and supervisor, under encoder_mutex_.
-    mutable std::mutex encoder_mutex_;
+    mutable std::timed_mutex encoder_mutex_;
     std::unique_ptr<VideoEncoder> encoder_;
     EncoderPreference encoder_preference_;  // supervisor only
     Time100ns next_encoder_attempt_ = 0;  // supervisor only
     std::vector<Time100ns> device_resets_;  // supervisor only: recent graphics device resets
     std::atomic<bool> encoder_unavailable_{false};
+    // Encoder stall watchdog (supervisor only): frames going in, no packets coming out.
+    StallWatch stall_watch_;
+    std::uint64_t watched_generation_ = 0;
+    std::vector<Time100ns> encoder_stalls_;  // recent stalls; repeated ones move to the software encoder
+    std::atomic<bool> restarting_after_stall_{false};  // until the first packet after the restart
+    bool stall_forced_software_ = false;  // supervisor only: the hardware encoder kept stalling this run
+    Time100ns next_audio_restart_ = 0;  // supervisor only
+    Time100ns audio_restart_delay_ = 0;  // supervisor only: doubles while restarts keep failing
+    // When the capture thread entered on_frame (QPC), 0 while it is not in there. Being in there
+    // for the whole stall time is what "stuck inside the encoder's driver" means; a busy lock is not.
+    std::atomic<Time100ns> in_encoder_since_{0};
+    std::atomic<bool> encoder_blocked_{false};  // a thread is stuck inside the encoder (its driver)
+    // What the status shows about the encoder, kept outside encoder_mutex_ so the window never
+    // waits on a thread that is stuck inside the encoder.
+    enum class EncoderKind { None, Hardware, Software };
+    std::atomic<EncoderKind> encoder_kind_{EncoderKind::None};
+    // Every encoder's packet callback goes through this, so an encoder that is still shutting down
+    // on its own thread (retire_encoder) can never call into a destroyed Recorder.
+    struct PacketGate {
+        std::mutex mutex;
+        bool open = true;
+    };
+    std::shared_ptr<PacketGate> packet_gate_ = std::make_shared<PacketGate>();
     log::RateLimit frame_error_log_{std::chrono::seconds(10)};  // capture thread only
 
     // Streams: encoder and audio threads, owner (save), supervisor, under stream_mutex_.

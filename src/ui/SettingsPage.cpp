@@ -235,6 +235,13 @@ void App::change_settings(const std::function<void(Settings&)>& edit) {
 
 void App::write_ini() {
     // Keeps the user's comments and unknown keys: only the values change (core/Config update_ini).
+    if (paths_.ini_unreadable) {
+        // Running on defaults because the file could not be read at startup: writing now would put
+        // every default (clips folder, hotkeys, limits) over the user's own values.
+        ini_problem_ = "backtrack.ini could not be read at startup; changes apply now but are not saved. Restart Backtrack";
+        log::warn("Not saving backtrack.ini: it could not be read at startup");
+        return;
+    }
     std::error_code ec;
     std::string existing;
     if (fs::exists(paths_.ini, ec)) {

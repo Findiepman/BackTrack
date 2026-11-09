@@ -446,7 +446,9 @@ void App::finish() {
     if (finished_) return;
     finished_ = true;
     if (recorder_->saving()) log::info("Finishing the clip that is being saved...");
+    log::info("Stopping Instant Replay");  // with the lines below, places a hang at exit
     recorder_->stop();  // §6: every queued clip is written before Backtrack ends
+    log::info("Instant Replay stopped");
     // The clip that was still being written when Quit was chosen goes into the library too.
     take_saved();
     save_library();
@@ -1067,6 +1069,11 @@ void App::keep_copy_of_library(const wchar_t* why) {
     copy.replace_filename(std::format(L"library.{}-{:04}{:02}{:02}-{:02}{:02}{:02}.json", why, t.wYear, t.wMonth, t.wDay,
                                       t.wHour, t.wMinute, t.wSecond));
     std::error_code ec;
+    if (!fs::exists(paths_.library, ec) && !ec) {
+        // No library.json yet (first run, before anything was saved): there is nothing to lose.
+        // Treating this as a failed copy turned library saving off for the whole session.
+        return;
+    }
     fs::copy_file(paths_.library, copy, fs::copy_options::overwrite_existing, ec);
     if (ec) {
         // Without the copy, the original is the only one left: it must not be saved over.
@@ -1087,7 +1094,10 @@ void App::load_library() {
             log::warn("Cannot check {} ({}); library changes are not saved this run", path_text(paths_.library),
                       ec.message());
         }
-        return;  // first run: the folder scan fills it
+        // First run, or the file was deleted: the folder scan fills it, without favorites or
+        // collections. Automatic removal waits a run when that scan finds clips (App::App).
+        library_missing_ = true;
+        return;
     }
     std::ifstream file(paths_.library, std::ios::binary);
     std::stringstream text;
@@ -1107,6 +1117,15 @@ void App::load_library() {
         // clips folder (favorites and collections are in the copy).
         log::warn("library.json could not be read ({})", parsed.error);
         keep_copy_of_library(L"damaged");
+        library_rebuilt_ = true;
+        return;
+    }
+    if (!parsed.value->is_object() || !(*parsed.value)["clips"].is_array()) {
+        // Valid JSON of the wrong shape ("{}", "null", truncated by a sync tool) would load as an
+        // empty library and be saved over without a copy.
+        log::warn("library.json has no list of clips; it is treated as damaged");
+        keep_copy_of_library(L"damaged");
+        library_rebuilt_ = true;
         return;
     }
     if ((*parsed.value)["version"].as_int(1) > kLibraryFileVersion) {
@@ -1232,6 +1251,21 @@ void App::run_cleanup() {
     // Never against the Videos fallback (a same-named file there is not the clip), never while
     // the library is not being saved, never while a recycle is already waiting.
     if (recorder_->output_dir_is_fallback() || !library_writable_ || recycling_ || shell_busy_) return;
+    if (library_missing_ && !library_.clips().empty()) {
+        // No library.json at start, and clips were found (now or by a later scan, e.g. a drive
+        // that came up late): nobody knows which of them are favorites yet.
+        library_rebuilt_ = true;
+    }
+    if (library_rebuilt_) {
+        // The library was rebuilt from the folder: every favorite and collection is gone from it, so
+        // the storage limits would treat the user's kept clips as removable. Not this run.
+        if (!cleanup_paused_logged_) {
+            log::warn("Automatic clip removal waits until Backtrack starts again: library.json was missing or "
+                      "damaged, so it does not know yet which clips are favorites");
+            cleanup_paused_logged_ = true;
+        }
+        return;
+    }
     const CleanupPolicy policy = cleanup_policy();
     std::vector<std::string> due = library_.due_for_removal(policy, now_unix());
     // A clip that could not be removed (in use, no Recycle Bin, the user said no) waits for the
@@ -1273,7 +1307,7 @@ void App::run_cleanup() {
 
 void App::on_saved(const SaveResult& result) {
     if (!result.ok) {
-        flash_overlay(L"Could not save the clip", kDanger);
+        flash_problem(L"Could not save the clip");
         refresh_status();
         return;  // the sound and the log already said why
     }
@@ -1336,6 +1370,10 @@ void App::save_clip() {
         if (settings_.sound) {
             PlaySoundW(L"SystemHand", nullptr, SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
         }
+        // Said on screen too, also with the overlay switched off: in a game with the sound down
+        // a refused save was otherwise invisible.
+        flash_problem(to_wide(reason));
+        show_notice(to_wide(reason));
     }
     refresh_status();
 }
@@ -1487,6 +1525,32 @@ void App::on_shortcut(int id) {
     // the same message batch here, 250 ms leaves room and is shorter than any deliberate double press.
     constexpr auto kSamePress = std::chrono::milliseconds(250);
     const auto now = std::chrono::steady_clock::now();
+    // A hotkey without Ctrl/Alt/Shift (Home, End, Delete) is taken by Windows everywhere, also in
+    // Backtrack's own text boxes: renaming a clip and pressing Delete saved a clip instead. While
+    // one of them has the focus, the key goes to the box.
+    if (const std::optional<Hotkey>& key = registered_keys_[id - 1]; key && key->modifiers == 0) {
+        const HWND focus = GetFocus();
+        const bool own_box = focus != nullptr && GetForegroundWindow() == window_ &&
+                             (focus == search_box_ || focus == edit_box_ || focus == notes_box_ || focus == tag_box_ ||
+                              focus == settings_search_);
+        if (own_box) {
+            const UINT scan = MapVirtualKeyW(key->virtual_key, MAPVK_VK_TO_VSC);
+            const bool extended = key->virtual_key == VK_HOME || key->virtual_key == VK_END ||
+                                  key->virtual_key == VK_DELETE || key->virtual_key == VK_INSERT ||
+                                  key->virtual_key == VK_PRIOR || key->virtual_key == VK_NEXT;
+            const LPARAM down = 1 | static_cast<LPARAM>(scan) << 16 | (extended ? 1 << 24 : 0);
+            // WM_HOTKEY and the raw input of one press arrive together: forwarded once. A short
+            // window, so a quick second Delete in the box is not lost the way a second save is.
+            constexpr auto kSameKeystroke = std::chrono::milliseconds(30);
+            if (now - last_forwarded_[id] < kSameKeystroke) return;
+            SendMessageW(focus, WM_KEYDOWN, key->virtual_key, down);
+            SendMessageW(focus, WM_KEYUP, key->virtual_key, down | 0xC0000000);
+            // Taken after the sends: a Delete in the search box refilters the library, which can
+            // take longer than the window, and the press's second message must still be its twin.
+            last_forwarded_[id] = std::chrono::steady_clock::now();
+            return;
+        }
+    }
     if (now - last_shortcut_[id] < kSamePress) return;
     last_shortcut_[id] = now;
     switch (static_cast<HotkeyTarget>(id - 1)) {
@@ -1555,6 +1619,19 @@ void App::on_raw_key(const RAWKEYBOARD& key) {
         if (hotkey_ok_[i] && registered_keys_[i] && *registered_keys_[i] == pressed) {
             on_shortcut(i + 1);
             return;
+        }
+    }
+    // A hotkey set without modifiers (Home) also fires with one held: sprinting (Shift) or
+    // crouching (Ctrl) in a game must not swallow the save. The user chose this knowing that
+    // Ctrl+Home in other programs then saves too. Not in Backtrack's own window, where Shift+Home
+    // is text selection and must stay that.
+    if (modifiers != 0 && GetForegroundWindow() != window_) {
+        for (int i = 0; i < kGlobalHotkeys; ++i) {
+            if (hotkey_ok_[i] && registered_keys_[i] && registered_keys_[i]->modifiers == 0 &&
+                registered_keys_[i]->virtual_key == vk) {
+                on_shortcut(i + 1);
+                return;
+            }
         }
     }
 }
@@ -1650,6 +1727,10 @@ void App::refresh_overlay() {
 
 void App::flash_overlay(std::wstring text, Color dot) {
     if (overlay_ && settings_.overlay && !finished_) overlay_->flash(std::move(text), dot);
+}
+
+void App::flash_problem(std::wstring text) {
+    if (overlay_ && !finished_) overlay_->flash(std::move(text), kDanger);  // whatever the overlay setting
 }
 
 void App::apply_audio_live() {
@@ -2819,7 +2900,7 @@ void App::clip_menu(const std::string& file, POINT) {
         menu.items.push_back(std::move(trash));
     } else {
         menu.items.push_back(MenuItem{L"Restore", [this, file] {
-                                          library_.restore(file);
+                                          library_.restore(file, now_unix());
                                           save_library();
                                       }});
         MenuItem recycle{L"Move to Recycle Bin now", [this, file] { recycle_now(file); }};

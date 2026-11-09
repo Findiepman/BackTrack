@@ -311,7 +311,7 @@ void App::run_clip(const std::string& what, const Rect& anchor) {
         set_page(Page::Library);
         recycle_now(file);
     } else if (what == "restore") {
-        library_.restore(file);
+        library_.restore(file, now_unix());
         save_library();
     } else if (what == "fav") {
         library_.set_favorite(file, !clip->favorite);

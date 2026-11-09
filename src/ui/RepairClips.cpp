@@ -23,6 +23,30 @@
 #include <format>
 
 namespace bt::ui {
+namespace {
+
+// The repaired file is new, so it has today's dates. The library takes a clip's date from the file
+// when it does not know the clip yet (a rebuilt library), and then every repaired clip would sort
+// as recorded on the day of the repair.
+void copy_file_times(const std::filesystem::path& from, const std::filesystem::path& to) {
+    FILETIME created{}, accessed{}, written{};
+    HANDLE source = CreateFileW(from.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (source == INVALID_HANDLE_VALUE) return;
+    const bool got = GetFileTime(source, &created, &accessed, &written) != FALSE;
+    CloseHandle(source);
+    if (!got) return;
+    HANDLE target = CreateFileW(to.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (target == INVALID_HANDLE_VALUE) return;
+    if (!SetFileTime(target, &created, &accessed, &written)) {
+        log::debug("Could not copy the dates of {} to the repaired clip", to_utf8(from.filename().wstring()));
+    }
+    CloseHandle(target);
+}
+
+}  // namespace
+
 
 using namespace theme;
 using namespace ids;
@@ -220,6 +244,7 @@ void App::complete_repair_clip(const std::shared_ptr<RepairView>& view, const st
         // The swap: the original into "Before repair", the repaired copy in its place. All in the
         // same folder tree on one drive, so both are renames.
         const fs::path backup = backup_path(view->folder, source.filename());
+        copy_file_times(source, repaired);
         if (backup.empty() || !MoveFileExW(source.c_str(), backup.c_str(), MOVEFILE_WRITE_THROUGH)) {
             view->failed.push_back({file, "The clip is in use by another program."});
             discard();

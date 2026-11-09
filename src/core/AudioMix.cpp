@@ -16,6 +16,22 @@ std::int16_t saturate(float value) {
     return static_cast<std::int16_t>(std::lrintf(std::clamp(value, kInt16Min, kInt16Max)));
 }
 
+// Above kKnee of full scale the level bends smoothly towards full scale instead of being cut flat.
+// With a microphone at 195 % a loud word went past full scale and was hard clipped (a square wave,
+// heard as crackling distortion). Below the knee nothing changes; the curve meets the straight
+// line with the same slope, so there is no audible corner.
+constexpr float kKnee = 0.9f * kInt16Scale;
+constexpr float kHeadroom = kInt16Max - kKnee;
+
+std::int16_t soft_saturate(float value) {
+    const float magnitude = std::abs(value);
+    if (magnitude <= kKnee) {
+        return saturate(value);
+    }
+    const float bent = kKnee + kHeadroom * std::tanh((magnitude - kKnee) / kHeadroom);
+    return saturate(value < 0.0f ? -bent : bent);
+}
+
 }  // namespace
 
 GainRamp::GainRamp(float initial, std::uint32_t ramp_frames)
@@ -75,14 +91,16 @@ MixPeaks mix_block(std::span<std::int16_t> stereo, std::span<const float> mic, G
             voice = mic[i] * gm * kInt16Scale;
             peaks.mic = std::max(peaks.mic, std::abs(voice));
         }
-        stereo[2 * i] = saturate(left + voice);
-        stereo[2 * i + 1] = saturate(right + voice);
+        // Only where a voice is added: game sound alone stays exactly as on the fast path above.
+        stereo[2 * i] = voice != 0.0f ? soft_saturate(left + voice) : saturate(left);
+        stereo[2 * i + 1] = voice != 0.0f ? soft_saturate(right + voice) : saturate(right);
         if (!system_part.empty()) {
+            // The game sound alone never goes past full scale at 100 %: kept exactly as it was.
             system_part[2 * i] = saturate(left);
             system_part[2 * i + 1] = saturate(right);
         }
         if (!mic_part.empty()) {
-            mic_part[2 * i] = saturate(voice);
+            mic_part[2 * i] = soft_saturate(voice);
             mic_part[2 * i + 1] = mic_part[2 * i];
         }
     }

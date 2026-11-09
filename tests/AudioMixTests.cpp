@@ -66,9 +66,10 @@ void mic_goes_to_both_channels_and_saturates() {
     const MixPeaks peaks = mix_block(samples, voice, system, mic);
     CHECK_EQ(samples[0], std::int16_t{8192});
     CHECK_EQ(samples[1], std::int16_t{8292});
-    CHECK_EQ(samples[2], std::int16_t{32767});  // 46384: saturated
+    // 46384 and -46384: bent softly towards full scale, never wrapped around.
+    CHECK(samples[2] > 32000);
     CHECK_EQ(samples[3], std::int16_t{-13616});
-    CHECK_EQ(samples[4], std::int16_t{-32768});  // -46384: saturated
+    CHECK(samples[4] < -32000);
     CHECK_EQ(samples[5], std::int16_t{13616});
     CHECK(std::abs(peaks.mic - 0.5f) < 1e-6f);
 
@@ -77,12 +78,19 @@ void mic_goes_to_both_channels_and_saturates() {
     const std::vector<float> loud = {0.9f};
     GainRamp doubled(2.0f, kRamp);
     mix_block(quiet, loud, system, doubled);
-    CHECK_EQ(quiet[0], std::int16_t{32767});
+    CHECK(quiet[0] > 32000);
+    // Twice as loud past full scale comes out louder still, not flat: no square wave.
+    std::vector<std::int16_t> louder = {0, 0};
+    const std::vector<float> loudest = {0.95f};
+    GainRamp doubled2(2.0f, kRamp);
+    mix_block(louder, loudest, system, doubled2);
+    CHECK(louder[0] >= quiet[0]);
+    CHECK(louder[0] <= 32767);
     // NaN-free and huge values are clamped too.
     std::vector<std::int16_t> huge = {0, 0};
     const std::vector<float> spike = {-1e30f};
     mix_block(huge, spike, system, mic);
-    CHECK_EQ(huge[0], std::int16_t{-32768});
+    CHECK(huge[0] <= -32000);
 }
 
 void gate_ramps_without_a_click() {
@@ -179,7 +187,16 @@ void separate_parts_match_the_mix() {
             };
             system_ok = system_ok && system_part[2 * i] == expect(static_cast<float>(original[2 * i]) * gs) &&
                         system_part[2 * i + 1] == expect(static_cast<float>(original[2 * i + 1]) * gs);
-            mic_ok = mic_ok && mic_part[2 * i] == expect(voice[i] * gm * 32768.0f);
+            // The voice part is bent above 90 % of full scale (soft clipping), the same curve as the mix.
+            const auto expect_soft = [&expect](float v) {
+                const float knee = 0.9f * 32768.0f;
+                const float headroom = 32767.0f - knee;
+                const float m = std::abs(v);
+                if (m <= knee) return expect(v);
+                const float bent = knee + headroom * std::tanh((m - knee) / headroom);
+                return expect(v < 0.0f ? -bent : bent);
+            };
+            mic_ok = mic_ok && mic_part[2 * i] == expect_soft(voice[i] * gm * 32768.0f);
             mic_stereo = mic_stereo && mic_part[2 * i] == mic_part[2 * i + 1];
         }
         CHECK(system_ok);
