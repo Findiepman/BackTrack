@@ -28,7 +28,7 @@ if(MSVC)
     target_compile_definitions(bt_options INTERFACE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 else()
     target_compile_options(bt_options INTERFACE -Wall -Wextra -Wpedantic)
-    # -Werror through CMake, so `cmake --compile-no-warning-error` can switch it off (CI on Arch,
+    # -Werror through CMake, so `cmake --compile-no-warning-as-error` can switch it off (CI on Arch,
     # whose newest GCC brings new warnings before the code is updated for them).
     set(CMAKE_COMPILE_WARNING_AS_ERROR ON)
 endif()

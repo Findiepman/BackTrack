@@ -108,7 +108,7 @@ jobs:
           - name: arch gcc
             container: archlinux:latest
             cxx: g++
-            flags: --compile-no-warning-error
+            flags: --compile-no-warning-as-error
     steps:
       - name: Install build tools and libraries (Arch)
         if: matrix.container == 'archlinux:latest'

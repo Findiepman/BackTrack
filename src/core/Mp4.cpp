@@ -127,7 +127,10 @@ std::optional<std::vector<std::uint8_t>> make_box(const std::string& type, std::
     }
     std::vector<std::uint8_t> box(kHeaderSize);
     write32(box, 0, static_cast<std::uint32_t>(body.size() + kHeaderSize));
-    std::copy(type.begin(), type.end(), box.begin() + 4);
+    // The four type bytes, never more: a longer name must not write past the header.
+    for (std::size_t i = 0; i < 4 && i < type.size(); ++i) {
+        box[4 + i] = static_cast<std::uint8_t>(type[i]);
+    }
     append(box, body);
     return box;
 }
