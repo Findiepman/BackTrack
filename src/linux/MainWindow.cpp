@@ -546,7 +546,7 @@ void MainWindow::notify(const QString& title, const QString& text) {
         QStringLiteral("org.freedesktop.Notifications"), QStringLiteral("Notify"));
     call.setArguments({QStringLiteral("Backtrack"), 0u, QStringLiteral("backtrack"), title, text, QStringList(),
                        QVariantMap{{QStringLiteral("desktop-entry"), QStringLiteral("backtrack")}}, 4000});
-    QDBusConnection::sessionBus().asyncCall(call);  // no answer needed: never waits for the desktop
+    QDBusConnection::sessionBus().send(call);  // no answer needed: never waits for the desktop
 }
 
 std::string MainWindow::folder() const {
