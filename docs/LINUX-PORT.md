@@ -1,12 +1,13 @@
 # Backtrack on Linux (KDE Plasma, Arch)
 
-Status on 2026-11-10 (version 0.6.0): **the first Linux version is written and compiles; it has
-not run on a real Linux desktop yet.** It was written on a Windows PC without Linux, checked by
-compiling every file against the real Linux headers of two systems (Arch: Qt 6.12, FFmpeg 9.0,
-PipeWire 1.6; Ubuntu 24.04: Qt 6.4, FFmpeg 6.1, PipeWire 1.0). Its first real run is the GitHub
-Actions run after the next push: there it records on a virtual screen with a virtual sound card
-and must save three working clips, before and after packing it into the AppImage, and again on a
-bare Arch Linux. No release gets an AppImage unless all of that passes.
+Status on 2026-11-14 (version 0.6.0): **the first Linux version builds and passes its automatic
+test on GitHub Actions; it has not run on a real Linux desktop yet.** It was written on a Windows
+PC without Linux. On the `linux-port` branch it builds with GCC and Clang on Ubuntu 24.04 and with
+GCC on Arch, and in the test it records a virtual screen (X11) with a virtual sound card and saves
+three working clips (H.264 through x264, AAC sound): as a plain build, packed into the AppImage on
+Ubuntu, and with that AppImage on a bare Arch Linux. No release gets an AppImage unless all of
+that passes. Wayland, the graphics card encoders, the tray and the hotkey are not covered by that
+test (see "Not tested yet").
 
 ## What the Linux version does
 
@@ -48,7 +49,7 @@ bare Arch Linux. No release gets an AppImage unless all of that passes.
 
 ## Not tested yet (needs a real KDE PC)
 
-Tested automatically in CI once pushed: X11 capture, x264, sound through PulseAudio, saving,
+Tested automatically in CI on every push: X11 capture, x264, sound through PulseAudio, saving,
 `backtrack --save`, the AppImage on Ubuntu 24.04 and on Arch. **Not tested anywhere yet:**
 
 - the Wayland path: the portal dialog, the restore token, PipeWire frames from KWin, the
