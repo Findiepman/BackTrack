@@ -1,0 +1,348 @@
+# Builds and tests Backtrack on every push and pull request, and publishes a release from main.
+#
+#   windows:  the full app (Release), all unit tests, and the installer Backtrack-Setup-<version>.exe
+#   linux:    the Linux app and all unit tests with GCC and Clang (Ubuntu 24.04) and GCC on Arch
+#   appimage: on Ubuntu 24.04 the Linux app runs for real on a virtual screen with a virtual sound
+#             card and must save working clips (packaging/linux/smoke-test.sh); then it is packed
+#             into Backtrack-<version>-x86_64.AppImage, and that AppImage must pass the same test
+#   appimage-arch: the AppImage passes the test again on a bare Arch Linux (other libraries)
+#   release:  on main, when the version in CMakeLists.txt has no V<version> tag yet, creates release
+#             V<version> with the installer and the AppImage. The same checks as
+#             tools/publish-release.ps1 (which makes Windows-only releases: use it only when CI
+#             cannot run). Every job above must pass first; the Arch build row only reports.
+#
+# A push to main with a new version = a release that every installed Backtrack with "Install
+# updates automatically" downloads within a day. To approve each release by hand, add required
+# reviewers to the "release" environment (GitHub > Settings > Environments > release).
+# Actions > build > Run workflow with "dry_run" builds everything and checks the release without
+# publishing.
+
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Check the release but do not publish it"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        shell: pwsh
+        run: |
+          $m = Select-String -Path CMakeLists.txt -Pattern 'project\(Backtrack VERSION ([0-9]+\.[0-9]+\.[0-9]+)'
+          if (-not $m) { throw "No version found in CMakeLists.txt" }
+          "version=$($m.Matches[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+
+      # No -G: the newest Visual Studio on the runner. installer\backtrack.iss reads build\Release.
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Unit tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Installer
+        shell: pwsh
+        run: |
+          $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") |
+                  Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y
+            if ($LASTEXITCODE -ne 0) { throw "Installing Inno Setup failed" }
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          & $iscc "/DAppVersion=${{ steps.version.outputs.version }}" installer\backtrack.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+          # The updater picks exactly this name out of a release (core/UpdateCheck.cpp, ReleaseSource).
+          $setup = "build\installer\Backtrack-Setup-${{ steps.version.outputs.version }}.exe"
+          if (-not (Test-Path $setup)) { throw "$setup was not made" }
+          (Get-FileHash -Algorithm SHA256 $setup).Hash.ToLower()
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: build/installer/Backtrack-Setup-${{ steps.version.outputs.version }}.exe
+          if-no-files-found: error
+
+  linux:
+    name: linux (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.container }}
+    # The Arch build follows Arch's newest compiler, Qt and FFmpeg the day they land: when that
+    # breaks, the run shows it but the release still goes out (the AppImage is built on Ubuntu
+    # 24.04 and tested on Arch in appimage-arch, which does block).
+    continue-on-error: ${{ matrix.container != '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu gcc
+            container: ""
+            cxx: g++
+            packages: ""
+          - name: ubuntu clang
+            container: ""
+            cxx: clang++
+            packages: clang
+          # Arch moves to every new GCC at once: its new warnings are shown, not fatal, so a compiler
+          # update alone never blocks a release. The pinned Ubuntu rows keep -Werror.
+          - name: arch gcc
+            container: archlinux:latest
+            cxx: g++
+            flags: --compile-no-warning-error
+    steps:
+      - name: Install build tools and libraries (Arch)
+        if: matrix.container == 'archlinux:latest'
+        run: >
+          pacman -Syu --noconfirm --needed base-devel cmake git pkgconf qt6-base ffmpeg libpulse
+          libpipewire libx11 libxext libxfixes libxrandr
+
+      - name: Install libraries (Ubuntu)
+        if: matrix.container == ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.packages }} qt6-base-dev libavcodec-dev libavformat-dev \
+            libavutil-dev libswscale-dev libpulse-dev libpipewire-0.3-dev libx11-dev libxext-dev libxfixes-dev \
+            libxrandr-dev pkg-config
+
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S . -B build-linux -DCMAKE_BUILD_TYPE=Release -DBT_LINUX_APP=ON
+          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} ${{ matrix.flags }}
+
+      - name: Build
+        run: cmake --build build-linux --parallel
+
+      - name: Unit tests
+        run: ctest --test-dir build-linux --output-on-failure
+
+  appimage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libraries and test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qt6-base-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+            libpulse-dev libpipewire-0.3-dev libx11-dev libxext-dev libxfixes-dev libxrandr-dev pkg-config \
+            xvfb pulseaudio pulseaudio-utils ffmpeg libxcb-cursor0 file
+
+      - name: Read version
+        id: version
+        run: echo "version=$(sed -nE 's/.*project\(Backtrack VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: |
+          cmake -S . -B build-linux -DCMAKE_BUILD_TYPE=Release -DBT_LINUX_APP=ON
+          cmake --build build-linux --parallel
+
+      - name: Smoke test (the build)
+        run: |
+          bash packaging/linux/smoke-test.sh run "$PWD/build-linux/backtrack"
+          bash packaging/linux/smoke-test.sh check
+
+      - name: AppImage
+        run: bash packaging/linux/make-appimage.sh build-linux
+
+      - name: Smoke test (the AppImage)
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: |
+          appimage="$PWD/build-linux/Backtrack-${{ steps.version.outputs.version }}-x86_64.AppImage"
+          "$appimage" --version
+          bash packaging/linux/smoke-test.sh run "$appimage"
+          bash packaging/linux/smoke-test.sh check
+          sha256sum "$appimage"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: build-linux/Backtrack-${{ steps.version.outputs.version }}-x86_64.AppImage
+          if-no-files-found: error
+
+  # The AppImage on another distribution: a bare Arch with only what any desktop has (X11, OpenGL,
+  # fonts, the sound server, VA-API). FFmpeg is installed only after the run, for ffprobe, so a
+  # library missing from the AppImage cannot be covered up by one on the system.
+  appimage-arch:
+    needs: appimage
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    steps:
+      - name: Install what a desktop has
+        run: >
+          pacman -Syu --noconfirm --needed xorg-server-xvfb pulseaudio libpulse libx11 libxcb libxext
+          libxfixes libxrandr libxrender libxkbcommon libxkbcommon-x11 xcb-util-wm xcb-util-image
+          xcb-util-keysyms xcb-util-renderutil xcb-util-cursor mesa libglvnd fontconfig freetype2
+          libva libvdpau libpipewire dbus
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-appimage
+          path: dist
+
+      # As a normal user: PulseAudio does not run as root (the container's user).
+      - name: Smoke test (the AppImage on Arch)
+        run: |
+          useradd -m tester
+          appimage=$(ls "$PWD"/dist/Backtrack-*-x86_64.AppImage)
+          chmod 755 "$appimage" dist
+          chmod -R a+rX "$PWD"
+          runuser -u tester -- env APPIMAGE_EXTRACT_AND_RUN=1 bash packaging/linux/smoke-test.sh run "$appimage"
+
+      - name: Check the clips
+        run: |
+          pacman -S --noconfirm --needed ffmpeg
+          bash packaging/linux/smoke-test.sh check
+
+  release:
+    needs: [windows, linux, appimage, appimage-arch]
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the version
+        id: check
+        run: |
+          version=$(sed -nE 's/.*project\(Backtrack VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt)
+          [ -n "$version" ] || { echo "No version found in CMakeLists.txt"; exit 1; }
+          tag="V$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # A version that already has a tag is not a new release: nothing to do (a normal push).
+          # --exit-code: 0 found, 2 not found, anything else (network) must not count as "not found".
+          rc=0; git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "Tag $tag exists: no new release."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          elif [ "$rc" -ne 2 ]; then
+            echo "Could not list the tags on GitHub (git exit code $rc)."; exit 1
+          fi
+          # Every GitHub question below fails closed: only "release not found" means there is none.
+          if gh release view "$tag" --repo "$REPO" >/dev/null 2>gh_err.txt; then
+            echo "Release $tag already exists (a draft, or without a tag); finish or delete it, or bump the version."
+            exit 1
+          elif ! grep -qi "release not found" gh_err.txt; then
+            cat gh_err.txt; echo "Could not ask GitHub about release $tag."; exit 1
+          fi
+          # Installed copies only move up: an equal or lower "latest" would make them drop a waiting update.
+          if latest=$(gh release view --repo "$REPO" --json tagName --jq .tagName 2>gh_err.txt); then
+            :
+          elif grep -qiE "release not found|HTTP 404" gh_err.txt; then
+            latest=""
+          else
+            cat gh_err.txt; echo "Could not ask GitHub for the latest release."; exit 1
+          fi
+          if [ -n "$latest" ]; then
+            latest_version=${latest#[vV]}
+            if ! [[ "$latest_version" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]]; then
+              echo "The latest release's tag $latest is not a version Backtrack can read."; exit 1
+            fi
+            highest=$(printf '%s\n%s\n' "$latest_version" "$version" | sort -V | tail -n1)
+            if [ "$version" = "$latest_version" ] || [ "$highest" != "$version" ]; then
+              echo "$version is not newer than the latest release $latest."; exit 1
+            fi
+            echo "Latest release now: $latest"
+          else
+            echo "No release on GitHub yet: this is the first"
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
+      - name: Release notes
+        if: steps.check.outputs.publish == 'true'
+        run: |
+          last=$(git describe --tags --abbrev=0 --match "V*" 2>/dev/null || true)
+          range=${last:+$last..}HEAD
+          git log --no-merges --format=%s "$range" | grep -v '^CI:' | sed 's/^/- /' > notes.md || true
+          [ -s notes.md ] || { echo "No release notes: every commit since $last starts with CI:"; exit 1; }
+          cat notes.md
+
+      - uses: actions/download-artifact@v4
+        if: steps.check.outputs.publish == 'true'
+        with:
+          name: windows-installer
+          path: dist
+
+      - uses: actions/download-artifact@v4
+        if: steps.check.outputs.publish == 'true'
+        with:
+          name: linux-appimage
+          path: dist
+
+      - name: Publish
+        if: steps.check.outputs.publish == 'true'
+        run: |
+          tag=${{ steps.check.outputs.tag }}
+          setup_name="Backtrack-Setup-${{ steps.check.outputs.version }}.exe"
+          setup="dist/$setup_name"
+          [ -f "$setup" ] || { echo "$setup is missing"; exit 1; }
+          appimage="dist/Backtrack-${{ steps.check.outputs.version }}-x86_64.AppImage"
+          [ -f "$appimage" ] || { echo "$appimage is missing"; exit 1; }
+          echo "$(basename "$appimage"), $(stat -c %s "$appimage") bytes, SHA-256 $(sha256sum "$appimage" | cut -d' ' -f1)"
+          hash=$(sha256sum "$setup" | cut -d' ' -f1)
+          echo "$setup_name, $(stat -c %s "$setup") bytes, SHA-256 $hash"
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run: would create $tag at $GITHUB_SHA with $setup_name and $(basename "$appimage"). Nothing published."
+            exit 0
+          fi
+          # Made as a draft first: installed copies never see it until GitHub's digest is checked.
+          gh release create "$tag" "$setup" "$appimage" --repo "$REPO" --target "$GITHUB_SHA" --draft \
+            --title "Backtrack ${{ steps.check.outputs.version }}" --notes-file notes.md
+          # Installed copies refuse an update without a matching digest (sha256 added by GitHub).
+          # The releases list includes drafts (releases/tags/<tag> does not).
+          check_digest() {  # <asset name> <sha256 of the local file>
+            local digest=""
+            for attempt in 1 2 3 4 5 6; do
+              digest=$(gh api "repos/$REPO/releases?per_page=30" \
+                --jq ".[] | select(.tag_name == \"$tag\") | .assets[] | select(.name == \"$1\") | .digest // empty")
+              [[ "$digest" == sha256:* ]] && break
+              sleep 10
+            done
+            if [ "$digest" != "sha256:$2" ]; then
+              echo "GitHub's digest '$digest' of $1 differs from sha256:$2: the upload is not the file that was tested."
+              echo "The draft is left unpublished; delete it (gh release delete $tag --repo $REPO) and check the file."
+              exit 1
+            fi
+            echo "$1: digest $digest"
+          }
+          check_digest "$setup_name" "$hash"
+          check_digest "$(basename "$appimage")" "$(sha256sum "$appimage" | cut -d' ' -f1)"
+          gh release edit "$tag" --repo "$REPO" --draft=false --latest
+          echo "Published https://github.com/$REPO/releases/tag/$tag"

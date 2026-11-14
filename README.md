@@ -8,6 +8,11 @@ Built from scratch on what Windows ships with: Desktop Duplication and Direct3D 
 screen, the graphics card's own H.264 encoder through Media Foundation (AMD, NVIDIA or Intel, with
 Windows' software encoder as fallback), WASAPI for sound. No FFmpeg, no OBS, no runtime to install.
 
+> **Linux (new in 0.6.0, first version):** a smaller Backtrack for KDE Plasma, Arch and other
+> desktops (X11 and Wayland) ships as `Backtrack-<version>-x86_64.AppImage` with each release: the
+> replay buffer, the save hotkey, sound and microphone, the newest clips and the main settings.
+> See `docs/LINUX-PORT.md` for what it does, what not yet, and what still needs a real KDE PC.
+>
 > **Status:** the recording engine and the whole window are done: library, clip page (player, trim,
 > tags, notes), Record and Settings, and the microphone. Sharing, long recordings and screenshots are
 > shown in the window as "Soon".
@@ -249,11 +254,17 @@ and GitHub's own download servers. The last installer run's log is
 `%LOCALAPPDATA%\Backtrack\updates\install.log`; if an update fails twice, it is no longer started
 automatically.
 
-Publishing a release (the owner): bump the version in `CMakeLists.txt`, commit and push, then
-`powershell -ExecutionPolicy Bypass -File tools\publish-release.ps1` (`-DryRun` first to see what
-it would do, `-Notes "..."` for the text shown in Backtrack; without it the commit subjects since
-the last release are used). It builds the installer and creates the GitHub release `V<version>`
-with it. `build\Release\update_check.exe` runs a check against GitHub from the command line.
+Publishing a release (the owner): bump the version in `CMakeLists.txt`, commit and push to `main`.
+GitHub Actions (`.github/workflows/build.yml`) builds and tests everything, makes the installer and,
+because `V<version>` does not exist yet, creates the GitHub release `V<version>` with it. The
+release text is the commit subjects since the last release (subjects starting with `CI:` left
+out). So a push to `main` with a new version is a release every installed Backtrack takes within a
+day: push risky work to another branch first (it is built and tested there, never released).
+Actions > build > **Run workflow** with "dry_run" checks a release without publishing it. To
+approve every release by hand, add required reviewers to the `release` environment in the
+repository's settings. `tools\publish-release.ps1` still works for a release by hand (`-DryRun`
+first, `-Notes "..."` for the text). `build\Release\update_check.exe` runs a check against GitHub
+from the command line.
 
 ## Building
 
@@ -272,6 +283,16 @@ To run only the unit tests (no GPU, no game, no Media Foundation needed):
 
 ```
 tests\run-tests.bat
+```
+
+On Linux (GCC 13+ or Clang 17+, CMake 3.25+) `-DBT_LINUX_APP=ON` builds the Linux version (Qt 6,
+FFmpeg, PipeWire, PulseAudio and X11 development files needed); without it only the portable core
+and its unit tests build. `docs/LINUX-PORT.md` has the libraries, the AppImage and what works.
+
+```
+cmake -S . -B build-linux -DCMAKE_BUILD_TYPE=Release -DBT_LINUX_APP=ON
+cmake --build build-linux --parallel
+ctest --test-dir build-linux --output-on-failure
 ```
 
 ### Test options

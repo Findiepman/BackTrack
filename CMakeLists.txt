@@ -1,8 +1,13 @@
 ﻿cmake_minimum_required(VERSION 3.25)
-project(Backtrack VERSION 0.5.1 LANGUAGES CXX)
+project(Backtrack VERSION 0.6.0 LANGUAGES CXX)
 
-if(NOT MSVC)
+# Windows builds the whole app with MSVC. On Linux the portable core and its unit tests always
+# build; the Linux app (src/linux) with -DBT_LINUX_APP=ON (docs/LINUX-PORT.md).
+if(WIN32 AND NOT MSVC)
     message(FATAL_ERROR "Backtrack is built with MSVC (Visual Studio 2022 Build Tools).")
+endif()
+if(NOT WIN32 AND NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    message(FATAL_ERROR "On Linux the Backtrack core is built with GCC or Clang.")
 endif()
 
 # The clip buffer can hold several GB at the config maximum (300 s at 100 Mbit/s).
@@ -18,8 +23,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 add_library(bt_options INTERFACE)
-target_compile_options(bt_options INTERFACE /W4 /WX /permissive- /utf-8 /EHsc /Zc:__cplusplus)
-target_compile_definitions(bt_options INTERFACE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+if(MSVC)
+    target_compile_options(bt_options INTERFACE /W4 /WX /permissive- /utf-8 /EHsc /Zc:__cplusplus)
+    target_compile_definitions(bt_options INTERFACE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+else()
+    target_compile_options(bt_options INTERFACE -Wall -Wextra -Wpedantic)
+    # -Werror through CMake, so `cmake --compile-no-warning-error` can switch it off (CI on Arch,
+    # whose newest GCC brings new warnings before the code is updated for them).
+    set(CMAKE_COMPILE_WARNING_AS_ERROR ON)
+endif()
 
 # Pure C++ logic. Must never include a Windows header.
 add_library(backtrack_core STATIC
@@ -42,10 +54,12 @@ add_library(backtrack_core STATIC
     src/core/ExportPlan.cpp
     src/core/ShareUpload.cpp
     src/core/RepairPlan.cpp
+    src/core/LinuxDesktop.cpp
 )
 target_include_directories(backtrack_core PUBLIC src)
 target_link_libraries(backtrack_core PUBLIC bt_options)
 
+if(WIN32)
 # The mouse pointer's shaders, compiled at build time by the Windows SDK's fxc into headers with the
 # bytecode, so the exe needs no shader compiler (d3dcompiler_47.dll) at run time.
 set(BT_PROGRAM_FILES_X86 "ProgramFiles(x86)")  # $ENV{} cannot take the parentheses directly
@@ -170,9 +184,45 @@ target_link_libraries(repair_check PRIVATE backtrack_core mfplat mfuuid mfreadwr
 add_executable(share_check tools/share_check.cpp src/platform/Uploader.cpp src/platform/Log.cpp)
 target_include_directories(share_check PRIVATE src)
 target_link_libraries(share_check PRIVATE backtrack_core winhttp bcrypt)
+endif()
+
+# The Linux app: Qt 6 window and tray, FFmpeg for H.264/AAC/MP4, X11 (XShm) or the Wayland portal
+# with PipeWire for the screen, PulseAudio (pipewire-pulse) for the sound. Off by default so the
+# core and tests still build on a machine without these libraries.
+if(NOT WIN32)
+    option(BT_LINUX_APP "Build the Linux app (needs Qt 6, FFmpeg, PipeWire, PulseAudio and X11 development files)" OFF)
+endif()
+if(BT_LINUX_APP AND NOT WIN32)
+    find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets DBus Network)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(BT_LINUX_DEPS REQUIRED IMPORTED_TARGET
+        libavcodec libavformat libavutil libswscale libpulse-simple libpipewire-0.3 x11 xext xfixes xrandr)
+    add_executable(backtrack
+        src/linux/main.cpp
+        src/linux/MainWindow.cpp
+        src/linux/Recorder.cpp
+        src/linux/VideoEncoder.cpp
+        src/linux/AudioRecorder.cpp
+        src/linux/ClipFile.cpp
+        src/linux/X11Capture.cpp
+        src/linux/PipeWireCapture.cpp
+        src/linux/Portal.cpp
+        src/linux/X11Hotkey.cpp
+        src/linux/X11Errors.cpp
+        src/linux/Desktop.cpp
+        src/linux/Log.cpp
+    )
+    set_target_properties(backtrack PROPERTIES AUTOMOC ON)
+    target_compile_definitions(backtrack PRIVATE BT_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(backtrack PRIVATE backtrack_core Qt6::Widgets Qt6::DBus Qt6::Network PkgConfig::BT_LINUX_DEPS)
+    include(GNUInstallDirs)
+    install(TARGETS backtrack RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(FILES packaging/linux/backtrack.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+    install(FILES packaging/linux/backtrack.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
+endif()
 
 enable_testing()
-foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests TrimPlanTests AudioFifoTests AudioMixTests NoiseSuppressorTests ThemeColorsTests CaptureMathTests UpdateCheckTests ExportPlanTests ShareUploadTests RepairPlanTests StallWatchTests)
+foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests TrimPlanTests AudioFifoTests AudioMixTests NoiseSuppressorTests ThemeColorsTests CaptureMathTests UpdateCheckTests ExportPlanTests ShareUploadTests RepairPlanTests StallWatchTests LinuxDesktopTests)
     add_executable(${test_name} tests/${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE backtrack_core)
     target_compile_definitions(${test_name} PRIVATE BT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

@@ -255,6 +255,29 @@ void installer_asset_rules() {
                                           "https://github.com/findiepman/backtrack/releases/download/V0.4.0/Backtrack"),
                             kCurrent);
     CHECK(r.release.installer.has_value());
+
+    // Releases also carry the Linux AppImage: Windows never takes it, before or instead of the installer.
+    const std::string appimage_asset = R"({
+      "url": "https://api.github.com/repos/Findiepman/BackTrack/releases/assets/9",
+      "browser_download_url": "https://github.com/Findiepman/BackTrack/releases/download/V0.4.0/Backtrack-0.4.0-x86_64.AppImage",
+      "id": 9, "name": "Backtrack-0.4.0-x86_64.AppImage", "label": "", "state": "uploaded",
+      "content_type": "application/octet-stream", "size": 98765432,
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "download_count": 0
+    },
+    {
+      "url": "https://api.github.com/repos/Findiepman/BackTrack/releases/assets/7",)";
+    const std::string with_appimage =
+        replaced(kRelease, "{\n      \"url\": \"https://api.github.com/repos/Findiepman/BackTrack/releases/assets/7\",", appimage_asset);
+    CHECK(with_appimage != kRelease);
+    r = read_latest_release(200, with_appimage, kCurrent);
+    CHECK(r.release.installer.has_value());
+    if (r.release.installer) {
+        CHECK_EQ(r.release.installer->name, std::string("Backtrack-Setup-0.4.0.exe"));
+        CHECK(r.release.installer->url.ends_with("/Backtrack-Setup-0.4.0.exe"));
+    }
+    r = read_latest_release(200, replaced(with_appimage, "\"name\": \"Backtrack-Setup-0.4.0.exe\"", "\"name\": \"Backtrack-Setup-0.4.0.zip\""),
+                            kCurrent);
+    CHECK(!r.release.installer);
 }
 
 void another_repository() {

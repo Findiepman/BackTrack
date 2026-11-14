@@ -103,10 +103,13 @@ void length_prefixed_samples() {
     const std::vector<std::uint8_t> sets = {0, 0, 0, 1, 0x67, 0x4D, 0x00, 0, 0, 0, 1, 0x68, 0xEE};
     CHECK(h264::parameter_set_bytes(*units) == sets);
     // A P-frame: no parameter sets. A PPS alone is still returned.
-    const auto p = h264::split_length_prefixed(std::vector<std::uint8_t>{0, 0, 0, 2, 0x41, 0x9A});
+    // The NAL units point into the bytes, so the bytes must outlive them (a temporary would not).
+    const std::vector<std::uint8_t> p_frame = {0, 0, 0, 2, 0x41, 0x9A};
+    const auto p = h264::split_length_prefixed(p_frame);
     CHECK(p && h264::parameter_set_bytes(*p).empty());
-    const auto pps = h264::split_length_prefixed(std::vector<std::uint8_t>{0, 0, 0, 1, 0x68});
-    CHECK(pps && h264::parameter_set_bytes(*pps) == (std::vector<std::uint8_t>{0, 0, 0, 1, 0x68}));
+    const std::vector<std::uint8_t> pps_only = {0, 0, 0, 1, 0x68};
+    const auto pps = h264::split_length_prefixed(pps_only);
+    CHECK(pps && h264::parameter_set_bytes(*pps) == pps_only);
     // Lengths that do not add up, a zero length, a cut-off length: refused.
     CHECK(!h264::split_length_prefixed(std::vector<std::uint8_t>{0, 0, 0, 5, 0x41}).has_value());
     CHECK(!h264::split_length_prefixed(std::vector<std::uint8_t>{0, 0, 0, 0}).has_value());

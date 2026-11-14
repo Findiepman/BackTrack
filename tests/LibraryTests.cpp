@@ -9,6 +9,13 @@ using namespace bt;
 
 namespace {
 
+// A clip with only its file name (designated initializers would warn about every other field on Clang).
+ClipEntry file_entry(std::string file) {
+    ClipEntry entry;
+    entry.file = std::move(file);
+    return entry;
+}
+
 constexpr std::int64_t kNow = 1'762'300'000;  // November 2025
 constexpr std::int64_t kDay = kSecondsPerDay;
 constexpr std::int64_t kMb = 1'000'000;
@@ -80,7 +87,7 @@ void saved_clip_merges_with_folder_sync() {
     CHECK_EQ(lib.clips().size(), std::size_t{1});
     CHECK_EQ(lib.find("new.mp4")->duration_s, 30.2);
     CHECK_EQ(lib.find("new.mp4")->source, std::string("Display 1"));
-    lib.add_saved_clip(ClipEntry{.file = "other.mp4"});
+    lib.add_saved_clip(file_entry("other.mp4"));
     CHECK_EQ(lib.clips().size(), std::size_t{2});
 }
 
@@ -385,9 +392,9 @@ void formatting() {
     CHECK_EQ(format_size(1'240'000'000), std::string("1.2 GB"));
     CHECK_EQ(format_size(820'000), std::string("820 KB"));
     CHECK_EQ(format_size(-5), std::string("0 KB"));
-    CHECK_EQ(display_title(ClipEntry{.file = "clip_1.mp4"}), std::string("clip_1"));
-    CHECK_EQ(display_title(ClipEntry{.file = "noext"}), std::string("noext"));
-    CHECK_EQ(display_title(ClipEntry{.file = ".mp4"}), std::string(".mp4"));
+    CHECK_EQ(display_title(file_entry("clip_1.mp4")), std::string("clip_1"));
+    CHECK_EQ(display_title(file_entry("noext")), std::string("noext"));
+    CHECK_EQ(display_title(file_entry(".mp4")), std::string(".mp4"));
 
     CHECK_EQ(format_age(-30), std::string("Just now"));
     CHECK_EQ(format_age(59), std::string("Just now"));

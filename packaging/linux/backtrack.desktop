@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Backtrack
+GenericName=Instant replay recorder
+Comment=Keeps the last seconds of your screen and sound and saves them with a hotkey
+Exec=backtrack
+Icon=backtrack
+Terminal=false
+Categories=AudioVideo;Video;Recorder;
+Keywords=clip;replay;record;screen;
+StartupWMClass=backtrack

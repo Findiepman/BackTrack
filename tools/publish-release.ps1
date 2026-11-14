@@ -10,6 +10,10 @@
 # -Notes: the release text shown in Backtrack's Settings page. Without it: the commit subjects
 # since the last V* tag (subjects starting with "CI:" left out).
 # Needs the GitHub CLI, signed in: winget install GitHub.cli, then gh auth login.
+#
+# Since 0.6.0 releases are made by GitHub Actions (.github/workflows/build.yml) on a push to main,
+# with the Windows installer AND the Linux AppImage. This script makes a Windows-only release:
+# use it only when CI cannot run.
 param(
     [string]$Notes = "",
     [switch]$DryRun
@@ -23,6 +27,7 @@ $repo = "Findiepman/BackTrack"
 function Step([string]$text) { Write-Host "-> $text" }
 # A dry run reports every problem and carries on, so one run shows all of them.
 function Stop([string]$text) { if ($DryRun) { Write-Warning $text } else { throw $text } }
+Write-Warning "This makes a Windows-only release (no Linux AppImage). Normally a push to main releases through GitHub Actions."
 
 $version = (Select-String -Path "$root\CMakeLists.txt" -Pattern 'project\(Backtrack VERSION ([0-9]+\.[0-9]+\.[0-9]+)').Matches[0].Groups[1].Value
 if (-not $version) { throw "No version found in CMakeLists.txt" }

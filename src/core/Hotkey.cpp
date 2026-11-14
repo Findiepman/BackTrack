@@ -159,7 +159,7 @@ std::string key_name(std::uint32_t vk) {
 }
 
 HotkeyParseResult fail(std::string message) {
-    return HotkeyParseResult{std::nullopt, std::move(message)};
+    return HotkeyParseResult{std::nullopt, std::move(message), {}};
 }
 
 }  // namespace
