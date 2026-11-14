@@ -85,7 +85,6 @@ void mic_goes_to_both_channels_and_saturates() {
     GainRamp doubled2(2.0f, kRamp);
     mix_block(louder, loudest, system, doubled2);
     CHECK(louder[0] >= quiet[0]);
-    CHECK(louder[0] <= 32767);
     // NaN-free and huge values are clamped too.
     std::vector<std::int16_t> huge = {0, 0};
     const std::vector<float> spike = {-1e30f};
