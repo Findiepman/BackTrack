@@ -12,6 +12,8 @@
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QDBusConnection>
+#include <QDBusMessage>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
@@ -535,7 +537,16 @@ void MainWindow::open_clips_folder() {
 void MainWindow::notify(const QString& title, const QString& text) {
     if (tray_ != nullptr) {
         tray_->showMessage(title, text, logo_icon(), 4000);
+        return;
     }
+    // No tray (GNOME has none without an extension): the desktop's own notifications, which
+    // every desktop has. Without this a clip saved with the hotkey in a game says nothing at all.
+    QDBusMessage call = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.Notifications"), QStringLiteral("/org/freedesktop/Notifications"),
+        QStringLiteral("org.freedesktop.Notifications"), QStringLiteral("Notify"));
+    call.setArguments({QStringLiteral("Backtrack"), 0u, QStringLiteral("backtrack"), title, text, QStringList(),
+                       QVariantMap{{QStringLiteral("desktop-entry"), QStringLiteral("backtrack")}}, 4000});
+    QDBusConnection::sessionBus().asyncCall(call);  // no answer needed: never waits for the desktop
 }
 
 std::string MainWindow::folder() const {
