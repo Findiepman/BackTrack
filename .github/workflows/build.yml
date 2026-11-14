@@ -132,7 +132,7 @@ jobs:
           -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} ${{ matrix.flags }}
 
       - name: Build
-        run: cmake --build build-linux --parallel
+        run: cmake --build build-linux --parallel -- --keep-going
 
       - name: Unit tests
         run: ctest --test-dir build-linux --output-on-failure
@@ -156,7 +156,7 @@ jobs:
       - name: Build
         run: |
           cmake -S . -B build-linux -DCMAKE_BUILD_TYPE=Release -DBT_LINUX_APP=ON
-          cmake --build build-linux --parallel
+          cmake --build build-linux --parallel -- --keep-going
 
       - name: Smoke test (the build)
         run: |
@@ -183,7 +183,8 @@ jobs:
           if-no-files-found: error
 
   # The AppImage on another distribution: a bare Arch with only what any desktop has (X11, OpenGL,
-  # fonts, the sound server, VA-API). FFmpeg is installed only after the run, for ffprobe, so a
+  # fonts and text shaping, the sound server, VA-API: the AppImage tools never bundle those, see
+  # the AppImage excludelist). FFmpeg is installed only after the run, for ffprobe, so a
   # library missing from the AppImage cannot be covered up by one on the system.
   appimage-arch:
     needs: appimage
@@ -195,7 +196,7 @@ jobs:
           pacman -Syu --noconfirm --needed xorg-server-xvfb pulseaudio libpulse libx11 libxcb libxext
           libxfixes libxrandr libxrender libxkbcommon libxkbcommon-x11 xcb-util-wm xcb-util-image
           xcb-util-keysyms xcb-util-renderutil xcb-util-cursor mesa libglvnd fontconfig freetype2
-          libva libvdpau libpipewire dbus
+          libva libvdpau libpipewire dbus harfbuzz fribidi expat zlib libice libsm
 
       - uses: actions/checkout@v4
 
