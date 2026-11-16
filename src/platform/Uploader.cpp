@@ -247,6 +247,7 @@ UploadResult upload_clip(const std::filesystem::path& file, ShareHost host, cons
         if (status != 200) {
             result.message = std::format("{} refused the upload (error {}). Try again later.",
                                          to_utf8(std::wstring(endpoint.host)), status);
+            result.retry = upload_worth_retrying(static_cast<int>(status), body);
             log::warn("Upload refused: HTTP {}", status);
             return result;
         }
@@ -259,6 +260,7 @@ UploadResult upload_clip(const std::filesystem::path& file, ShareHost host, cons
         std::string shown;
         for (const char c : body.substr(0, 160)) shown += (c >= 0x20 && c < 0x7f) ? c : ' ';
         log::warn("Upload answer without a link: {}", shown);
+        result.retry = upload_worth_retrying(static_cast<int>(status), body);
         result.message = std::format("{} did not send back a link. Try again later.", to_utf8(std::wstring(endpoint.host)));
     } catch (const std::exception& e) {
         result.message = std::string("The upload failed: ") + e.what();

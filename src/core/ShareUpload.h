@@ -48,4 +48,10 @@ UploadForm make_upload_form(ShareHost host, std::string_view file_name, std::str
 // error page, a message such as "File too large", anything with spaces or odd characters).
 std::optional<std::string> parse_upload_reply(ShareHost host, std::string_view body);
 
+// Whether sending the same upload again may work: the host took it and answered "OK" with an empty
+// reply (catbox.moe does that now and then), or its server was in trouble for a moment (500, 502,
+// 503, 504). Not when it said no for a reason that stays (too big, forbidden, a message in the
+// reply): sending up to 200 MB again would only waste the line.
+bool upload_worth_retrying(int http_status, std::string_view body);
+
 }  // namespace bt

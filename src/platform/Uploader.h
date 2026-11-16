@@ -20,6 +20,7 @@ struct UploadResult {
     bool cancelled = false;
     std::string url;  // ok: the direct link to the MP4
     std::string message;  // one plain sentence for the user when not ok
+    bool retry = false;  // not ok: the host answered, but the same upload may work a moment later
 };
 
 using UploadProgress = std::function<void(double fraction)>;  // 0..1, on the calling thread

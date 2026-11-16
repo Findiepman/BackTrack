@@ -231,6 +231,7 @@ private:
         Stage stage = Stage::Form;
         std::shared_ptr<std::atomic<double>> progress = std::make_shared<std::atomic<double>>(0.0);
         std::shared_ptr<std::atomic<bool>> uploading = std::make_shared<std::atomic<bool>>(false);
+        std::shared_ptr<std::atomic<int>> upload_try = std::make_shared<std::atomic<int>>(1);  // 2+: sending again
         std::shared_ptr<std::atomic<bool>> cancel = std::make_shared<std::atomic<bool>>(false);  // the share copy
         std::shared_ptr<UploadAbort> abort = std::make_shared<UploadAbort>();  // the upload, at once
         std::shared_ptr<std::atomic<bool>> finished = std::make_shared<std::atomic<bool>>(false);  // the link exists

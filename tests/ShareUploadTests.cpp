@@ -49,11 +49,23 @@ void replies() {
     CHECK(!parse_upload_reply(ShareHost::Catbox, "<html>502 Bad Gateway</html>"));
 }
 
+void retries() {
+    // The real case (12 Nov 2026): catbox.moe took 32 MB and answered 200 with an empty body.
+    CHECK(upload_worth_retrying(200, ""));
+    CHECK(upload_worth_retrying(200, "\r\n"));
+    for (const int status : {500, 502, 503, 504}) CHECK(upload_worth_retrying(status, "<html>oops</html>"));
+    // An answer that stays the same however often it is asked: sending 200 MB again helps nobody.
+    CHECK(!upload_worth_retrying(200, "No files given."));
+    CHECK(!upload_worth_retrying(200, "https://files.catbox.moe/k3p9xq.mp4"));
+    for (const int status : {301, 400, 403, 407, 412, 413, 429}) CHECK(!upload_worth_retrying(status, ""));
+}
+
 }  // namespace
 
 int main() {
     endpoints();
     form();
     replies();
+    retries();
     return bt_test::finish("ShareUploadTests");
 }
