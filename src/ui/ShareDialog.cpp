@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <format>
+#include <thread>
 
 namespace bt::ui {
 
@@ -35,6 +36,11 @@ fs::path share_copy_folder() {
     const DWORD length = GetTempPathW(MAX_PATH + 1, temp);
     return (length > 0 && length <= MAX_PATH ? fs::path(temp) : fs::temp_directory_path()) / L"Backtrack";
 }
+
+// catbox.moe now and then takes a whole upload and answers without a link; the same upload sent
+// again a moment later gets one. So an answer like that is not shown as a failure right away.
+constexpr int kUploadTries = 3;
+constexpr int kRetryPauseMs = 3000;
 
 // Share copies a crash or a forced shutdown left behind (they can be hundreds of MB). An hour
 // old: never the one a running share is still writing.
@@ -191,7 +197,25 @@ void App::run_share(const std::string& what, const Rect&) {
                 cancelled = made.cancelled;
                 message = made.message;
             } else {
-                const UploadResult sent = upload_clip(copy, host, [&](double f) { report(f, true); }, *view->abort);
+                UploadResult sent;
+                for (int attempt = 1;; ++attempt) {
+                    sent = upload_clip(copy, host, [&](double f) { report(f, true); }, *view->abort);
+                    if (sent.ok || !sent.retry || attempt == kUploadTries) break;
+                    log::warn("Upload try {} of {} got no usable answer, sending it again", attempt, kUploadTries);
+                    // The bar back to the start of the upload half, and the window says "again":
+                    // not "Waiting for the host" at 100 % while nothing is on its way.
+                    view->upload_try->store(attempt + 1);
+                    view->progress->store(0.0);
+                    PostMessageW(window, kMsgExport, 0, 0);
+                    // A moment for the host to recover; a cancel ends the wait at once.
+                    for (int waited = 0; waited < kRetryPauseMs && !view->cancel->load(); waited += 100) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                    if (view->cancel->load()) {
+                        sent.cancelled = true;
+                        break;
+                    }
+                }
                 cancelled = sent.cancelled;
                 message = sent.message;
                 url = sent.url;
@@ -312,7 +336,9 @@ void App::paint_share(float width, float height) {
         const double fraction = std::clamp(view.progress->load(), 0.0, 1.0) * 0.5 + (uploading ? 0.5 : 0.0);
         // All bytes sent: the host is storing the file, which takes a moment for a big one.
         const bool waiting = uploading && view.progress->load() >= 1.0;
+        const bool again = view.upload_try->load() > 1;
         g.text(waiting     ? std::format(L"Waiting for {}...", share_endpoint(view.host).host)
+               : again     ? std::format(L"Uploading to {} again...", share_endpoint(view.host).host)
                : uploading ? std::format(L"Uploading to {}...", share_endpoint(view.host).host)
                            : std::wstring(L"Making the share copy..."),
                Rect{px, y, pw * 0.7f, 22}, TextStyle{14, Weight::Semibold}, kInk);

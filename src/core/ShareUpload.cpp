@@ -61,4 +61,9 @@ std::optional<std::string> parse_upload_reply(ShareHost host, std::string_view b
     return std::string(link);
 }
 
+bool upload_worth_retrying(int http_status, std::string_view body) {
+    if (http_status == 200) return body.find_first_not_of(" \t\r\n") == std::string_view::npos;
+    return http_status == 500 || http_status == 502 || http_status == 503 || http_status == 504;
+}
+
 }  // namespace bt
