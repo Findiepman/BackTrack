@@ -9,6 +9,11 @@ Ubuntu, and with that AppImage on a bare Arch Linux. No release gets an AppImage
 that passes. Wayland, the graphics card encoders, the tray and the hotkey are not covered by that
 test (see "Not tested yet").
 
+2026-11-17: the library and the clip page (player, trim, filmstrip) are in. CI also reads a saved
+clip the way they do (length, thumbnail, filmstrip, a lossless trim, two seconds of playing) on
+Ubuntu and with the AppImage on Arch; the windows themselves have not been clicked through on a
+real desktop yet.
+
 ## What the Linux version does
 
 - Keeps the last 5 to 300 seconds of the screen and sound and saves them as MP4 with a hotkey
