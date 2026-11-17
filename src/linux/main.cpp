@@ -67,21 +67,18 @@ int check_media(const std::string& clip, const std::string& trimmed) {
     using namespace std::chrono_literals;
     bool ok = true;
     const auto expect = [&ok](bool condition, const char* what) {
-        std::printf("%s: %s
-", condition ? "ok  " : "FAIL", what);
+        std::printf("%s: %s\n", condition ? "ok  " : "FAIL", what);
         ok = ok && condition;
     };
     const MediaFacts facts = probe_media(clip);
-    std::printf("probe: %.2f s, %dx%d
-", facts.duration_s, facts.width, facts.height);
+    std::printf("probe: %.2f s, %dx%d\n", facts.duration_s, facts.width, facts.height);
     expect(facts.ok && facts.duration_s > 3.6, "probe finds the length and the picture size");
     const Still still = read_still(clip, 1.0 / 3.0, 384, 216);
     expect(still.width == 384 && still.height == 216 && still.pixels.size() == 384u * 216u * 4u, "thumbnail");
     const std::vector<Still> strip = read_filmstrip(clip, 12, 160, 90);
     expect(strip.size() == 12, "filmstrip of 12 pictures");
     const TrimResult trim = trim_clip(clip, trimmed, 1.0, 3.5);
-    std::printf("trim: %s, starts at %.3f s, %.3f s long, %llu bytes
-", trim.ok ? "saved" : trim.error.c_str(),
+    std::printf("trim: %s, starts at %.3f s, %.3f s long, %llu bytes\n", trim.ok ? "saved" : trim.error.c_str(),
                 trim.start_s, trim.seconds, static_cast<unsigned long long>(trim.bytes));
     // The keyframe at or before 1 s: the one at 1 s (a keyframe every second), or the first one
     // when the timestamps put that one a hair after 1 s.
@@ -107,8 +104,7 @@ int check_media(const std::string& clip, const std::string& trimmed) {
             ++pictures;
         }
     }
-    std::printf("player: %d pictures in 2 s, at %.2f s
-", pictures, player.position());
+    std::printf("player: %d pictures in 2 s, at %.2f s\n", pictures, player.position());
     expect(pictures >= 40 && frame.width() == 640, "player shows the pictures in the view size");
     expect(player.position() > 1.5 && player.position() < 2.6, "player keeps time");
     player.pause();
