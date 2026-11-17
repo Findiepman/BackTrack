@@ -34,7 +34,7 @@ public:
     ~ClipLibrary() override;
 
     // The clips folder (at start and when the setting changes): read again at once.
-    void set_folder(const std::string& folder);
+    void set_folder(const std::string& setting);
     const std::string& folder() const { return folder_; }
     std::string path_of(const std::string& file) const;
 
@@ -79,6 +79,17 @@ private:
         QImage thumbnail;
     };
 
+    enum class FileState { Missing, Unreadable, Damaged, Read };
+    struct LibraryFile {
+        FileState state = FileState::Missing;
+        Library library;
+        std::string folder;  // the clips folder it belongs to; empty in a file from before 0.6
+    };
+    // Reads library.json or a shelf. A damaged file, or one from a newer Backtrack, is first
+    // copied next to itself (writable_ goes false when that copy fails).
+    LibraryFile read_library_file(const std::string& path);
+    void keep_copy(const std::string& path, const char* why);
+    std::string library_text(const std::string& folder) const;
     void load();
     std::string shelf_path(const std::string& folder) const;
     void request_missing_info();
@@ -91,6 +102,7 @@ private:
     Library library_;
     std::string folder_;
     std::string library_file_;
+    std::string loaded_folder_;  // the folder library.json said it belongs to at start
     std::string cache_dir_;
     bool writable_ = true;
     std::map<std::string, QImage> thumbs_;  // "file|size"

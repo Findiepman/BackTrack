@@ -36,6 +36,16 @@ std::int64_t now_unix() {
     return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
+// One spelling per folder ("/clips/" and "/x/../clips" are "/clips"): another spelling of the same
+// folder must not count as a switch, nor a clip saved there as one from elsewhere.
+std::string normal_folder(const std::string& path) {
+    std::string folder = fs::path(path).lexically_normal().string();
+    while (folder.size() > 1 && folder.ends_with('/')) {
+        folder.pop_back();
+    }
+    return folder;
+}
+
 std::string key_of(const std::string& file, std::int64_t size) {
     return file + "|" + std::to_string(size);
 }
@@ -145,56 +155,86 @@ ClipLibrary::~ClipLibrary() {
     thread_.join();
     if (save_soon_->isActive() && writable_) {
         // Quitting within a second of a probe result: written, without telling pages that are going away.
-        write_atomically(library_file_, library_.to_json().dump(2) + "\n");
+        write_atomically(library_file_, library_text(folder_));
     }
 }
 
-void ClipLibrary::load() {
+void ClipLibrary::keep_copy(const std::string& path, const char* why) {
+    const fs::path original(path);
+    // Named by date and time so an older copy is never overwritten.
+    const std::string copy =
+        (original.parent_path() / std::format("{}.{}-{}.json", original.stem().string(), why,
+                                              QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss").toStdString()))
+            .string();
     std::error_code ec;
-    if (!fs::exists(library_file_, ec)) {
+    fs::copy_file(path, copy, fs::copy_options::overwrite_existing, ec);
+    if (ec) {
+        // Without the copy the original is the only one left: it must not be saved over.
+        writable_ = false;
+        log_warning("Could not keep a copy of " + path + " (" + ec.message() + "); library changes are not saved");
+    } else {
+        log_warning("Kept a copy of " + path + " as " + copy);
+    }
+}
+
+ClipLibrary::LibraryFile ClipLibrary::read_library_file(const std::string& path) {
+    LibraryFile result;
+    std::error_code ec;
+    if (!fs::exists(path, ec)) {
         if (ec) {
             // Cannot even tell whether it is there: do not risk replacing it this run.
-            writable_ = false;
-            log_warning("Cannot check " + library_file_ + " (" + ec.message() + "); library changes are not saved");
+            result.state = FileState::Unreadable;
+            log_warning("Cannot check " + path + " (" + ec.message() + ")");
         }
-        return;  // first run: the folder scan fills it
+        return result;
     }
-    QFile file(QString::fromStdString(library_file_));
+    QFile file(QString::fromStdString(path));
     if (!file.open(QIODevice::ReadOnly)) {
-        // There but unreadable: treating it as a first run would overwrite the real one.
-        writable_ = false;
-        log_warning("Cannot read " + library_file_ + "; library changes are not saved this run");
-        return;
+        result.state = FileState::Unreadable;  // there but unreadable: treating it as new would overwrite it
+        log_warning("Cannot read " + path);
+        return result;
     }
     const QByteArray bytes = file.readAll();
     const JsonParseResult parsed = parse_json(std::string_view(bytes.constData(), static_cast<std::size_t>(bytes.size())));
-    const auto keep_copy = [this](const char* why) {
-        const std::string copy = std::format("{}/library.{}-{}.json", fs::path(library_file_).parent_path().string(),
-                                             why, QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss").toStdString());
-        std::error_code copy_ec;
-        fs::copy_file(library_file_, copy, fs::copy_options::overwrite_existing, copy_ec);
-        if (copy_ec) {
-            // Without the copy the original is the only one left: it must not be saved over.
-            writable_ = false;
-            log_warning("Could not keep a copy of library.json (" + copy_ec.message() + "); changes are not saved");
-        } else {
-            log_warning("Kept a copy of library.json as " + copy);
-        }
-    };
     if (!parsed.value || !parsed.value->is_object() || !(*parsed.value)["clips"].is_array()) {
         // Never throw away what the user set up: keep the damaged file and start over from the folder.
-        log_warning("library.json could not be read" + (parsed.value ? std::string() : " (" + parsed.error + ")"));
-        keep_copy("damaged");
-        return;
+        log_warning(path + " could not be read" + (parsed.value ? std::string() : " (" + parsed.error + ")"));
+        keep_copy(path, "damaged");
+        result.state = FileState::Damaged;
+        return result;
     }
     if ((*parsed.value)["version"].as_int(1) > kLibraryFileVersion) {
-        keep_copy("newer");  // a newer Backtrack wrote it; saving drops what this one does not know
+        keep_copy(path, "newer");  // a newer Backtrack wrote it; saving drops what this one does not know
     }
-    library_ = Library::from_json(*parsed.value);
+    result.state = FileState::Read;
+    result.library = Library::from_json(*parsed.value);
+    result.folder = (*parsed.value)["folder"].as_string();
+    return result;
+}
+
+std::string ClipLibrary::library_text(const std::string& folder) const {
+    // core/Library's file plus the clips folder it belongs to (Windows ignores the extra key), so a
+    // start with another folder in backtrack.ini can tell that it is not this folder's library.
+    Json json = library_.to_json();
+    json.set("folder", Json(folder));
+    return json.dump(2) + "\n";
+}
+
+void ClipLibrary::load() {
+    LibraryFile file = read_library_file(library_file_);
+    if (file.state == FileState::Unreadable) {
+        writable_ = false;
+        log_warning("library.json is not saved this run, so it is not overwritten");
+        return;
+    }
+    if (file.state == FileState::Read) {
+        library_ = std::move(file.library);
+        loaded_folder_ = file.folder;
+    }
 }
 
 void ClipLibrary::save() {
-    if (writable_ && !write_atomically(library_file_, library_.to_json().dump(2) + "\n")) {
+    if (writable_ && !write_atomically(library_file_, library_text(folder_))) {
         static std::int64_t last_warning = 0;
         if (now_unix() - last_warning > 60) {
             last_warning = now_unix();
@@ -208,32 +248,32 @@ std::string ClipLibrary::shelf_path(const std::string& folder) const {
     return std::format("{}/library-{:016x}.json", fs::path(library_file_).parent_path().string(), fnv1a(folder));
 }
 
-void ClipLibrary::set_folder(const std::string& folder) {
+void ClipLibrary::set_folder(const std::string& setting) {
+    const std::string folder = normal_folder(setting);
     if (folder == folder_) {
         return;
     }
-    const bool switching = !folder_.empty();
-    if (switching) {
+    if (!folder_.empty()) {
         watcher_->removePath(QString::fromStdString(folder_));
+    }
+    // At start the folder library.json was written for (it may differ: backtrack.ini edited by hand,
+    // or a crash in the middle of a switch); later the folder shown until now.
+    const std::string previous = folder_.empty() ? loaded_folder_ : folder_;
+    const bool switching = !previous.empty() && previous != folder;
+    if (switching) {
         // Each clips folder keeps its own favorites, collections, tags and notes: the library of the
         // folder being left is put aside, and the one of the folder being opened comes back if it
         // was used before. Otherwise the scan below would drop every clip of the old folder, and a
         // mistyped folder in Settings would cost the user all of that.
-        if (writable_ && !write_atomically(shelf_path(folder_), library_.to_json().dump(2) + "\n")) {
+        if (writable_ && !write_atomically(shelf_path(previous), library_text(previous))) {
             writable_ = false;
-            log_warning("Could not put the library of " + folder_ + " aside; library changes are not saved this run");
+            log_warning("Could not put the library of " + previous + " aside; library changes are not saved this run");
         }
-        Library next;
-        QFile shelf(QString::fromStdString(shelf_path(folder)));
-        if (shelf.open(QIODevice::ReadOnly)) {
-            const QByteArray bytes = shelf.readAll();
-            const JsonParseResult parsed =
-                parse_json(std::string_view(bytes.constData(), static_cast<std::size_t>(bytes.size())));
-            if (parsed.value && parsed.value->is_object() && (*parsed.value)["clips"].is_array()) {
-                next = Library::from_json(*parsed.value);
-            }
+        LibraryFile shelf = read_library_file(shelf_path(folder));
+        if (shelf.state == FileState::Unreadable) {
+            writable_ = false;  // its favorites are there but cannot be read: nothing is saved over them
         }
-        library_ = std::move(next);
+        library_ = shelf.state == FileState::Read ? std::move(shelf.library) : Library{};
         cleanup_skipped_.clear();
         save_soon_->stop();
         log_info("Clips folder is now " + folder);
@@ -251,9 +291,10 @@ void ClipLibrary::set_folder(const std::string& folder) {
     fs::create_directories(folder_, ec);
     watcher_->addPath(QString::fromStdString(folder_));
     scan();
-    if (switching) {
-        save();  // also when the scan changed nothing: library.json is now this folder's
+    if (switching || loaded_folder_.empty()) {
+        save();  // also when the scan changed nothing: library.json now says which folder it is for
     }
+    loaded_folder_ = folder_;
 }
 
 std::string ClipLibrary::path_of(const std::string& file) const {
@@ -300,7 +341,7 @@ void ClipLibrary::scan() {
 
 void ClipLibrary::add_saved(const std::string& path, double seconds, const std::string& source) {
     const fs::path file(path);
-    if (file.parent_path() != fs::path(folder_)) {
+    if (normal_folder(file.parent_path().string()) != folder_) {
         scan();
         return;
     }
@@ -446,8 +487,8 @@ void ClipLibrary::take_results() {
         thumbs_[key_of(result.file, result.size_bytes)] = std::move(result.thumbnail);  // null: none can be made
         pictures = true;
     }
-    if (changed) {
-        save_soon_->start();
+    if (changed && !save_soon_->isActive()) {
+        save_soon_->start();  // not restarted by every result: at most a second late while the queue runs
     }
     if (pictures) {
         emit thumbnail_ready();

@@ -20,14 +20,17 @@
 #include <QApplication>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QSocketNotifier>
 #include <QSystemTrayIcon>
 #include <QTimer>
 
 #include <X11/Xlib.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -41,6 +44,16 @@
 #endif
 
 namespace {
+
+// SIGTERM (a Wayland logout, kill, systemctl stop), SIGHUP and SIGINT end Backtrack the way Quit
+// does, so the clip page's last notes and the library are written. The handler only writes a byte;
+// the GUI thread reads it and quits.
+int signal_fds[2] = {-1, -1};
+
+void on_stop_signal(int) {
+    const char byte = 1;
+    (void)!::write(signal_fds[1], &byte, 1);
+}
 
 QString server_name() {
     return QStringLiteral("backtrack-%1").arg(getuid());
@@ -239,6 +252,24 @@ int main(int argc, char** argv) {
             });
         }
     });
+
+    if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, signal_fds) == 0) {
+        auto* notifier = new QSocketNotifier(signal_fds[0], QSocketNotifier::Read, &window);
+        QObject::connect(notifier, &QSocketNotifier::activated, &window, [&window, notifier] {
+            notifier->setEnabled(false);  // once is enough
+            char byte = 0;
+            (void)!::read(signal_fds[0], &byte, 1);
+            log_info("Asked to stop: quitting");
+            window.quit();
+        });
+        struct sigaction action {};
+        action.sa_handler = on_stop_signal;
+        sigemptyset(&action.sa_mask);
+        action.sa_flags = SA_RESTART;
+        for (const int signal : {SIGTERM, SIGHUP, SIGINT}) {
+            sigaction(signal, &action, nullptr);
+        }
+    }
 
     if (!hidden || !QSystemTrayIcon::isSystemTrayAvailable()) {
         window.show();

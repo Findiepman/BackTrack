@@ -109,7 +109,9 @@ struct Player::Decoding {
         }
         // The packets' time base: lets the decoder move the times past skipped AAC priming.
         context->pkt_timebase = stream->time_base;
-        context->thread_count = 0;  // as many as the processor has: 1440p at 120 fps must keep up
+        // A few threads so 1440p at 120 fps keeps up; not one per core: frame threads hold each
+        // picture back by one frame per thread, which a seek then waits for.
+        context->thread_count = 4;
         if (avcodec_open2(context, codec, nullptr) < 0) {
             avcodec_free_context(&context);
         }
