@@ -196,10 +196,15 @@ if(BT_LINUX_APP AND NOT WIN32)
     find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets DBus Network)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(BT_LINUX_DEPS REQUIRED IMPORTED_TARGET
-        libavcodec libavformat libavutil libswscale libpulse-simple libpipewire-0.3 x11 xext xfixes xrandr)
+        libavcodec libavformat libavutil libswscale libswresample libpulse-simple libpipewire-0.3 x11 xext xfixes xrandr)
     add_executable(backtrack
         src/linux/main.cpp
         src/linux/MainWindow.cpp
+        src/linux/ClipLibrary.cpp
+        src/linux/LibraryPage.cpp
+        src/linux/ClipPage.cpp
+        src/linux/Player.cpp
+        src/linux/Media.cpp
         src/linux/Recorder.cpp
         src/linux/VideoEncoder.cpp
         src/linux/AudioRecorder.cpp

@@ -1,7 +1,10 @@
 #include "linux/MainWindow.h"
 
 #include "core/LinuxDesktop.h"
+#include "linux/ClipLibrary.h"
+#include "linux/ClipPage.h"
 #include "linux/Desktop.h"
+#include "linux/LibraryPage.h"
 #include "linux/Log.h"
 #include "linux/PipeWireCapture.h"
 #include "linux/Portal.h"
@@ -22,6 +25,7 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -29,6 +33,7 @@
 #include <QMetaObject>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QStackedWidget>
 #include <QStringList>
 #include <QSystemTrayIcon>
 #include <QThreadPool>
@@ -46,7 +51,8 @@ namespace bt::linux_app {
 
 namespace {
 
-constexpr int kMaxClipsShown = 30;
+constexpr int kKindRole = Qt::UserRole;  // sidebar: "record", "view", "collection", "new"
+constexpr int kValueRole = Qt::UserRole + 1;  // the LibraryView, or the collection id
 
 QString qs(const std::string& text) {
     return QString::fromStdString(text);
@@ -81,6 +87,7 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent), wayland_(wayland_sess
     setWindowTitle(QStringLiteral("Backtrack"));
     setWindowIcon(logo_icon());
     load_settings();
+    library_ = new ClipLibrary(this);
     build_ui();
 
     screencast_ = new ScreenCastPortal(this);
@@ -165,7 +172,8 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent), wayland_(wayland_sess
     });
 
     start_hotkeys();
-    refresh_clips();
+    library_->set_folder(folder());
+    library_->run_cleanup();
 }
 
 MainWindow::~MainWindow() {
@@ -176,7 +184,78 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::build_ui() {
-    auto* root = new QVBoxLayout(this);
+    auto* outer = new QHBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    outer->setSpacing(0);
+
+    auto* side = new QWidget;
+    side->setFixedWidth(210);
+    auto* side_layout = new QVBoxLayout(side);
+    side_layout->setContentsMargins(8, 10, 8, 10);
+    sidebar_ = new QListWidget;
+    sidebar_->setFrameShape(QFrame::NoFrame);
+    sidebar_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(sidebar_, &QListWidget::itemClicked, this, [this](QListWidgetItem* item) {
+        const QString kind = item->data(kKindRole).toString();
+        if (kind == QStringLiteral("record")) {
+            clip_page_->close_clip();
+            pages_->setCurrentWidget(record_page_);
+            refresh_sidebar();
+        } else if (kind == QStringLiteral("view")) {
+            show_library(static_cast<LibraryView>(item->data(kValueRole).toInt()));
+        } else if (kind == QStringLiteral("collection")) {
+            show_library(LibraryView::Collection, item->data(kValueRole).toString().toStdString());
+        } else if (kind == QStringLiteral("new")) {
+            bool ok = false;
+            const QString name = QInputDialog::getText(this, QStringLiteral("New collection"), QStringLiteral("Name"),
+                                                       QLineEdit::Normal, QStringLiteral("New collection"), &ok)
+                                     .trimmed();
+            if (ok && !name.isEmpty()) {
+                const std::string id = library_->edit().create_collection(
+                    name.toStdString(), static_cast<int>(library_->library().collections().size()) % kCollectionColorCount);
+                library_->save();
+                show_library(LibraryView::Collection, id);
+            } else {
+                refresh_sidebar();  // the selection goes back to the page that is shown
+            }
+        }
+    });
+    connect(sidebar_, &QWidget::customContextMenuRequested, this, [this](const QPoint& at) { sidebar_menu(at); });
+    side_layout->addWidget(sidebar_, 1);
+    sidebar_status_ = new QLabel;
+    sidebar_status_->setWordWrap(true);
+    side_layout->addWidget(sidebar_status_);
+    auto* side_save = new QPushButton(QStringLiteral("Save clip"));
+    connect(side_save, &QPushButton::clicked, this, [this] { save_clip(); });
+    side_layout->addWidget(side_save);
+    outer->addWidget(side);
+
+    pages_ = new QStackedWidget;
+    record_page_ = build_record_page();
+    library_page_ = new LibraryPage(library_);
+    clip_page_ = new ClipPage(library_, library_page_);
+    pages_->addWidget(record_page_);
+    pages_->addWidget(library_page_);
+    pages_->addWidget(clip_page_);
+    outer->addWidget(pages_, 1);
+
+    connect(library_page_, &LibraryPage::open_clip, this, [this](const QString& file) { open_clip(file); });
+    connect(clip_page_, &ClipPage::back, this, [this] {
+        pages_->setCurrentWidget(library_page_);
+        refresh_sidebar();
+    });
+    connect(clip_page_, &ClipPage::show_collection, this,
+            [this](const QString& id) { show_library(LibraryView::Collection, id.toStdString()); });
+    connect(library_, &ClipLibrary::changed, this, [this] { refresh_sidebar(); });
+
+    fill_settings_form();
+    show_library(LibraryView::All);
+    resize(1180, 760);
+}
+
+QWidget* MainWindow::build_record_page() {
+    auto* page = new QWidget;
+    auto* root = new QVBoxLayout(page);
 
     auto* header = new QHBoxLayout;
     auto* logo = new QLabel;
@@ -219,18 +298,9 @@ void MainWindow::build_ui() {
     hotkey_hint_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     root->addWidget(hotkey_hint_);
 
-    auto* clips_box = new QGroupBox(QStringLiteral("Newest clips"));
-    auto* clips_layout = new QVBoxLayout(clips_box);
-    clips_ = new QListWidget;
-    clips_->setToolTip(QStringLiteral("Double-click to play"));
-    connect(clips_, &QListWidget::itemActivated, this, [](QListWidgetItem* item) {
-        QDesktopServices::openUrl(QUrl::fromLocalFile(item->data(Qt::UserRole).toString()));
-    });
-    clips_layout->addWidget(clips_);
     auto* open_folder = new QPushButton(QStringLiteral("Open clips folder"));
     connect(open_folder, &QPushButton::clicked, this, [this] { open_clips_folder(); });
-    clips_layout->addWidget(open_folder, 0, Qt::AlignLeft);
-    root->addWidget(clips_box, 1);
+    root->addWidget(open_folder, 0, Qt::AlignLeft);
 
     auto* settings_box = new QGroupBox(QStringLiteral("Settings"));
     auto* form = new QFormLayout(settings_box);
@@ -286,9 +356,121 @@ void MainWindow::build_ui() {
     settings_message_->setWordWrap(true);
     form->addRow(apply, settings_message_);
     root->addWidget(settings_box);
+    root->addStretch(1);
+    return page;
+}
 
-    fill_settings_form();
-    resize(560, 720);
+void MainWindow::show_library(LibraryView view, const std::string& collection) {
+    clip_page_->close_clip();
+    library_page_->set_view(view, collection);
+    pages_->setCurrentWidget(library_page_);
+    refresh_sidebar();
+}
+
+void MainWindow::open_clip(const QString& file) {
+    clip_page_->open(file.toStdString());
+    if (!clip_page_->file().empty()) {
+        pages_->setCurrentWidget(clip_page_);
+    }
+}
+
+void MainWindow::refresh_sidebar() {
+    if (sidebar_pending_) {
+        return;
+    }
+    sidebar_pending_ = true;
+    QTimer::singleShot(0, this, [this] {
+        sidebar_pending_ = false;
+        rebuild_sidebar();
+    });
+}
+
+void MainWindow::rebuild_sidebar() {
+    const Library& library = library_->library();
+    const LibraryCounts counts = library.counts(QDateTime::currentSecsSinceEpoch());
+    const bool on_record = pages_->currentWidget() == record_page_;
+    const LibraryView view = library_page_->view();
+    const std::string shown_collection = library_page_->view_collection();
+
+    sidebar_->clear();
+    const auto add = [this](const QString& text, const QString& kind, const QVariant& value, bool current) {
+        auto* item = new QListWidgetItem(text);
+        item->setData(kKindRole, kind);
+        item->setData(kValueRole, value);
+        sidebar_->addItem(item);
+        if (current) {
+            sidebar_->setCurrentItem(item);
+        }
+        return item;
+    };
+    const auto heading = [this](const QString& text) {
+        auto* item = new QListWidgetItem(text);
+        QFont font = item->font();
+        font.setBold(true);
+        item->setFont(font);
+        item->setFlags(Qt::NoItemFlags);
+        sidebar_->addItem(item);
+    };
+    const auto counted = [](const QString& name, std::size_t n) {
+        return n > 0 ? QStringLiteral("%1   %2").arg(name).arg(n) : name;
+    };
+    add(QStringLiteral("Recording"), QStringLiteral("record"), {}, on_record);
+    heading(QStringLiteral("Library"));
+    const std::pair<LibraryView, QString> views[] = {
+        {LibraryView::All, counted(QStringLiteral("All clips"), counts.all)},
+        {LibraryView::Favorites, counted(QStringLiteral("Favorites"), counts.favorites)},
+        {LibraryView::Recent, counted(QStringLiteral("Recent"), counts.recent)},
+        {LibraryView::Shared, counted(QStringLiteral("Shared"), counts.shared)},
+        {LibraryView::Trash, counted(QStringLiteral("Trash"), counts.trash)},
+    };
+    for (const auto& [v, text] : views) {
+        add(text, QStringLiteral("view"), static_cast<int>(v), !on_record && view == v);
+    }
+    heading(QStringLiteral("Collections"));
+    for (const Collection& c : library.collections()) {
+        const QString name = c.name.empty() ? QStringLiteral("Untitled") : qs(c.name);
+        QListWidgetItem* item = add(counted(name, library.collection_size(c.id)), QStringLiteral("collection"), qs(c.id),
+                                    !on_record && view == LibraryView::Collection && shown_collection == c.id);
+        item->setIcon(collection_icon(c.color));
+    }
+    add(QStringLiteral("+ New collection"), QStringLiteral("new"), {}, false);
+}
+
+void MainWindow::sidebar_menu(const QPoint& at) {
+    QListWidgetItem* item = sidebar_->itemAt(at);
+    if (item == nullptr || item->data(kKindRole).toString() != QStringLiteral("collection")) {
+        return;
+    }
+    const std::string id = item->data(kValueRole).toString().toStdString();
+    QMenu menu(this);
+    menu.addAction(QStringLiteral("Rename…"), this, [this, id] {
+        const Collection* c = library_->library().find_collection(id);
+        if (c == nullptr) {
+            return;
+        }
+        bool ok = false;
+        const QString name = QInputDialog::getText(this, QStringLiteral("Rename collection"), QStringLiteral("Name"),
+                                                   QLineEdit::Normal, qs(c->name), &ok)
+                                 .trimmed();
+        if (ok && !name.isEmpty() && library_->edit().rename_collection(id, name.toStdString())) {
+            library_->save();
+        }
+    });
+    QMenu* colors = menu.addMenu(QStringLiteral("Colour"));
+    for (int i = 0; i < kCollectionColorCount; ++i) {
+        colors->addAction(collection_icon(i), QStringLiteral("Colour %1").arg(i + 1), this, [this, id, i] {
+            if (library_->edit().set_collection_color(id, i)) {
+                library_->save();
+            }
+        });
+    }
+    menu.addSeparator();
+    menu.addAction(QStringLiteral("Delete collection (keeps the clips)"), this, [this, id] {
+        if (library_->edit().delete_collection(id)) {
+            library_->save();
+        }
+    });
+    menu.exec(sidebar_->viewport()->mapToGlobal(at));
 }
 
 void MainWindow::fill_settings_form() {
@@ -388,7 +570,7 @@ void MainWindow::apply_settings() {
     } else {
         settings_message_->setText(QStringLiteral("Saved."));
     }
-    refresh_clips();
+    library_->set_folder(folder());
 }
 
 void MainWindow::start_hotkeys() {
@@ -474,7 +656,7 @@ void MainWindow::on_saved(const SaveResult& result) {
         if (settings_.notification) {
             notify(QStringLiteral("Clip saved"), name);
         }
-        refresh_clips();
+        library_->add_saved(result.path, result.seconds, recorder_.status().capture);
     } else {
         ++failed_saves_;
         show_save_message(QStringLiteral("Not saved: %1").arg(qs(result.error)));
@@ -484,6 +666,8 @@ void MainWindow::on_saved(const SaveResult& result) {
 
 void MainWindow::refresh_status() {
     const RecorderStatus status = recorder_.status();
+    sidebar_status_->setText(status.running ? QStringLiteral("● Recording · %1 saves").arg(qs(settings_.save_hotkey))
+                                            : QStringLiteral("Not recording"));
     if (status.running) {
         status_->setText(QStringLiteral("Recording · the last %1 s are kept").arg(settings_.clip_seconds));
         QStringList parts;
@@ -511,21 +695,6 @@ void MainWindow::show_save_message(const QString& text) {
     detail_->setText(text);
     showing_save_message_ = true;
     save_message_timer_->start();
-}
-
-void MainWindow::refresh_clips() {
-    clips_->clear();
-    const QDir dir(qs(folder()));
-    const QFileInfoList files = dir.entryInfoList({QStringLiteral("*.mp4")}, QDir::Files, QDir::Time);
-    for (int i = 0; i < files.size() && i < kMaxClipsShown; ++i) {
-        const QFileInfo& file = files[i];
-        auto* item = new QListWidgetItem(QStringLiteral("%1   %2 MB   %3")
-                                             .arg(file.fileName())
-                                             .arg(static_cast<double>(file.size()) / 1e6, 0, 'f', 1)
-                                             .arg(file.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm"))));
-        item->setData(Qt::UserRole, file.absoluteFilePath());
-        clips_->addItem(item);
-    }
 }
 
 void MainWindow::open_clips_folder() {
@@ -571,6 +740,12 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         stop_recording();
         event->accept();
         return;
+    }
+    // Nothing keeps playing behind a hidden window; the file is let go.
+    if (pages_->currentWidget() == clip_page_) {
+        clip_page_->close_clip();
+        pages_->setCurrentWidget(library_page_);
+        refresh_sidebar();
     }
     hide();
     event->ignore();

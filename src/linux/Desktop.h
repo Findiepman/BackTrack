@@ -13,6 +13,8 @@ namespace bt::linux_app {
 struct AppPaths {
     std::string config_dir;  // ~/.config/Backtrack: backtrack.ini
     std::string state_dir;  // ~/.local/state/Backtrack: backtrack.log, the screen sharing token
+    std::string data_dir;  // ~/.local/share/Backtrack: library.json
+    std::string cache_dir;  // ~/.cache/Backtrack: thumbnails
     std::string ini_file;
     std::string log_file;
     std::string token_file;
@@ -36,6 +38,10 @@ QIcon logo_icon();
 // this AppImage file (written again on each start, since an update changes the file's name), with
 // a "Save clip" action that can be given a key in KDE's Shortcuts settings.
 void install_desktop_entry();
+
+// Opens the file manager on the folder with the file selected (Dolphin, Nautilus and others take
+// org.freedesktop.FileManager1); without one, opens the folder.
+void show_in_folder(const std::string& path);
 
 std::string read_text_file(const std::string& path);
 bool write_text_file(const std::string& path, const std::string& text);

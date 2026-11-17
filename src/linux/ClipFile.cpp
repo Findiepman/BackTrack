@@ -124,21 +124,31 @@ bool write_clip(const std::string& path, const CodecParameters& video, const Cod
     }
     avio_closep(&out.context->pb);
     out.opened = false;
-    std::error_code ec;
     if (ok) {
-        // link() never replaces an existing file (a clip saved in the same second by another
-        // save); rename() is the fallback for file systems without hard links (exFAT, FAT32).
-        if (link(temp_path.c_str(), final_path.c_str()) == 0) {
-            std::filesystem::remove(temp_path, ec);
-        } else if (errno == EEXIST) {
+        return publish_file(temp_path.string(), final_path.string(), error);
+    }
+    std::error_code ec;
+    std::filesystem::remove(temp_path, ec);
+    return false;
+}
+
+bool publish_file(const std::string& temp_path, const std::string& final_path, std::string& error) {
+    std::error_code ec;
+    bool ok = true;
+    // link() never replaces an existing file; rename() is the fallback for file systems without
+    // hard links (exFAT, FAT32), checked first so it does not replace one either.
+    if (link(temp_path.c_str(), final_path.c_str()) == 0) {
+        std::filesystem::remove(temp_path, ec);
+        return true;
+    }
+    if (errno == EEXIST || std::filesystem::exists(final_path, ec)) {
+        ok = false;
+        error = "A clip with this name appeared while saving";
+    } else {
+        std::filesystem::rename(temp_path, final_path, ec);
+        if (ec) {
             ok = false;
-            error = "A clip with this name appeared while saving";
-        } else {
-            std::filesystem::rename(temp_path, final_path, ec);
-            if (ec) {
-                ok = false;
-                error = "Cannot rename the finished clip: " + ec.message();
-            }
+            error = "Cannot rename the finished clip: " + ec.message();
         }
     }
     if (!ok) {

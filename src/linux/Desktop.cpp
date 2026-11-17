@@ -3,8 +3,14 @@
 #include "core/LinuxDesktop.h"
 #include "linux/Log.h"
 
+#include <QDBusConnection>
+#include <QDBusMessage>
+#include <QDesktopServices>
+#include <QFileInfo>
 #include <QPainter>
 #include <QPainterPath>
+#include <QStringList>
+#include <QUrl>
 
 #include <cstdlib>
 #include <filesystem>
@@ -64,6 +70,8 @@ AppPaths app_paths() {
     AppPaths paths;
     paths.config_dir = xdg("XDG_CONFIG_HOME", "/.config") + "/Backtrack";
     paths.state_dir = xdg("XDG_STATE_HOME", "/.local/state") + "/Backtrack";
+    paths.data_dir = xdg("XDG_DATA_HOME", "/.local/share") + "/Backtrack";
+    paths.cache_dir = xdg("XDG_CACHE_HOME", "/.cache") + "/Backtrack";
     paths.ini_file = paths.config_dir + "/backtrack.ini";
     paths.log_file = paths.state_dir + "/backtrack.log";
     paths.token_file = paths.state_dir + "/screencast-token";
@@ -158,6 +166,19 @@ void install_desktop_entry() {
         if (write_text_file(path, entry.str())) {
             log_info("Menu entry written: " + path);
         }
+    }
+}
+
+void show_in_folder(const std::string& path) {
+    const QString file = QString::fromStdString(path);
+    QDBusMessage call = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.FileManager1"), QStringLiteral("/org/freedesktop/FileManager1"),
+        QStringLiteral("org.freedesktop.FileManager1"), QStringLiteral("ShowItems"));
+    call.setArguments({QStringList{QUrl::fromLocalFile(file).toString()}, QString()});
+    // Answered at once by the file manager (or by D-Bus when none is installed): short wait.
+    const QDBusMessage reply = QDBusConnection::sessionBus().call(call, QDBus::Block, 3000);
+    if (reply.type() != QDBusMessage::ReplyMessage) {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(file).absolutePath()));
     }
 }
 

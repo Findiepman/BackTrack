@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/Config.h"
+#include "core/Library.h"
 #include "linux/Recorder.h"
 #include "linux/X11Hotkey.h"
 
@@ -16,17 +17,22 @@ class QListWidget;
 class QListWidgetItem;
 class QPushButton;
 class QSpinBox;
+class QStackedWidget;
 class QSystemTrayIcon;
 class QTimer;
 
 namespace bt::linux_app {
 
+class ClipLibrary;
+class ClipPage;
 class GlobalShortcutsPortal;
+class LibraryPage;
 class ScreenCastPortal;
 
-// The Linux window: what is being recorded, Save clip, the newest clips and the main settings.
-// Smaller than the Windows app (no library, editor or export yet, docs/LINUX-PORT.md); settings
-// are the same backtrack.ini keys. It keeps recording from the tray when closed.
+// The Linux window: a sidebar with the recording page (status, Save clip, the main settings) and
+// the library (its views and collections), the library page and the clip page. Smaller than the
+// Windows app (no export, share or repair yet, docs/LINUX-PORT.md); settings are the same
+// backtrack.ini keys. It keeps recording from the tray when closed.
 class MainWindow final : public QWidget {
     Q_OBJECT
 public:
@@ -48,6 +54,12 @@ protected:
 
 private:
     void build_ui();
+    QWidget* build_record_page();
+    void refresh_sidebar();  // soon, not now: it may be called from a click on the sidebar itself
+    void rebuild_sidebar();
+    void sidebar_menu(const QPoint& at);
+    void open_clip(const QString& file);
+    void show_library(LibraryView view, const std::string& collection = {});
     void load_settings();
     void apply_settings();
     void fill_settings_form();
@@ -56,7 +68,6 @@ private:
     void on_saved(const SaveResult& result);
     void show_save_message(const QString& text);
     void refresh_status();
-    void refresh_clips();
     void open_clips_folder();
     void notify(const QString& title, const QString& text);
     std::string folder() const;
@@ -83,7 +94,14 @@ private:
     QLabel* hotkey_hint_ = nullptr;
     QPushButton* save_button_ = nullptr;
     QPushButton* record_button_ = nullptr;
-    QListWidget* clips_ = nullptr;
+    ClipLibrary* library_ = nullptr;
+    QListWidget* sidebar_ = nullptr;
+    QStackedWidget* pages_ = nullptr;
+    QWidget* record_page_ = nullptr;
+    LibraryPage* library_page_ = nullptr;
+    ClipPage* clip_page_ = nullptr;
+    QLabel* sidebar_status_ = nullptr;
+    bool sidebar_pending_ = false;
     QSpinBox* clip_seconds_ = nullptr;
     QComboBox* fps_ = nullptr;
     QSpinBox* bitrate_ = nullptr;

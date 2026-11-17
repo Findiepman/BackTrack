@@ -3,7 +3,8 @@
 # null sink) and checks the clips it saves. CI runs it on the plain build and on the AppImage.
 #
 #   smoke-test.sh run <command that starts backtrack>   records ~14 s, saves 3 clips
-#   smoke-test.sh check                                  each clip: H.264 + AAC, sensible length
+#   smoke-test.sh check                                  each clip: H.264 + AAC, sensible length,
+#                                                        and the trimmed clip the run made
 #
 # The run saves twice by itself (--save-after 6 and 12) and once at about 9 s through a second
 # start with --save (the single-instance path a desktop shortcut uses). Needs Xvfb, pulseaudio, pactl; check needs ffprobe.
@@ -51,6 +52,14 @@ run() {
     local status=0
     wait "$app" || status=$?
 
+    # The library and the clip page on the first clip (while the sound server still runs: the
+    # player plays into it). Reads it with the app's own FFmpeg, so on Arch the AppImage's.
+    local media=0
+    if [ "$status" -eq 0 ]; then
+        local saved=("$clips"/*.mp4)
+        "$@" --check-media "${saved[0]}" "$work/trim.mp4" >"$work/media.log" 2>&1 || media=$?
+    fi
+
     pulseaudio --kill || true
     kill "$xvfb" 2>/dev/null || true
     echo "---- backtrack output"
@@ -61,6 +70,14 @@ run() {
     fi
     grep -q "Video encoder:" "$work/backtrack.log" || { echo "No video encoder opened"; exit 1; }
     grep -q "Sound: " "$work/backtrack.log" || { echo "Sound did not start"; exit 1; }
+    echo "---- media check"
+    cat "$work/media.log"
+    [ "$media" -eq 0 ] || { echo "Reading the clips like the library does failed"; exit 1; }
+    # Every save reached the library (also the one handed over by `backtrack --save`).
+    local library=$XDG_DATA_HOME/Backtrack/library.json
+    local known
+    known=$(grep -c '"file":' "$library" || true)
+    [ "$known" -eq 3 ] || { cat "$library"; echo "library.json knows $known clips, not 3"; exit 1; }
 }
 
 check() {
@@ -81,6 +98,16 @@ check() {
         # Every frame must decode.
         ffmpeg -v error -xerror -i "$clip" -f null - || { echo "The clip does not decode cleanly"; exit 1; }
     done
+    local trim=$work/trim.mp4
+    [ -f "$trim" ] || { echo "No trimmed clip"; exit 1; }
+    local video audio duration
+    video=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,width,height -of csv=p=0 "$trim")
+    audio=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$trim")
+    duration=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$trim")
+    echo "trim.mp4: video $video, audio $audio, $duration s"
+    [ "$video" = "h264,1280,720" ] && [ "$audio" = "aac" ] || { echo "The trimmed clip lost a stream"; exit 1; }
+    awk -v d="$duration" 'BEGIN { exit !(d >= 2.4 && d <= 3.7) }' || { echo "The trimmed clip has the wrong length"; exit 1; }
+    ffmpeg -v error -xerror -i "$trim" -f null - || { echo "The trimmed clip does not decode cleanly"; exit 1; }
     echo "All clips fine"
 }
 

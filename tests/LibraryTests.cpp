@@ -212,6 +212,11 @@ void collections() {
 
     CHECK(lib.rename_collection(work, "Work demos"));
     CHECK(!lib.rename_collection("c9", "x"));
+    CHECK(lib.set_collection_color(work, 4));
+    CHECK_EQ(lib.find_collection(work)->color, 4);
+    CHECK(lib.set_collection_color(work, -3));  // damage: clamped like from_json does
+    CHECK_EQ(lib.find_collection(work)->color, 0);
+    CHECK(!lib.set_collection_color("c9", 1));
     CHECK(lib.delete_collection(best));
     CHECK(lib.find("a.mp4")->collections.empty());
     CHECK(!lib.delete_collection(best));

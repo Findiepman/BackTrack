@@ -17,4 +17,9 @@ bool write_clip(const std::string& path, const CodecParameters& video, const Cod
                 const std::vector<Packet>& video_packets, const std::vector<Packet>& audio_packets, const ClipPlan& plan,
                 std::string& error);
 
+// Gives a finished file written under a temporary name its real name, never replacing a file that
+// is already there (a clip saved in the same second, a trim made twice). The temporary file is
+// removed either way. False with `error` set when it could not be renamed.
+bool publish_file(const std::string& temp_path, const std::string& final_path, std::string& error);
+
 }  // namespace bt::linux_app

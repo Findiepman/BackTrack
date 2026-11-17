@@ -250,6 +250,16 @@ bool Library::rename_collection(std::string_view id, std::string_view name) {
     return false;
 }
 
+bool Library::set_collection_color(std::string_view id, int color) {
+    for (Collection& collection : collections_) {
+        if (collection.id == id) {
+            collection.color = std::max(color, 0);
+            return true;
+        }
+    }
+    return false;
+}
+
 bool Library::delete_collection(std::string_view id) {
     const auto removed = std::erase_if(collections_, [id](const Collection& c) { return c.id == id; });
     if (removed == 0) return false;

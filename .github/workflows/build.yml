@@ -121,7 +121,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ${{ matrix.packages }} qt6-base-dev libavcodec-dev libavformat-dev \
-            libavutil-dev libswscale-dev libpulse-dev libpipewire-0.3-dev libx11-dev libxext-dev libxfixes-dev \
+            libavutil-dev libswscale-dev libswresample-dev libpulse-dev libpipewire-0.3-dev libx11-dev libxext-dev libxfixes-dev \
             libxrandr-dev pkg-config
 
       - uses: actions/checkout@v4
@@ -145,7 +145,7 @@ jobs:
       - name: Install libraries and test tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y qt6-base-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+          sudo apt-get install -y qt6-base-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
             libpulse-dev libpipewire-0.3-dev libx11-dev libxext-dev libxfixes-dev libxrandr-dev pkg-config \
             xvfb pulseaudio pulseaudio-utils ffmpeg libxcb-cursor0 file
 

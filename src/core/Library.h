@@ -132,6 +132,7 @@ public:
 
     std::string create_collection(std::string_view name, int color);  // returns the new id
     bool rename_collection(std::string_view id, std::string_view name);
+    bool set_collection_color(std::string_view id, int color);  // index into the UI's palette, >= 0
     bool delete_collection(std::string_view id);  // clips stay, only lose the membership
     bool set_in_collection(std::string_view file, std::string_view id, bool member);
     std::size_t collection_size(std::string_view id) const;  // not counting the Trash

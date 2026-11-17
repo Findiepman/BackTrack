@@ -84,7 +84,7 @@ libxext libxfixes libxrandr`):
 
 ```
 sudo apt install build-essential cmake qt6-base-dev libavcodec-dev libavformat-dev libavutil-dev \
-  libswscale-dev libpulse-dev libpipewire-0.3-dev libx11-dev libxext-dev libxfixes-dev libxrandr-dev
+  libswscale-dev libswresample-dev libpulse-dev libpipewire-0.3-dev libx11-dev libxext-dev libxfixes-dev libxrandr-dev
 cmake -S . -B build-linux -DCMAKE_BUILD_TYPE=Release -DBT_LINUX_APP=ON
 cmake --build build-linux --parallel
 ctest --test-dir build-linux --output-on-failure
