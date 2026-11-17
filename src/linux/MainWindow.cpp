@@ -30,6 +30,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
+#include <QMessageBox>
 #include <QMetaObject>
 #include <QPushButton>
 #include <QSpinBox>
@@ -148,7 +149,7 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent), wayland_(wayland_sess
         connect(tray_, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
             if (reason == QSystemTrayIcon::Trigger) {
                 if (isVisible()) {
-                    hide();
+                    hide_to_tray();
                 } else {
                     show_window();
                 }
@@ -466,6 +467,13 @@ void MainWindow::sidebar_menu(const QPoint& at) {
     }
     menu.addSeparator();
     menu.addAction(QStringLiteral("Delete collection (keeps the clips)"), this, [this, id] {
+        const Collection* c = library_->library().find_collection(id);
+        if (c == nullptr ||
+            QMessageBox::question(this, QStringLiteral("Delete collection"),
+                                  QStringLiteral("Delete the collection \"%1\"? Its clips stay in the library.")
+                                      .arg(qs(c->name))) != QMessageBox::Yes) {
+            return;
+        }
         if (library_->edit().delete_collection(id)) {
             library_->save();
         }
@@ -728,8 +736,18 @@ void MainWindow::show_window() {
     activateWindow();
 }
 
+void MainWindow::hide_to_tray() {
+    if (pages_->currentWidget() == clip_page_) {
+        clip_page_->close_clip();  // keeps the notes and title, lets go of the file
+        pages_->setCurrentWidget(library_page_);
+        refresh_sidebar();
+    }
+    hide();
+}
+
 void MainWindow::quit() {
     quitting_ = true;
+    clip_page_->close_clip();  // the notes typed in the last moment are kept
     stop_recording();
     QApplication::quit();
 }
@@ -737,17 +755,12 @@ void MainWindow::quit() {
 void MainWindow::closeEvent(QCloseEvent* event) {
     if (quitting_ || tray_ == nullptr) {
         quitting_ = true;
+        clip_page_->close_clip();
         stop_recording();
         event->accept();
         return;
     }
-    // Nothing keeps playing behind a hidden window; the file is let go.
-    if (pages_->currentWidget() == clip_page_) {
-        clip_page_->close_clip();
-        pages_->setCurrentWidget(library_page_);
-        refresh_sidebar();
-    }
-    hide();
+    hide_to_tray();
     event->ignore();
     if (!told_about_tray_) {
         told_about_tray_ = true;

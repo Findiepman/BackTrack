@@ -15,7 +15,6 @@ extern "C" {
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
-#include <limits>
 #include <memory>
 
 namespace bt::linux_app {
@@ -106,6 +105,7 @@ struct VideoReader {
         // Frame threads hold frames back until several packets went in: one picture after a seek
         // would cost a whole GOP of decoding. Slices only.
         decoder->thread_type = FF_THREAD_SLICE;
+        decoder->pkt_timebase = stream->time_base;
         if (avcodec_open2(decoder.get(), codec, nullptr) < 0) {
             return false;
         }
@@ -173,6 +173,7 @@ Still scale_to_fill(AVFrame* frame, int width, int height) {
     if (!sws) {
         return still;
     }
+    use_frame_colors(sws.get(), frame);
     still.pixels.resize(static_cast<std::size_t>(width) * height * 4);
     std::uint8_t* planes[4] = {still.pixels.data(), nullptr, nullptr, nullptr};
     const int strides[4] = {width * 4, 0, 0, 0};
@@ -215,6 +216,27 @@ struct OutputDeleter {
 };
 
 }  // namespace
+
+void use_frame_colors(SwsContext* sws, const AVFrame* frame) {
+    int matrix = SWS_CS_DEFAULT;
+    switch (frame->colorspace) {
+        case AVCOL_SPC_BT709: matrix = SWS_CS_ITU709; break;
+        case AVCOL_SPC_BT470BG:
+        case AVCOL_SPC_SMPTE170M: matrix = SWS_CS_ITU601; break;
+        case AVCOL_SPC_BT2020_NCL:
+        case AVCOL_SPC_BT2020_CL: matrix = SWS_CS_BT2020; break;
+        case AVCOL_SPC_SMPTE240M: matrix = SWS_CS_SMPTE240M; break;
+        case AVCOL_SPC_FCC: matrix = SWS_CS_FCC; break;
+        default:
+            // Untagged: what players assume, HD is BT.709 and SD is BT.601.
+            matrix = frame->height >= 720 ? SWS_CS_ITU709 : SWS_CS_ITU601;
+            break;
+    }
+    const int full_range = frame->color_range == AVCOL_RANGE_JPEG ? 1 : 0;
+    // RGB out is always full range; brightness, contrast and saturation stay neutral.
+    sws_setColorspaceDetails(sws, sws_getCoefficients(matrix), full_range, sws_getCoefficients(SWS_CS_DEFAULT), 1, 0,
+                             1 << 16, 1 << 16);
+}
 
 MediaFacts probe_media(const std::string& path) {
     MediaFacts facts;
@@ -302,10 +324,9 @@ TrimResult trim_clip(const std::string& source, const std::string& destination, 
                 const Time100ns pts = av_rescale_q(at, video->time_base, kTicks) - zero;
                 frames.push_back(TrimFrame{pts, (packet->flags & AV_PKT_FLAG_KEY) != 0});
                 frame_ends.push_back(pts + av_rescale_q(packet->duration, video->time_base, kTicks));
-            } else if (audio != nullptr && packet->stream_index == audio_index) {
-                // Without a time the packet cannot be placed: never inside a cut.
-                sound.push_back(at != AV_NOPTS_VALUE ? av_rescale_q(at, audio->time_base, kTicks) - zero
-                                                     : std::numeric_limits<Time100ns>::min());
+            } else if (audio != nullptr && packet->stream_index == audio_index && at != AV_NOPTS_VALUE) {
+                // A packet without a time cannot be placed: it is not counted here nor copied below.
+                sound.push_back(av_rescale_q(at, audio->time_base, kTicks) - zero);
             }
             av_packet_unref(packet.get());
         }
@@ -382,7 +403,7 @@ TrimResult trim_clip(const std::string& source, const std::string& destination, 
                 to = video_out;
                 from_base = video->time_base;
             }
-        } else if (audio != nullptr && packet->stream_index == audio_index) {
+        } else if (audio != nullptr && packet->stream_index == audio_index && packet_time(packet.get()) != AV_NOPTS_VALUE) {
             const std::size_t i = sound_seen++;
             if (with_audio && i >= sound_range.first && i < sound_range.end) {
                 to = audio_out;

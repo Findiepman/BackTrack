@@ -28,18 +28,32 @@ test (see "Not tested yet").
   through the GlobalShortcuts portal (Plasma 6 asks once to confirm the key; it can be changed in
   System Settings > Shortcuts > Backtrack). If the desktop refuses, the window shows the command to
   bind yourself (`backtrack --save`).
-- **Window:** status, Save clip, Start/Stop recording, the 30 newest clips (double-click plays),
-  open the clips folder, and the main settings (clip length, frame rate, bitrate, encoder,
-  resolution, sound, microphone, noise suppression, hotkey, clips folder). Closing it keeps
-  recording in the tray; Quit is in the tray menu.
+- **Window:** a sidebar with Recording (status, Save clip, Start/Stop recording, open the clips
+  folder and the main settings: clip length, frame rate, bitrate, encoder, resolution, sound,
+  microphone, noise suppression, hotkey, clips folder), the library views and the collections.
+  Closing it keeps recording in the tray; Quit is in the tray menu.
+- **Library:** the clips as cards with a thumbnail, length, resolution, size and age; All clips,
+  Favorites, Recent (7 days), Shared and Trash; collections (new, rename, colour, delete, add a
+  clip); search over titles, tags and notes, a tag filter and six sort orders. Right-click: open,
+  play in your video player, copy the share link, show in folder (Dolphin selects the file),
+  favorite, rename, add to collection, move to the Trash / restore / to the desktop's trash now.
+  The Trash keeps clips 30 days, then they go to the desktop's own trash (as Windows sends them to
+  the Recycle Bin). `~/.local/share/Backtrack/library.json`, the same format as on Windows;
+  thumbnails are cached in `~/.cache/Backtrack/thumbs`. Clips copied into the folder by hand show up
+  by themselves.
+- **Clip page:** a player of its own (FFmpeg decodes, the sound goes through PulseAudio; Space,
+  the arrow keys ±5 s, 0.5x to 2x where the other speeds play without sound), a seek bar with the
+  clip's bookmarks, the trim bar with a filmstrip and draggable start and end (I and O set them at
+  the playhead), "Save as new clip" (lossless, from the keyframe at or before the start, as on
+  Windows: `<name>_trim.mp4` next to the original with its title, tags and bookmarks), Previous and
+  Next, and the side panel with the title, favorite, collections, tags, notes and details.
 - **Files:** settings in `~/.config/Backtrack/backtrack.ini` (the same keys as on Windows; a copied
   Windows file works), clips in `~/Videos/Backtrack` (or the XDG videos folder), the log in
   `~/.local/state/Backtrack/backtrack.log`. The AppImage adds itself to the application menu.
 
 ## What it does not do yet
 
-- The library (favorites, collections, trash, search), the clip page (trim, filmstrip), export,
-  share, repair, bookmarks, the overlay, themes, separate sound tracks, choosing a sound device,
+- Export, share, repair, the bookmark hotkey, the overlay, themes, separate sound tracks, choosing a sound device,
   push-to-talk and the mic mute key, storage limits and auto-delete, start with the desktop,
   automatic updates. The settings keys for them are read but have no effect on Linux.
 - Wayland: no DMA-BUF (the compositor copies the screen into memory: one extra copy per frame,
@@ -50,16 +64,23 @@ test (see "Not tested yet").
 ## Not tested yet (needs a real KDE PC)
 
 Tested automatically in CI on every push: X11 capture, x264, sound through PulseAudio, saving,
-`backtrack --save`, the AppImage on Ubuntu 24.04 and on Arch. **Not tested anywhere yet:**
+`backtrack --save`, the AppImage on Ubuntu 24.04 and on Arch, and (`backtrack --check-media`)
+every saved clip reaching library.json, the length and thumbnail, the filmstrip, a lossless trim
+that ffprobe and ffmpeg read back cleanly, and the player (pictures at the right time and size,
+a seek while paused, a seek to the end) playing into the virtual sound card.
+**Not tested anywhere yet:**
 
 - the Wayland path: the portal dialog, the restore token, PipeWire frames from KWin, the
   GlobalShortcuts portal on Plasma 6;
 - NVENC and VA-API on real graphics cards (they fall back to x264 if they fail);
 - `@DEFAULT_MONITOR@` on PipeWire's PulseAudio server (works on PulseAudio itself);
-- the tray icon and notifications on Plasma.
+- the tray icon and notifications on Plasma;
+- the library and clip page windows themselves (clicks, menus, drag on the trim bar, how they
+  look in Breeze dark), and hearing the player's sound in sync.
 
 A first check on the boss's KDE PC: start the AppImage on Wayland, accept the screen and the F8
-shortcut, play something with sound, press F8, play the clip. Then the same on an X11 session.
+shortcut, play something with sound, press F8, open the clip in the library, play it, trim it and
+open the trimmed clip. Then the same on an X11 session.
 
 ## Using the AppImage
 
@@ -123,10 +144,15 @@ itself: download the new AppImage.
 | Writing clips | `platform/ClipWriter` | `linux/ClipFile` (FFmpeg's MP4 muxer) |
 | Recorder | `platform/Recorder` | `linux/Recorder` |
 | Window, tray, hotkeys | `ui/*` (Win32, Direct2D) | `linux/MainWindow` (Qt 6), `linux/X11Hotkey`, `linux/Portal` |
+| Library: favorites, collections, Trash, queries | `core/Library` | the same `core/Library` |
+| Library file, folder scan, thumbnails | `ui/App`, `platform/MediaProbe` | `linux/ClipLibrary`, `linux/Media` |
+| Library and clip page | `ui/App`, `ui/ClipPage` | `linux/LibraryPage`, `linux/ClipPage` |
+| Player | `platform/VideoPlayer` (Media Foundation) | `linux/Player` (FFmpeg, PulseAudio) |
+| Trim, filmstrip | `platform/Trim`, `platform/Filmstrip` + `core/TrimPlan` | `linux/Media` + `core/TrimPlan` |
 
 ## Next steps
 
 1. Run it on the boss's KDE PC (the list above) and fix what the real desktop shows.
-2. The library and clip page in Qt (the biggest part of the Windows app).
-3. Export, share and repair (FFmpeg makes these simpler than on Windows).
-4. Start with the desktop (`~/.config/autostart`), updates (download the new AppImage).
+2. Export, share and repair (FFmpeg makes these simpler than on Windows).
+3. Start with the desktop (`~/.config/autostart`), storage limits and auto-delete, updates
+   (download the new AppImage).

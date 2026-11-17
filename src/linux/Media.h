@@ -8,7 +8,15 @@
 #include <string>
 #include <vector>
 
+struct AVFrame;
+struct SwsContext;
+
 namespace bt::linux_app {
+
+// Makes `sws` (YUV to RGB) use the frame's own colour matrix and range instead of swscale's
+// default BT.601 TV range: Backtrack's clips and most HD video are BT.709, and with the wrong
+// matrix every picture is off in colour. Call after the context is (re)made.
+void use_frame_colors(SwsContext* sws, const AVFrame* frame);
 
 struct MediaFacts {
     bool ok = false;  // false: not a playable video (damaged, still being written, not an MP4)

@@ -301,10 +301,15 @@ QString LibraryPage::view_title() const {
 }
 
 void LibraryPage::refresh_tags() {
+    std::vector<std::string> tags = library_->library().all_tags();
+    if (tags == shown_tags_ && tag_->count() > 0) {
+        return;  // rebuilding would close the list while the user has it open
+    }
+    shown_tags_ = std::move(tags);
     const QString chosen = tag_->currentIndex() > 0 ? tag_->currentData().toString() : QString();
     tag_->clear();
     tag_->addItem(QStringLiteral("All tags"));
-    for (const std::string& tag : library_->library().all_tags()) {
+    for (const std::string& tag : shown_tags_) {
         tag_->addItem(QStringLiteral("#") + qs(tag), qs(tag));
     }
     // A tag that no clip has any more falls back to all tags.
@@ -429,7 +434,8 @@ bool LibraryPage::delete_forever(const std::string& file) {
         return true;
     }
     QMessageBox::warning(this, QStringLiteral("Backtrack"),
-                         QStringLiteral("Could not move the clip to the trash. Check that the clips folder can be written."));
+                         QStringLiteral("Could not move the clip to the desktop's trash (the clips folder may be on a drive or share "
+                                        "without one). It stays in Backtrack's Trash."));
     return false;
 }
 

@@ -58,6 +58,7 @@ private:
     void set_out_here();
     void save_trim();
     void commit_notes();
+    void commit_title();
     void request_filmstrip();
     double length() const;
     void update_times();

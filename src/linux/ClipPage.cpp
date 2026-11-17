@@ -53,10 +53,6 @@ constexpr int kStripHeight = 90;
 constexpr int kTickMs = 15;
 constexpr int kHandleGrab = 10;  // pixels either side of a trim handle that pick it up
 
-std::int64_t now_unix() {
-    return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-}
-
 QString qs(const std::string& text) {
     return QString::fromStdString(text);
 }
@@ -531,16 +527,7 @@ void ClipPage::build() {
     big.setPointSizeF(big.pointSizeF() * 1.2);
     title_->setFont(big);
     title_->setPlaceholderText(QStringLiteral("Title"));
-    connect(title_, &QLineEdit::editingFinished, this, [this] {
-        const ClipEntry* clip = library_->library().find(file_);
-        if (clip == nullptr || clip->trashed_at) {
-            return;
-        }
-        const std::string title = title_->text().trimmed().toStdString();
-        if (title != display_title(*clip) && library_->edit().set_title(file_, title)) {
-            library_->save();
-        }
-    });
+    connect(title_, &QLineEdit::editingFinished, this, [this] { commit_title(); });
     favorite_ = new QPushButton;
     connect(favorite_, &QPushButton::clicked, this, [this] {
         if (const ClipEntry* clip = library_->library().find(file_)) {
@@ -646,6 +633,7 @@ void ClipPage::build() {
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setFixedWidth(330);
+    scroll->setFocusPolicy(Qt::NoFocus);  // the arrow keys stay with the player
     root->addWidget(scroll);
 }
 
@@ -683,12 +671,25 @@ void ClipPage::close_clip() {
     if (file_.empty()) {
         return;
     }
+    // Before the file is forgotten: the title box loses focus (and says so) only afterwards.
+    commit_title();
     commit_notes();
     timer_->stop();
     player_.reset();  // lets go of the file: it can be moved to the trash now
     ++strip_request_;
     scrubbing_ = false;
     file_.clear();
+}
+
+void ClipPage::commit_title() {
+    const ClipEntry* clip = library_->library().find(file_);
+    if (clip == nullptr || clip->trashed_at) {
+        return;
+    }
+    const std::string title = title_->text().trimmed().toStdString();
+    if (title != display_title(*clip) && library_->edit().set_title(file_, title)) {
+        library_->save();
+    }
 }
 
 void ClipPage::commit_notes() {
@@ -1006,6 +1007,10 @@ void ClipPage::keyPressEvent(QKeyEvent* event) {
         case Qt::Key_I: set_in_here(); return;
         case Qt::Key_O: set_out_here(); return;
         case Qt::Key_Escape:
+            if (qobject_cast<QLineEdit*>(focusWidget()) != nullptr || qobject_cast<QPlainTextEdit*>(focusWidget()) != nullptr) {
+                setFocus();  // out of the text box, not off the page
+                return;
+            }
             close_clip();
             emit back();
             return;

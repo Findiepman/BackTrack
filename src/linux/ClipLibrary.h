@@ -80,12 +80,13 @@ private:
     };
 
     void load();
+    std::string shelf_path(const std::string& folder) const;
     void request_missing_info();
     void request(const ClipEntry& clip, bool need_info, bool urgent);
     void worker();
     Result probe(const Job& job, const std::string& folder);
     void take_results();
-    std::string thumb_path(const std::string& file, std::int64_t size) const;
+    std::string thumb_path(const std::string& folder, const std::string& file, std::int64_t size) const;
 
     Library library_;
     std::string folder_;
@@ -97,6 +98,8 @@ private:
     QFileSystemWatcher* watcher_ = nullptr;
     QTimer* scan_timer_ = nullptr;
     QTimer* rescan_soon_ = nullptr;
+    QTimer* save_soon_ = nullptr;  // lengths and sizes from the worker: one write for a batch
+    std::set<std::string> cleanup_skipped_;  // could not go to the desktop's trash: not retried this run
 
     std::mutex mutex_;  // guards the worker's queue and results
     std::condition_variable wake_;

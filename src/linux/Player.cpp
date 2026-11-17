@@ -1,6 +1,7 @@
 #include "linux/Player.h"
 
 #include "linux/Log.h"
+#include "linux/Media.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -73,6 +74,17 @@ struct Player::Decoding {
     double half_frame = 0.001;
     bool shown_since_seek = false;
     bool flushed = false;
+    struct ScaleKey {
+        int width = 0;
+        int height = 0;
+        int format = -1;
+        int out_width = 0;
+        int out_height = 0;
+        int colorspace = -1;
+        int range = -1;
+        bool operator==(const ScaleKey&) const = default;
+    };
+    ScaleKey scale_key;
 
     ~Decoding() {
         av_packet_free(&packet);
@@ -91,8 +103,14 @@ struct Player::Decoding {
             return nullptr;
         }
         AVCodecContext* context = avcodec_alloc_context3(codec);
-        if (context == nullptr || avcodec_parameters_to_context(context, stream->codecpar) < 0 ||
-            avcodec_open2(context, codec, nullptr) < 0) {
+        if (context == nullptr || avcodec_parameters_to_context(context, stream->codecpar) < 0) {
+            avcodec_free_context(&context);
+            return nullptr;
+        }
+        // The packets' time base: lets the decoder move the times past skipped AAC priming.
+        context->pkt_timebase = stream->time_base;
+        context->thread_count = 0;  // as many as the processor has: 1440p at 120 fps must keep up
+        if (avcodec_open2(context, codec, nullptr) < 0) {
             avcodec_free_context(&context);
         }
         return context;
@@ -141,7 +159,8 @@ struct Player::Decoding {
             return static_cast<double>(video->duration) * av_q2d(video->time_base);
         }
         if (input->duration > 0) {
-            return std::max(0.0, static_cast<double>(input->duration) / AV_TIME_BASE - zero);
+            // Already counted from the file's start, so not from `zero` again.
+            return static_cast<double>(input->duration) / AV_TIME_BASE;
         }
         return 0.0;
     }
@@ -172,10 +191,19 @@ struct Player::Decoding {
         int out_w = 0;
         int out_h = 0;
         fit(f->width, f->height, view_w, view_h, out_w, out_h);
-        sws = sws_getCachedContext(sws, f->width, f->height, static_cast<AVPixelFormat>(f->format), out_w, out_h,
-                                   AV_PIX_FMT_BGRA, SWS_BILINEAR, nullptr, nullptr, nullptr);
-        if (sws == nullptr) {
-            return {};
+        const ScaleKey key{f->width, f->height, f->format, out_w, out_h, static_cast<int>(f->colorspace),
+                            static_cast<int>(f->color_range)};
+        if (sws == nullptr || !(key == scale_key)) {
+            // A new size or colour: a new context, given the frame's colours (a fresh one would
+            // fall back to swscale's BT.601 defaults).
+            sws_freeContext(sws);
+            sws = sws_getContext(f->width, f->height, static_cast<AVPixelFormat>(f->format), out_w, out_h, AV_PIX_FMT_BGRA,
+                                 SWS_BILINEAR, nullptr, nullptr, nullptr);
+            if (sws == nullptr) {
+                return {};
+            }
+            use_frame_colors(sws, f);
+            scale_key = key;
         }
         QImage image(out_w, out_h, QImage::Format_RGB32);
         if (image.isNull()) {
@@ -548,12 +576,21 @@ void Player::sound_loop() {
     try {
         while (true) {
             std::unique_lock lock(mutex_);
-            sound_wake_.wait_for(lock, std::chrono::milliseconds(20), [&] {
-                return stop_ || (playing_ && rate_ == 1.0 && !sound_.empty()) ||
+            // Woken by play, pause, a speed change, a seek, new sound and stop: no polling.
+            sound_wake_.wait(lock, [&] {
+                return stop_ || (playing_ && !sound_.empty()) ||
                        (wrote && (!playing_ || rate_ != 1.0 || written_generation != generation_));
             });
             if (stop_) {
                 break;
+            }
+            if (playing_ && rate_ != 1.0 && !sound_.empty()) {
+                // Another speed plays without sound: let it go, or the decoder (which keeps a few
+                // seconds of sound at most) would wait for room forever and the picture freeze.
+                sound_.clear();
+                lock.unlock();
+                decode_wake_.notify_all();
+                lock.lock();
             }
             if (!playing_ || rate_ != 1.0 || (wrote && written_generation != generation_)) {
                 // Paused, another speed or a seek: what the server still holds must not be heard.

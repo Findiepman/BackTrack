@@ -44,6 +44,8 @@ public:
     // From the hotkey, the tray, `backtrack --save` and the test options.
     void save_clip();
     void show_window();
+    // Into the tray: the clip page lets go of its clip first (nothing keeps playing unseen).
+    void hide_to_tray();
     // Test option --exit-after: the number of saves that failed becomes the exit code.
     int failed_saves() const { return failed_saves_; }
     int finished_saves() const { return finished_saves_; }

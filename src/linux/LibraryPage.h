@@ -62,6 +62,7 @@ private:
     ClipLibrary* library_;
     LibraryView view_ = LibraryView::All;
     std::string collection_;
+    std::vector<std::string> shown_tags_;  // the tag filter is only rebuilt when these change
 
     QLabel* title_ = nullptr;
     QLabel* count_ = nullptr;

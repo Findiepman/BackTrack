@@ -128,6 +128,10 @@ ClipLibrary::ClipLibrary(QObject* parent) : QObject(parent) {
         run_cleanup();
     });
     scan_timer_->start(kScanMs);
+    save_soon_ = new QTimer(this);
+    save_soon_->setSingleShot(true);
+    save_soon_->setInterval(1000);
+    connect(save_soon_, &QTimer::timeout, this, [this] { save(); });
 
     thread_ = std::thread([this] { worker(); });
 }
@@ -139,6 +143,10 @@ ClipLibrary::~ClipLibrary() {
     }
     wake_.notify_all();
     thread_.join();
+    if (save_soon_->isActive() && writable_) {
+        // Quitting within a second of a probe result: written, without telling pages that are going away.
+        write_atomically(library_file_, library_.to_json().dump(2) + "\n");
+    }
 }
 
 void ClipLibrary::load() {
@@ -196,17 +204,45 @@ void ClipLibrary::save() {
     emit changed();
 }
 
+std::string ClipLibrary::shelf_path(const std::string& folder) const {
+    return std::format("{}/library-{:016x}.json", fs::path(library_file_).parent_path().string(), fnv1a(folder));
+}
+
 void ClipLibrary::set_folder(const std::string& folder) {
     if (folder == folder_) {
         return;
     }
-    if (!folder_.empty()) {
+    const bool switching = !folder_.empty();
+    if (switching) {
         watcher_->removePath(QString::fromStdString(folder_));
+        // Each clips folder keeps its own favorites, collections, tags and notes: the library of the
+        // folder being left is put aside, and the one of the folder being opened comes back if it
+        // was used before. Otherwise the scan below would drop every clip of the old folder, and a
+        // mistyped folder in Settings would cost the user all of that.
+        if (writable_ && !write_atomically(shelf_path(folder_), library_.to_json().dump(2) + "\n")) {
+            writable_ = false;
+            log_warning("Could not put the library of " + folder_ + " aside; library changes are not saved this run");
+        }
+        Library next;
+        QFile shelf(QString::fromStdString(shelf_path(folder)));
+        if (shelf.open(QIODevice::ReadOnly)) {
+            const QByteArray bytes = shelf.readAll();
+            const JsonParseResult parsed =
+                parse_json(std::string_view(bytes.constData(), static_cast<std::size_t>(bytes.size())));
+            if (parsed.value && parsed.value->is_object() && (*parsed.value)["clips"].is_array()) {
+                next = Library::from_json(*parsed.value);
+            }
+        }
+        library_ = std::move(next);
+        cleanup_skipped_.clear();
+        save_soon_->stop();
+        log_info("Clips folder is now " + folder);
     }
     folder_ = folder;
     {
         std::lock_guard lock(mutex_);
         jobs_.clear();  // they belong to the old folder
+        results_.clear();  // so do results the GUI has not taken yet
         worker_folder_ = folder_;
     }
     asked_.clear();
@@ -215,6 +251,9 @@ void ClipLibrary::set_folder(const std::string& folder) {
     fs::create_directories(folder_, ec);
     watcher_->addPath(QString::fromStdString(folder_));
     scan();
+    if (switching) {
+        save();  // also when the scan changed nothing: library.json is now this folder's
+    }
 }
 
 std::string ClipLibrary::path_of(const std::string& file) const {
@@ -316,8 +355,9 @@ QImage ClipLibrary::thumbnail(const ClipEntry& clip, bool on_screen) {
     return {};
 }
 
-std::string ClipLibrary::thumb_path(const std::string& file, std::int64_t size) const {
-    return std::format("{}/{:016x}.png", cache_dir_, fnv1a(key_of(file, size)));
+std::string ClipLibrary::thumb_path(const std::string& folder, const std::string& file, std::int64_t size) const {
+    // The folder is part of the key: a same-named clip of the same size elsewhere is another clip.
+    return std::format("{}/{:016x}.png", cache_dir_, fnv1a(folder + "/" + key_of(file, size)));
 }
 
 void ClipLibrary::worker() {
@@ -358,7 +398,7 @@ ClipLibrary::Result ClipLibrary::probe(const Job& job, const std::string& folder
     result.file = job.file;
     result.size_bytes = job.size_bytes;
     const std::string path = (fs::path(folder) / job.file).string();
-    const std::string cache = thumb_path(job.file, job.size_bytes);
+    const std::string cache = thumb_path(folder, job.file, job.size_bytes);
     if (!job.need_info && result.thumbnail.load(QString::fromStdString(cache), "PNG")) {
         result.ok = true;
         return result;
@@ -407,8 +447,9 @@ void ClipLibrary::take_results() {
         pictures = true;
     }
     if (changed) {
-        save();
-    } else if (pictures) {
+        save_soon_->start();
+    }
+    if (pictures) {
         emit thumbnail_ready();
     }
 }
@@ -418,8 +459,10 @@ bool ClipLibrary::delete_forever(const std::string& file) {
         return false;
     }
     QFile clip(QString::fromStdString(path_of(file)));
-    if (clip.exists() && !clip.moveToTrash() && !clip.remove()) {
-        log_warning("Could not delete " + path_of(file) + ": " + clip.errorString().toStdString());
+    // Never deleted for good when the desktop's trash cannot take it (a share or a drive without
+    // one): it stays in Backtrack's Trash, as Windows keeps a clip the Recycle Bin refuses.
+    if (clip.exists() && !clip.moveToTrash()) {
+        log_warning("Could not move " + path_of(file) + " to the trash: " + clip.errorString().toStdString());
         return false;
     }
     library_.remove(file);
@@ -435,10 +478,17 @@ void ClipLibrary::run_cleanup() {
     const std::vector<std::string> due = library_.due_for_removal(CleanupPolicy{}, now_unix());
     bool removed = false;
     for (const std::string& file : due) {
+        if (cleanup_skipped_.contains(file)) {
+            continue;
+        }
         QFile clip(QString::fromStdString(path_of(file)));
         if (!clip.exists() || clip.moveToTrash()) {
             library_.remove(file);
             removed = true;
+        } else {
+            // Waits for the next start instead of a try (and a warning) every 30 seconds.
+            cleanup_skipped_.insert(file);
+            log_warning("Could not move " + path_of(file) + " to the trash; it stays in Backtrack's Trash");
         }
     }
     if (removed) {
