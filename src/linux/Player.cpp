@@ -111,7 +111,7 @@ struct Player::Decoding {
         context->pkt_timebase = stream->time_base;
         // A few threads so 1440p at 120 fps keeps up; not one per core: frame threads hold each
         // picture back by one frame per thread, which a seek then waits for.
-        context->thread_count = 4;
+        context->thread_count = static_cast<int>(std::clamp(std::thread::hardware_concurrency(), 1U, 4U));
         if (avcodec_open2(context, codec, nullptr) < 0) {
             avcodec_free_context(&context);
         }

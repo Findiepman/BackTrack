@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cerrno>
 #include <cmath>
 #include <csignal>
 #include <cstdio>
@@ -51,8 +52,10 @@ namespace {
 int signal_fds[2] = {-1, -1};
 
 void on_stop_signal(int) {
+    const int saved = errno;  // the interrupted code may be about to read it
     const char byte = 1;
     (void)!::write(signal_fds[1], &byte, 1);
+    errno = saved;
 }
 
 QString server_name() {
@@ -259,6 +262,10 @@ int main(int argc, char** argv) {
             notifier->setEnabled(false);  // once is enough
             char byte = 0;
             (void)!::read(signal_fds[0], &byte, 1);
+            // Should quitting hang, a second Ctrl+C or kill ends the process the ordinary way.
+            for (const int stop : {SIGTERM, SIGHUP, SIGINT}) {
+                std::signal(stop, SIG_DFL);
+            }
             log_info("Asked to stop: quitting");
             window.quit();
         });
