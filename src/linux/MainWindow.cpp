@@ -131,8 +131,11 @@ MainWindow::MainWindow(QWidget* parent) : QWidget(parent), wayland_(wayland_sess
     });
     connect(shortcuts_, &GlobalShortcutsPortal::failed, this, [this](const QString& message) {
         log_warning("Global shortcut: " + message.toStdString());
-        hotkey_hint_->setText(QStringLiteral("The desktop did not take the hotkey (%1). Add one yourself in System "
-                                             "Settings › Shortcuts › Add Command: %2")
+        // Plasma 6's "Command or Script" only adds a menu entry until a key is given to it, which
+        // testers missed: both steps are spelled out.
+        hotkey_hint_->setText(QStringLiteral("The desktop did not take the hotkey (%1). Add one yourself: System "
+                                             "Settings › Shortcuts › Add New › Command or Script, enter %2, then "
+                                             "click the new entry, choose Add custom shortcut and press the key.")
                                   .arg(message, save_command()));
     });
 

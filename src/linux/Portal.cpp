@@ -69,8 +69,12 @@ QString response_text(unsigned response) {
 }
 
 // Each request gets its own token; the reply's path is computed from it before the call, so the
-// Response signal cannot arrive before we listen for it.
-QString next_token(int& counter) {
+// Response signal cannot arrive before we listen for it. One counter for the whole process: the
+// request and session paths are per D-Bus connection, not per portal, so a counter per portal
+// made the screen cast and the shortcuts both create session ".../backtrack2". The portal then
+// kept only the screen cast's, and BindShortcuts failed with "Invalid session" (seen on Plasma 6).
+QString next_token() {
+    static int counter = 0;
     return QStringLiteral("backtrack%1").arg(++counter);
 }
 
@@ -114,9 +118,9 @@ void ScreenCastPortal::start(bool cursor, const QString& restore_token) {
     close();
     cursor_ = cursor;
     restore_token_ = restore_token;
-    const QString handle = next_token(token_counter_);
+    const QString handle = next_token();
     const QVariantMap options{{QStringLiteral("handle_token"), handle},
-                              {QStringLiteral("session_handle_token"), next_token(token_counter_)}};
+                              {QStringLiteral("session_handle_token"), next_token()}};
     request_path_ = request_path_for(handle);
     call(QStringLiteral("CreateSession"), {options}, Step::CreateSession);
 }
@@ -214,7 +218,7 @@ void ScreenCastPortal::on_response(unsigned response, const QVariantMap& results
 }
 
 void ScreenCastPortal::select_sources() {
-    QVariantMap options{{QStringLiteral("handle_token"), next_token(token_counter_)},
+    QVariantMap options{{QStringLiteral("handle_token"), next_token()},
                         {QStringLiteral("types"), QVariant::fromValue(kSourceMonitor)},
                         {QStringLiteral("multiple"), false},
                         {QStringLiteral("persist_mode"), QVariant::fromValue(kPersistUntilRevoked)}};
@@ -231,7 +235,7 @@ void ScreenCastPortal::select_sources() {
 }
 
 void ScreenCastPortal::start_stream() {
-    const QVariantMap options{{QStringLiteral("handle_token"), next_token(token_counter_)}};
+    const QVariantMap options{{QStringLiteral("handle_token"), next_token()}};
     request_path_ = request_path_for(options.value(QStringLiteral("handle_token")).toString());
     call(QStringLiteral("Start"), {QVariant::fromValue(QDBusObjectPath(session_)), QString(), options}, Step::Start);
 }
@@ -276,7 +280,7 @@ void GlobalShortcutsPortal::bind(const QString& trigger) {
     trigger_ = trigger;
     if (!session_.isEmpty()) {
         // A session exists: bind again (a changed key in the settings).
-        const QVariantMap options{{QStringLiteral("handle_token"), next_token(token_counter_)}};
+        const QVariantMap options{{QStringLiteral("handle_token"), next_token()}};
         request_path_ = request_path_for(options.value(QStringLiteral("handle_token")).toString());
         const QList<PortalShortcut> shortcuts{
             {QStringLiteral("save"), {{QStringLiteral("description"), QStringLiteral("Save a clip")},
@@ -285,8 +289,8 @@ void GlobalShortcutsPortal::bind(const QString& trigger) {
              {QVariant::fromValue(QDBusObjectPath(session_)), QVariant::fromValue(shortcuts), QString(), options}, Step::Bind);
         return;
     }
-    const QVariantMap options{{QStringLiteral("handle_token"), next_token(token_counter_)},
-                              {QStringLiteral("session_handle_token"), next_token(token_counter_)}};
+    const QVariantMap options{{QStringLiteral("handle_token"), next_token()},
+                              {QStringLiteral("session_handle_token"), next_token()}};
     request_path_ = request_path_for(options.value(QStringLiteral("handle_token")).toString());
     call(QStringLiteral("CreateSession"), {options}, Step::CreateSession);
 }

@@ -59,7 +59,6 @@ private:
     QString restore_token_;
     QString request_path_;
     QString session_;
-    int token_counter_ = 0;
 };
 
 // GlobalShortcuts (Plasma 6): registers the save hotkey with the desktop. KDE asks once to confirm
@@ -89,7 +88,6 @@ private:
     QString trigger_;
     QString request_path_;
     QString session_;
-    int token_counter_ = 0;
 };
 
 }  // namespace bt::linux_app
