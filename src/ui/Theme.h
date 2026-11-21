@@ -33,8 +33,8 @@ inline Color to_color(Rgb c) {
     return Color::hex(c.value());
 }
 
-inline void apply_theme(ThemeId id) {
-    const ThemeColors c = theme_colors(id);
+inline void apply_theme(const Settings& settings) {
+    const ThemeColors c = theme_colors(settings);
     kBg = to_color(c.bg);
     kSide = to_color(c.side);
     kCard = to_color(c.card);
@@ -79,6 +79,7 @@ inline constexpr int kPlaceholderCount = static_cast<int>(sizeof(kPlaceholders) 
 // Layout (DIPs).
 inline constexpr float kTitleBar = 40;  // .app grid-template-rows
 inline constexpr float kSidebar = 236;  // .shell grid-template-columns
+inline constexpr float kSidebarCompact = 64;  // Settings > Appearance > Compact sidebar: icons only
 inline constexpr float kNavHeight = 32;  // .nav
 inline constexpr float kRadius = 8;  // --r
 inline constexpr float kControl = 32;  // --h
@@ -155,6 +156,7 @@ inline constexpr wchar_t kRestoreDefaults = 0xE777;  // UpdateRestore
 inline constexpr wchar_t kCopy = 0xE8C8;  // Copy
 inline constexpr wchar_t kDisplay = 0xE7F4;  // TVMonitor
 inline constexpr wchar_t kSpeaker = 0xE7F5;  // Speakers
+inline constexpr wchar_t kPicture = 0xE91B;  // Photo
 }  // namespace glyph
 
 }  // namespace bt::ui::theme

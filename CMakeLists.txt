@@ -1,5 +1,5 @@
 ﻿cmake_minimum_required(VERSION 3.25)
-project(Backtrack VERSION 0.5.2 LANGUAGES CXX)
+project(Backtrack VERSION 0.6.0 LANGUAGES CXX)
 
 if(NOT MSVC)
     message(FATAL_ERROR "Backtrack is built with MSVC (Visual Studio 2022 Build Tools).")
@@ -42,6 +42,7 @@ add_library(backtrack_core STATIC
     src/core/ExportPlan.cpp
     src/core/ShareUpload.cpp
     src/core/RepairPlan.cpp
+    src/core/Blur.cpp
 )
 target_include_directories(backtrack_core PUBLIC src)
 target_link_libraries(backtrack_core PUBLIC bt_options)
@@ -92,6 +93,7 @@ add_executable(backtrack WIN32
     src/platform/Repair.cpp
     src/platform/Uploader.cpp
     src/platform/Shell.cpp
+    src/platform/Picture.cpp
     src/platform/VideoPlayer.cpp
     src/platform/IniFile.cpp
     src/platform/Updater.cpp
@@ -101,6 +103,7 @@ add_executable(backtrack WIN32
     src/ui/ExportDialog.cpp
     src/ui/RepairClips.cpp
     src/ui/ShareDialog.cpp
+    src/ui/CustomiseDialog.cpp
     src/ui/RecordPage.cpp
     src/ui/SettingsPage.cpp
     src/ui/Graphics.cpp
@@ -172,7 +175,7 @@ target_include_directories(share_check PRIVATE src)
 target_link_libraries(share_check PRIVATE backtrack_core winhttp bcrypt)
 
 enable_testing()
-foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests TrimPlanTests AudioFifoTests AudioMixTests NoiseSuppressorTests ThemeColorsTests CaptureMathTests UpdateCheckTests ExportPlanTests ShareUploadTests RepairPlanTests StallWatchTests)
+foreach(test_name ConfigTests HotkeyTests ClockTests ClipBufferTests H264Tests ClipPlanTests Mp4Tests JsonTests LibraryTests TrimPlanTests AudioFifoTests AudioMixTests NoiseSuppressorTests ThemeColorsTests CaptureMathTests UpdateCheckTests ExportPlanTests ShareUploadTests RepairPlanTests StallWatchTests BlurTests)
     add_executable(${test_name} tests/${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE backtrack_core)
     target_compile_definitions(${test_name} PRIVATE BT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

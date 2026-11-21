@@ -27,7 +27,7 @@ Windows' software encoder as fallback), WASAPI for sound. No FFmpeg, no OBS, no 
 3. In the library:
    - Click a clip to open its page: play it (Space plays and pauses, the arrow keys jump 5 s), trim it,
      give it a title, tags and notes. Right-click it to play it in your own video player, show it
-     in its folder, favorite it, rename it, add it to a collection or move it to the Trash.
+     in its folder, favorite it, rename it, add it to a collection or delete it.
    - **Trim:** drag the two handles under the player (or play to a moment and press **Start here** /
      **End here**, or the keys I and O), then **Save as new clip**. The original stays as it is; the
      new clip is saved next to it as `<name>_trim.mp4` in a fraction of a second, without losing
@@ -38,9 +38,16 @@ Windows' software encoder as fallback), WASAPI for sound. No FFmpeg, no OBS, no 
    - **+** next to Collections makes a new collection; right-click a collection to rename or delete
      it (deleting a collection keeps its clips).
    - The search box at the top (Ctrl+K) searches titles, file names, tags and notes.
-   - Trash: clips you delete wait there for 30 days, then go to the Windows Recycle Bin. The file
-     stays in the clips folder until then. Backtrack never deletes anything for good: on a drive
-     without a Recycle Bin (USB stick, network share) the clip simply stays where it is.
+   - **Delete** (right-click menu, the clip page, the Saved bar, or the Delete key on the clip page)
+     sends the clip to the Windows Recycle Bin at once; restore it from there if you change your
+     mind. Backtrack never deletes anything for good: on a drive without a Recycle Bin (USB stick,
+     network share) the clip simply stays where it is. Clips an older Backtrack had in its Trash
+     are back in the library.
+   - **Settings > Appearance** has the colour themes, **Customise...** (your own accent,
+     background, surface and text colours, and a background picture with Dim and Blur), the
+     interface size (90 to 125 %), a compact sidebar with only icons, and the clip counts in the
+     sidebar. The picture is copied next to `library.json` as `background.<ext>`, so the original
+     can be moved or deleted.
 4. **Record** shows which display Instant Replay records (click another to switch), how full the
    replay buffer is, Backtrack's own CPU and memory use and your latest clips.
 5. **Settings** changes everything below while Backtrack runs; changes are saved to `backtrack.ini`
@@ -61,7 +68,7 @@ time you start it from its new place.
 
 Only one Backtrack runs at a time. Starting it again brings the running window to the front.
 
-Next to `backtrack.exe` Backtrack keeps `library.json` (favorites, titles, collections, trash) and a
+Next to `backtrack.exe` Backtrack keeps `library.json` (favorites, titles, collections), the background picture if you chose one, and a
 `cache` folder with thumbnails (safe to delete; they are made again). If that folder is read-only
 (for example under `C:\Program Files`), they and `backtrack.log` go to `%LOCALAPPDATA%\Backtrack` instead. If
 `library.json` is ever damaged, a copy is kept as `library.damaged-<date-time>.json` and the

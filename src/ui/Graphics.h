@@ -71,7 +71,9 @@ public:
     // Pixel size of the client area changed, or the window moved to a monitor with another DPI.
     void resize(UINT width_px, UINT height_px);
     void set_dpi(UINT dpi);
-    float scale() const { return dpi_ / 96.0f; }
+    // Settings > Appearance > Interface size: 1.0 is the Windows scaling, 1.25 a quarter bigger.
+    void set_zoom(float zoom);
+    float scale() const { return static_cast<float>(dpi_) * zoom_ / 96.0f; }
 
     // False when there is nothing to draw on (window minimised to zero size).
     bool begin();
@@ -85,8 +87,11 @@ public:
     void stroke_round(const Rect& rect, float radius, Color color, float width = 1.0f);
     void line(float x0, float y0, float x1, float y1, Color color, float width = 1.0f);
     void fill_circle(float cx, float cy, float radius, Color color);
-    // A vertical gradient (thumbnails without a picture yet, shading under text).
-    void fill_gradient(const Rect& rect, float radius, Color top, Color bottom);
+    // A vertical gradient (thumbnails without a picture yet, shading under text); horizontal: from
+    // `top` on the left to `bottom` on the right.
+    void fill_gradient(const Rect& rect, float radius, Color top, Color bottom, bool horizontal = false);
+    // Every hue from left to right, red to red (the colour picker's hue bar).
+    void fill_hues(const Rect& rect, float radius);
 
     // One line, cut with an ellipsis when it does not fit. Returns the width actually used.
     float text(std::wstring_view text, const Rect& rect, const TextStyle& style, Color color,
@@ -126,8 +131,12 @@ private:
     IDWriteTextFormat* format(const TextStyle& style, bool icon_font);
     ID2D1SolidColorBrush* brush(Color color);
 
+    float dpi_value() const { return static_cast<float>(dpi_) * zoom_; }
+    void fill_stops(const Rect& rect, float radius, const D2D1_GRADIENT_STOP* stops, UINT count, bool horizontal);
+
     HWND window_;
     UINT dpi_ = 96;
+    float zoom_ = 1.0f;
     ComPtr<ID2D1Factory1> factory_;
     ComPtr<IDWriteFactory> write_factory_;
     ComPtr<ID3D11Device> d3d_;

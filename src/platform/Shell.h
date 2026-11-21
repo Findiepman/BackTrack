@@ -28,6 +28,10 @@ std::vector<std::filesystem::path> recycle(const std::vector<std::filesystem::pa
 // Windows' folder picker. Empty when cancelled. Keeps the calling thread's messages flowing.
 std::optional<std::filesystem::path> pick_folder(HWND owner, const std::filesystem::path& start, const wchar_t* title);
 
+// Windows' file picker for one picture, opening in the Pictures folder. Empty when cancelled.
+// Keeps the calling thread's messages flowing.
+std::optional<std::filesystem::path> pick_picture(HWND owner, const wchar_t* title);
+
 // Moves files into `folder` with Windows' own progress window (and its question when a file of
 // the same name is already there). Returns the files that are still at their old place. Keeps the
 // calling thread's messages flowing.

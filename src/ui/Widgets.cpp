@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
 
 namespace bt::ui {
 
@@ -27,7 +28,7 @@ float App::key_chip(float x, float y, std::wstring_view key) {
     const float w = std::max(22.0f, g.text_width(key, style) + 12);
     const Rect r{x, y, w, 20};
     g.fill_round(r, 5, kLine);
-    g.fill_round(Rect{r.x, r.y, r.w, r.h - 1.5f}, 5, kCard);
+    g.fill_round(Rect{r.x, r.y, r.w, r.h - 1.5f}, 5, kCard.with_alpha(1.0f));
     g.text(key, Rect{r.x, r.y, r.w, r.h - 1.5f}, style, kInk, Align::Center);
     return x + w;
 }
@@ -40,6 +41,28 @@ void App::nav_item(const Rect& rect, wchar_t glyph, std::wstring_view label, std
         g.fill_round(rect, kRadius, kAccent.with_alpha(0.15f));
     } else if (hot) {
         g.fill_round(rect, kRadius, kHover);
+    }
+    if (rect.w < 80) {
+        // The compact sidebar: only the icon (or the collection's dot); the name shows beside it
+        // while the mouse is on it.
+        if (dot) {
+            g.fill_circle(rect.x + rect.w / 2, rect.y + rect.h / 2, 5.0f, *dot);
+        } else {
+            g.icon(glyph, rect, 15, selected ? kAccent : soon ? kOff : kMute);
+        }
+        if (hot) {
+            const std::wstring tip = soon ? std::wstring(label) + L" (soon)"
+                                     : count > 0 && settings_.sidebar_counts
+                                         ? std::format(L"{}  ·  {}", label, count)
+                                         : std::wstring(label);
+            const TextStyle style{12.5f, Weight::Semibold};
+            const Rect bubble{rect.right() + 10, rect.y + 2, g.text_width(tip, style) + 20, rect.h - 4};
+            g.fill_round(bubble, 7, kPop);
+            g.stroke_round(bubble, 7, kLine);
+            g.text(tip, bubble, style, kInk, Align::Center);
+        }
+        add_hit(rect, action, std::move(arg));
+        return;
     }
     const Rect icon_rect{rect.x + 10, rect.y, 16, rect.h};
     if (dot) {
@@ -55,7 +78,7 @@ void App::nav_item(const Rect& rect, wchar_t glyph, std::wstring_view label, std
         const Rect badge{rect.right() - 44, rect.y + 8, 36, 16};
         g.fill_round(badge, 8, kInk.with_alpha(0.07f));
         g.text(L"Soon", badge, TextStyle{10, Weight::Semibold}, kMute, Align::Center);
-    } else if (count > 0) {
+    } else if (count > 0 && settings_.sidebar_counts) {
         g.text(std::to_wstring(count), Rect{rect.right() - 40, rect.y, 30, rect.h}, TextStyle{12, Weight::Regular, false, true},
                kMute, Align::End);
     }

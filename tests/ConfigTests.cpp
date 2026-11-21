@@ -608,7 +608,7 @@ void round_eleven_settings() {
     CHECK(bad.settings.theme == ThemeId::Night && bad.settings.thumbnail_size == ThumbnailSize::Medium);
     CHECK(bad.settings.bookmark_hotkey == "Alt+Shift+B");  // a plain letter is no global hotkey
     CHECK_EQ(bad.warnings.size(), std::size_t{8});
-    CHECK(any_warning(bad, "theme = 'neon' should be night, harbor, plum, moss or daylight, keeping night"));
+    CHECK(any_warning(bad, "theme = 'neon' should be night, harbor, plum, moss, daylight or custom, keeping night"));
     CHECK_EQ(load_settings("[video]\nresolution = NATIVE\n").settings.resolution, 0);
 
     for (const auto q : {QualityPreset::Performance, QualityPreset::Balanced, QualityPreset::Quality}) {
@@ -622,7 +622,8 @@ void round_eleven_settings() {
         t.overlay_corner = c;
         round_trips(default_ini_text(), t);
     }
-    for (const auto th : {ThemeId::Night, ThemeId::Harbor, ThemeId::Plum, ThemeId::Moss, ThemeId::Daylight}) {
+    for (const auto th :
+         {ThemeId::Night, ThemeId::Harbor, ThemeId::Plum, ThemeId::Moss, ThemeId::Daylight, ThemeId::Custom}) {
         Settings t;
         t.theme = th;
         round_trips(default_ini_text(), t);
@@ -638,7 +639,71 @@ void round_eleven_settings() {
     CHECK(load_settings(old).warnings.empty());
 }
 
+void customisation_settings() {
+    // Defaults keep the look Backtrack had: Night shift's colours, no picture, 100 %, full sidebar.
+    const Settings d{};
+    CHECK(d.custom_accent == 0xffb547 && d.custom_background == 0x0e1014 && d.custom_surface == 0x171a21 &&
+          d.custom_text == 0xe9ecf2);
+    CHECK(d.background_image.empty() && d.background_dim == 45 && d.background_blur == 4);
+    CHECK(d.ui_scale == 100 && d.sidebar_counts && !d.sidebar_compact);
+
+    const LoadedSettings loaded = load_settings(
+        "[appearance]\ntheme = Custom\ncustom_accent = 00FF88\ncustom_background = \"#101820\"\n"
+        "custom_surface = 202830\ncustom_text = f0f0f0\nbackground_image = C:\\Backtrack\\background.jpg\n"
+        "background_dim = 60\nbackground_blur = 0\nui_scale = 125\nsidebar_counts = no\nsidebar_compact = yes\n");
+    dump_warnings(loaded);
+    CHECK(loaded.warnings.empty());
+    const Settings& s = loaded.settings;
+    CHECK(s.theme == ThemeId::Custom && s.custom_accent == 0x00ff88 && s.custom_background == 0x101820);
+    CHECK(s.custom_surface == 0x202830 && s.custom_text == 0xf0f0f0);
+    CHECK(s.background_image == "C:\\Backtrack\\background.jpg");
+    CHECK(s.background_dim == 60 && s.background_blur == 0 && s.ui_scale == 125);
+    CHECK(!s.sidebar_counts && s.sidebar_compact);
+
+    // An unquoted '#' starts a comment: the colour is empty, so it is kept, with a warning.
+    const LoadedSettings bad = load_settings(
+        "[appearance]\ncustom_accent = #00ff88\ncustom_text = fff\ncustom_surface = 12345g\n"
+        "background_dim = 95\nbackground_blur = -2\nui_scale = 115\n");
+    CHECK(bad.settings.custom_accent == 0xffb547 && bad.settings.custom_text == 0xe9ecf2);
+    CHECK(bad.settings.custom_surface == 0x171a21);
+    CHECK(any_warning(bad, "custom_accent = '' should be a colour as six hex digits (like ffb547), keeping ffb547"));
+    CHECK(any_warning(bad, "custom_text = 'fff'"));
+    CHECK_EQ(bad.settings.background_dim, 90);
+    CHECK_EQ(bad.settings.background_blur, 0);
+    CHECK_EQ(bad.settings.ui_scale, 110);  // the nearest offered size
+    CHECK_EQ(bad.warnings.size(), std::size_t{6});
+
+    CHECK(parse_colour("ffb547") == std::optional<std::uint32_t>(0xffb547));
+    CHECK(parse_colour(" #FFB547 ") == std::optional<std::uint32_t>(0xffb547));
+    CHECK(!parse_colour("") && !parse_colour("#") && !parse_colour("ffb54") && !parse_colour("ffb5477"));
+    CHECK(!parse_colour("-fb547") && !parse_colour("+fb547") && !parse_colour("0xffb5"));
+    CHECK(colour_text(0x0e1014) == "0e1014");
+    CHECK(colour_text(0xff0e1014) == "0e1014");
+
+    // Written back and read again unchanged, including a path that needs quotes.
+    Settings t;
+    t.theme = ThemeId::Custom;
+    t.custom_accent = 0x010203;
+    t.custom_background = 0xa0b0c0;
+    t.custom_surface = 0;
+    t.custom_text = 0xffffff;
+    t.background_image = "D:\\Pics #1\\background.png";
+    t.background_dim = 0;
+    t.background_blur = 24;
+    t.ui_scale = 90;
+    t.sidebar_counts = false;
+    t.sidebar_compact = true;
+    round_trips(default_ini_text(), t);
+    round_trips("", t);
+    CHECK(bt_test::contains(update_ini(default_ini_text(), t), "custom_surface = 000000\n"));
+    // A file from before these keys gets them added and still reads cleanly.
+    const std::string old = update_ini("[appearance]\ntheme = moss\n", Settings{});
+    CHECK(bt_test::contains(old, "sidebar_compact = false"));
+    CHECK(load_settings(old).warnings.empty());
+}
+
 int main() {
+    customisation_settings();
     round_eleven_settings();
     mic_settings();
     empty_and_missing();

@@ -144,7 +144,7 @@ void App::close_share() {
     if (share_->stage == ShareView::Stage::Working) {
         share_->cancel->store(true);
         share_->abort->abort();
-        show_notice(share_->finished->load() ? L"The clip was shared; its link is under Shared." : L"Sharing was cancelled.");
+        show_notice(share_->finished->load() ? L"The clip was shared; its link is under Shared." : L"Sharing was cancelled.", true);
     }
     share_.reset();
     invalidate();
@@ -158,7 +158,7 @@ void App::run_share(const std::string& what, const Rect&) {
         close_share();
     } else if (what == "sh-copy" || what == "sh-copy-old") {
         const std::string url = what == "sh-copy" ? view->url : (clip != nullptr ? clip->share_url : std::string());
-        if (!url.empty() && copy_text(to_wide(url))) show_notice(L"Link copied. Paste it in Discord.");
+        if (!url.empty() && copy_text(to_wide(url))) show_notice(L"Link copied. Paste it in Discord.", true);
     } else if (what == "sh-open") {
         if (!view->url.empty()) shell::open(fs::path(to_wide(view->url)));
     } else if (view->stage == ShareView::Stage::Form && what.starts_with("sh-host:")) {
@@ -235,10 +235,10 @@ void App::run_share(const std::string& what, const Rect&) {
                     if (view->cancel->load()) {
                         // Cancelled while the host was already storing it: it is online now. Say so,
                         // and leave the clipboard alone.
-                        show_notice(L"The clip had already been uploaded before the cancel; its link is under Shared.");
+                        show_notice(L"The clip had already been uploaded before the cancel; its link is under Shared.", true);
                     } else if (settings_.share_copy_link && copy_text(to_wide(url))) {
                         view->copied = true;
-                        if (share_ != view) show_notice(L"Link copied. Paste it in Discord.");
+                        if (share_ != view) show_notice(L"Link copied. Paste it in Discord.", true);
                     }
                 }
                 if (share_ != view) return;
@@ -265,7 +265,7 @@ void App::paint_share(float width, float height) {
     const float panel_h = view.stage == ShareView::Stage::Form ? (already ? 380.0f : 330.0f) : 230.0f;
     const Rect panel{x, std::max(kTitleBar + 16, (height - panel_h) / 2), w, panel_h};
     g.fill_round(Rect{panel.x + 2, panel.y + 10, panel.w - 4, panel.h}, 18, Color::hex(0x000000, 0.3f));
-    g.fill_round(panel, kPanelRadius, kCard);
+    g.fill_round(panel, kPanelRadius, kCard.with_alpha(1.0f));  // opaque also over a background picture
     g.stroke_round(panel, kPanelRadius, kLine);
     add_hit(panel, Action::Disabled);
     const float px = panel.x + 24;

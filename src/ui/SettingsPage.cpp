@@ -215,11 +215,27 @@ void App::change_settings(const std::function<void(Settings&)>& edit) {
     }
     if (before.start_minimized != settings_.start_minimized && launch_at_startup()) set_launch_at_startup(true);
     if (!settings_.saved_bar) saved_bar_.reset();
-    if (before.theme != settings_.theme) apply_look();
+    const bool colours_changed = theme_colors(before) != theme_colors(settings_);
+    if (colours_changed) apply_look();
+    if (before.background_image != settings_.background_image || before.background_blur != settings_.background_blur) {
+        load_background();
+    }
+    if (before.background_image != settings_.background_image && !before.background_image.empty()) {
+        // Backtrack's own copy of a picture no longer used (never the user's original: only a
+        // "background.*" file next to library.json is Backtrack's).
+        const fs::path old = background_path(before.background_image);
+        std::error_code ec;
+        if (old.parent_path() == paths_.library.parent_path() && old.stem() == L"background" &&
+            old != background_path(settings_.background_image)) {
+            fs::remove(old, ec);
+        }
+    }
+    if (before.ui_scale != settings_.ui_scale) apply_ui_scale();
+    if (before.sidebar_compact != settings_.sidebar_compact && editing_) end_edit(true);
     if (before.auto_update != settings_.auto_update && updater_ != nullptr) updater_->set_automatic(settings_.auto_update);
     if (before.overlay != settings_.overlay || before.overlay_corner != settings_.overlay_corner ||
         before.overlay_opacity != settings_.overlay_opacity || before.reduce_motion != settings_.reduce_motion ||
-        before.theme != settings_.theme || before.monitor != settings_.monitor) {
+        colours_changed || before.monitor != settings_.monitor) {
         refresh_overlay();
     }
     if (needs_new_pipeline(before, settings_)) {
@@ -1286,29 +1302,59 @@ std::vector<App::SettingRow> App::setting_rows() {
         row.section = "appearance";
         row.kind = Kind::Custom;
         row.label = L"Color theme";
-        row.description = L"For the whole app.";
+        row.description = L"Pick a theme, or make your own with Customise (your colours and a background picture).";
         row.full = true;
-        row.keywords = L"theme color colour accent dark light night shift harbor plum moss daylight";
-        row.changed = settings_.theme != defaults.theme;
-        row.reset = [defaults](Settings& s) { s.theme = defaults.theme; };
+        row.keywords = L"theme color colour accent dark light night shift harbor plum moss daylight custom customise "
+                       L"customize background picture image wallpaper";
+        row.changed = settings_.theme != defaults.theme || !settings_.background_image.empty() ||
+                      settings_.custom_accent != defaults.custom_accent ||
+                      settings_.custom_background != defaults.custom_background ||
+                      settings_.custom_surface != defaults.custom_surface || settings_.custom_text != defaults.custom_text ||
+                      settings_.background_dim != defaults.background_dim ||
+                      settings_.background_blur != defaults.background_blur || background_loading_;
+        row.reset = [this, defaults](Settings& s) {
+            ++backdrop_request_;  // a picture still being read is not wanted either
+            // The look as it came: no picture either (the mockup's Reset).
+            s.theme = defaults.theme;
+            s.custom_accent = defaults.custom_accent;
+            s.custom_background = defaults.custom_background;
+            s.custom_surface = defaults.custom_surface;
+            s.custom_text = defaults.custom_text;
+            s.background_image = defaults.background_image;
+            s.background_dim = defaults.background_dim;
+            s.background_blur = defaults.background_blur;
+        };
         row.height = 36;
         row.paint = [this](const Rect& area) {
             Graphics& g = *graphics_;
-            // .st-preset: the background with an accent bar, the chosen one ringed in the accent.
+            // .st-preset: the background with a surface and an accent bar, the chosen one ringed.
             float x = area.x;
-            for (std::size_t i = 0; i < kThemes.size(); ++i) {
-                const ThemeInput colors = theme_input(kThemes[i]);
-                const bool chosen = kThemes[i] == settings_.theme;
+            const auto swatch = [&](const ThemeInput& colors, bool chosen, const std::string& arg) {
                 const Rect s{x, area.y + 2, 40, 32};
                 g.fill_round(s, 9, Color::hex(colors.bg.value()));
                 g.fill_round(Rect{s.x + 7, s.y + 7, 12, 18}, 4, Color::hex(colors.surface.value()));
                 g.fill_round(Rect{s.x + 22, s.y + 7, 10, 18}, 4, Color::hex(colors.accent.value()));
-                const bool hot = hovered(Action::Setting, std::format("theme:{}", i));
+                const bool hot = hovered(Action::Setting, arg);
                 g.stroke_round(s, 9, chosen ? kAccent : hot ? kOff : kLine, chosen ? 2.0f : 1.0f);
-                add_hit(s, Action::Setting, std::format("theme:{}", i));
+                add_hit(s, Action::Setting, arg);
                 x += 46;
+            };
+            for (std::size_t i = 0; i < kThemes.size(); ++i) {
+                swatch(theme_input(kThemes[i]), kThemes[i] == settings_.theme, std::format("theme:{}", i));
             }
-            g.text(std::wstring(theme_name(settings_.theme)), Rect{x + 4, area.y, 160, 36}, TextStyle{13}, kMute);
+            // Your own colours, as the sixth choice.
+            Settings custom = settings_;
+            custom.theme = ThemeId::Custom;
+            swatch(theme_input(custom), settings_.theme == ThemeId::Custom, "theme:custom");
+            // The name of the swatch under the mouse, else of the chosen theme.
+            std::wstring name(theme_name(settings_.theme));
+            for (std::size_t i = 0; i < kThemes.size(); ++i) {
+                if (hovered(Action::Setting, std::format("theme:{}", i))) name = theme_name(kThemes[i]);
+            }
+            if (hovered(Action::Setting, "theme:custom")) name = theme_name(ThemeId::Custom);
+            g.text(name, Rect{x + 4, area.y, 90, 36}, TextStyle{13}, kMute);  // fixed width: the button stays put
+            push_button(x + 4 + 90 + 8, area.y + 3, L"Customise...", glyph::kPalette, ButtonStyle::Line, true,
+                        Action::Setting, "cus-open");
         };
         add(std::move(row));
     }
@@ -1318,6 +1364,36 @@ std::vector<App::SettingRow> App::setting_rows() {
     enum_row("appearance", "thumb", L"Thumbnail size", L"Five, four or three clips in a row on a wide window.",
              {L"S", L"M", L"L"}, &Settings::thumbnail_size)
         .keywords = L"thumbnail size grid columns";
+    {
+        // The interface size: the Windows scaling times this.
+        static constexpr int kScales[] = {90, 100, 110, 125};
+        SettingRow row;
+        row.id = "ui-scale";
+        row.section = "appearance";
+        row.kind = Kind::Segmented;
+        row.label = L"Interface size";
+        row.description = L"Makes text, buttons and clips smaller or bigger.";
+        row.keywords = L"size scale zoom text font bigger smaller interface";
+        for (const int scale : kScales) row.options.push_back(std::format(L"{}%", scale));
+        row.selected = 1;
+        for (int i = 0; i < 4; ++i) {
+            if (kScales[i] == settings_.ui_scale) row.selected = i;
+        }
+        row.changed = settings_.ui_scale != defaults.ui_scale;
+        row.choose = [this](int choice) {
+            if (choice >= 0 && choice < 4) change_settings([choice](Settings& s) { s.ui_scale = kScales[choice]; });
+        };
+        row.reset = [defaults](Settings& s) { s.ui_scale = defaults.ui_scale; };
+        add(std::move(row));
+    }
+    toggle_row("appearance", "sidebar-compact", L"Compact sidebar",
+               L"Only icons in the sidebar, so the clips get more room. Point at an icon to see its name.",
+               settings_.sidebar_compact, defaults.sidebar_compact, [](Settings& s, bool v) { s.sidebar_compact = v; })
+        .keywords = L"sidebar narrow icons compact collapse";
+    toggle_row("appearance", "sidebar-counts", L"Clip counts in the sidebar",
+               L"How many clips each view and collection has.", settings_.sidebar_counts, defaults.sidebar_counts,
+               [](Settings& s, bool v) { s.sidebar_counts = v; })
+        .keywords = L"sidebar count numbers";
     toggle_row("appearance", "motion", L"Reduce motion", L"Turns off the overlay's fades.", settings_.reduce_motion,
                defaults.reduce_motion, [](Settings& s, bool v) { s.reduce_motion = v; })
         .keywords = L"motion animation";
@@ -1420,6 +1496,10 @@ std::vector<App::SettingRow> App::setting_rows() {
 // Actions
 
 void App::run_setting(const std::string& what, const Rect& anchor) {
+    if (what.starts_with("cus-")) {
+        run_customise(what);
+        return;
+    }
     if (what.starts_with("tab:")) {
         settings_section_ = what.substr(4);
         SetWindowTextW(settings_search_, L"");
@@ -1485,7 +1565,7 @@ void App::run_setting(const std::string& what, const Rect& anchor) {
                 }
             }
             CloseClipboard();
-            show_notice(L"Diagnostics copied. Paste them into your message.");
+            show_notice(L"Diagnostics copied. Paste them into your message.", true);
         }
         return;
     }
@@ -1536,6 +1616,10 @@ void App::run_setting(const std::string& what, const Rect& anchor) {
             }
         }
         invalidate();
+        return;
+    }
+    if (what == "theme:custom") {
+        change_settings([](Settings& s) { s.theme = ThemeId::Custom; });
         return;
     }
     if (what.starts_with("theme:")) {
@@ -1611,6 +1695,8 @@ void App::on_drag(const std::string& id, float fraction, bool done) {
         drag_clip(id, fraction, done);
     } else if (id.starts_with("set:")) {
         drag_setting(id, fraction, done);
+    } else if (id.starts_with("cus:")) {
+        drag_customise(id, fraction, done);
     }
 }
 

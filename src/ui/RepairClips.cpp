@@ -156,7 +156,7 @@ void App::finish_repair() {
     view->stage = RepairView::Stage::Done;
     log::info("Repair finished: {} repaired, {} failed, {} skipped", view->repaired, view->failed.size(), view->skipped);
     if (page_ != Page::Settings) {
-        show_notice(std::format(L"Repaired {} {}.", view->repaired, clips_word(view->repaired)));
+        show_notice(std::format(L"Repaired {} {}.", view->repaired, clips_word(view->repaired)), view->failed.empty());
     }
     invalidate();
 }

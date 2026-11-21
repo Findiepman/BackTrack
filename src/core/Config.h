@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -10,8 +12,8 @@ enum class EncoderPreference { Auto, Hardware, Software };
 // The encoder's speed/quality trade-off at the same bitrate (CODECAPI_AVEncCommonQualityVsSpeed).
 enum class QualityPreset { Performance, Balanced, Quality };
 enum class OverlayCorner { TopLeft, TopRight, BottomLeft, BottomRight };
-// The colour presets of the mockup (ST_PRESETS), in its order.
-enum class ThemeId { Night, Harbor, Plum, Moss, Daylight };
+// The colour presets of the mockup (ST_PRESETS), in its order. Custom: the four custom_* colours.
+enum class ThemeId { Night, Harbor, Plum, Moss, Daylight, Custom };
 enum class Density { Comfortable, Compact };
 enum class ThumbnailSize { Small, Medium, Large };
 // Where Share uploads a clip (core/ShareUpload.h): catbox.moe keeps it, Litterbox for 72 hours.
@@ -74,6 +76,18 @@ struct Settings {
     Density density = Density::Comfortable;
     ThumbnailSize thumbnail_size = ThumbnailSize::Medium;
     bool reduce_motion = false;
+    // The Custom theme's colours as 0xRRGGBB; they start as Night shift's.
+    std::uint32_t custom_accent = 0xffb547;
+    std::uint32_t custom_background = 0x0e1014;
+    std::uint32_t custom_surface = 0x171a21;
+    std::uint32_t custom_text = 0xe9ecf2;
+    // A picture behind the window: Backtrack's own copy of it (next to library.json); empty: none.
+    std::string background_image;
+    int background_dim = 45;  // percent, 0..90: how much of the background colour lies over it
+    int background_blur = 4;  // 0..24 (DIPs of blur radius)
+    int ui_scale = 100;  // percent: 90, 100, 110 or 125 of the Windows scaling
+    bool sidebar_counts = true;  // clip counts next to the library views and collections
+    bool sidebar_compact = false;  // the sidebar shows only icons
     // [logging]
     LogLevel log_level = LogLevel::Info;
 
@@ -99,6 +113,11 @@ inline int saved_seconds(const Settings& s) {
 }
 
 IniDocument parse_ini(std::string_view text);
+
+// "ffb547", "#FFB547" -> 0xffb547 (spaces around it are ignored); anything else: nullopt.
+std::optional<std::uint32_t> parse_colour(std::string_view text);
+// 0xffb547 -> "ffb547"
+std::string colour_text(std::uint32_t rgb);
 
 struct LoadedSettings {
     Settings settings;

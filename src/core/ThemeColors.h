@@ -37,14 +37,34 @@ struct ThemeColors {
     Rgb on_accent;  // text on an accent fill
     Rgb danger, rec, warn, ok;
     bool light = false;  // a light background: shadows and overlays get lighter
+    friend bool operator==(const ThemeColors&, const ThemeColors&) = default;
 };
 
 inline constexpr std::array<ThemeId, 5> kThemes = {ThemeId::Night, ThemeId::Harbor, ThemeId::Plum, ThemeId::Moss,
                                                   ThemeId::Daylight};
 
-std::wstring_view theme_name(ThemeId id);  // "Night shift", "Harbor", ...
-ThemeInput theme_input(ThemeId id);
+// The presets, in the order the Settings page shows them (Custom is not one of them).
+std::wstring_view theme_name(ThemeId id);  // "Night shift", "Harbor", ..., "Custom"
+ThemeInput theme_input(ThemeId id);  // a preset; Custom gives Night shift's
 ThemeColors theme_colors(ThemeId id);
+// The chosen theme, with the custom_* colours when it is Custom.
+ThemeInput theme_input(const Settings& s);
+ThemeColors theme_colors(const Settings& s);
+
+// What derive_theme had to change so text stays readable (the Customise panel's hint).
+struct ContrastNote {
+    bool text_adjusted = false;
+    bool accent_adjusted = false;  // the accent as text or a thin line
+    bool unmet = false;  // no colour reads well on both the background and the surface
+};
+ContrastNote contrast_note(const ThemeInput& in);
+
+// The colour picker's coordinates: hue 0..360 (degrees), saturation and value 0..1.
+struct Hsv {
+    double h = 0, s = 0, v = 0;
+};
+Hsv to_hsv(Rgb c);  // a grey has hue 0
+Rgb from_hsv(Hsv c);  // hue wraps around, s and v are clamped
 
 // The mockup's helpers, exposed for the tests.
 Rgb mix(Rgb a, Rgb b, double t);  // a + (b - a) * t, rounded like stHex

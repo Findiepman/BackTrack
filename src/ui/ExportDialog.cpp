@@ -77,7 +77,8 @@ void App::close_export() {
         export_->cancel->store(true);  // finishes on the worker
         // Also when something else closed the clip page. A file finished a moment ago is kept.
         show_notice(export_->finished->load() ? L"The export was saved in the Exports folder."
-                                              : L"The export was cancelled.");
+                                              : L"The export was cancelled.",
+                    true);
     }
     export_.reset();
     invalidate();
@@ -182,7 +183,7 @@ void App::paint_export(float width, float height) {
     const float panel_h = view.stage == ExportView::Stage::Form ? 420.0f : 220.0f;
     const Rect panel{x, std::max(kTitleBar + 16, (height - panel_h) / 2), w, panel_h};
     g.fill_round(Rect{panel.x + 2, panel.y + 10, panel.w - 4, panel.h}, 18, Color::hex(0x000000, 0.3f));
-    g.fill_round(panel, kPanelRadius, kCard);
+    g.fill_round(panel, kPanelRadius, kCard.with_alpha(1.0f));  // opaque also over a background picture
     g.stroke_round(panel, kPanelRadius, kLine);
     add_hit(panel, Action::Disabled);
     const float px = panel.x + 24;

@@ -22,9 +22,30 @@ std::wstring_view theme_name(ThemeId id) {
         case ThemeId::Plum: return L"Plum";
         case ThemeId::Moss: return L"Moss";
         case ThemeId::Daylight: return L"Daylight";
+        case ThemeId::Custom: return L"Custom";
         case ThemeId::Night: break;
     }
     return L"Night shift";
+}
+
+ThemeInput theme_input(const Settings& s) {
+    if (s.theme != ThemeId::Custom) return theme_input(s.theme);
+    return {Rgb::hex(s.custom_accent), Rgb::hex(s.custom_background), Rgb::hex(s.custom_surface),
+            Rgb::hex(s.custom_text)};
+}
+
+ThemeColors theme_colors(const Settings& s) {
+    return s.theme == ThemeId::Custom ? derive_theme(theme_input(s)) : theme_colors(s.theme);
+}
+
+ContrastNote contrast_note(const ThemeInput& in) {
+    const ThemeColors c = derive_theme(in);
+    ContrastNote note;
+    note.text_adjusted = c.ink != in.text;
+    note.accent_adjusted = c.accent_text != in.accent;
+    note.unmet = std::min({worst(c.ink, in.bg, in.surface), worst(c.accent_text, in.bg, in.surface),
+                           worst(c.mute, in.bg, in.surface)}) < 4.5;
+    return note;
 }
 
 ThemeInput theme_input(ThemeId id) {
@@ -33,6 +54,7 @@ ThemeInput theme_input(ThemeId id) {
         case ThemeId::Plum: return {Rgb::hex(0xff7ab6), Rgb::hex(0x150e1c), Rgb::hex(0x21172b), Rgb::hex(0xf3e8fa)};
         case ThemeId::Moss: return {Rgb::hex(0xa6e35c), Rgb::hex(0x0d140f), Rgb::hex(0x16211a), Rgb::hex(0xe8f2e6)};
         case ThemeId::Daylight: return {Rgb::hex(0x3454f0), Rgb::hex(0xe9edf4), Rgb::hex(0xffffff), Rgb::hex(0x141a26)};
+        case ThemeId::Custom:  // the colours live in Settings: theme_input(const Settings&)
         case ThemeId::Night: break;
     }
     return {Rgb::hex(0xffb547), Rgb::hex(0x0e1014), Rgb::hex(0x171a21), Rgb::hex(0xe9ecf2)};
@@ -59,6 +81,51 @@ ThemeColors theme_colors(ThemeId id) {
     c.warn = Rgb::hex(0xf5b84a);
     c.ok = Rgb::hex(0x6fdc9f);
     return c;
+}
+
+Hsv to_hsv(Rgb c) {
+    const double r = c.r / 255.0;
+    const double g = c.g / 255.0;
+    const double b = c.b / 255.0;
+    const double high = std::max({r, g, b});
+    const double low = std::min({r, g, b});
+    const double range = high - low;
+    Hsv out;
+    out.v = high;
+    out.s = high > 0 ? range / high : 0.0;
+    if (range > 0) {
+        double h = 0;
+        if (high == r) {
+            h = std::fmod((g - b) / range, 6.0);
+        } else if (high == g) {
+            h = (b - r) / range + 2.0;
+        } else {
+            h = (r - g) / range + 4.0;
+        }
+        h *= 60.0;
+        out.h = h < 0 ? h + 360.0 : h;
+    }
+    return out;
+}
+
+Rgb from_hsv(Hsv c) {
+    double h = std::isfinite(c.h) ? std::fmod(c.h, 360.0) : 0.0;
+    if (h < 0) h += 360.0;
+    const double s = std::isfinite(c.s) ? std::clamp(c.s, 0.0, 1.0) : 0.0;
+    const double v = std::isfinite(c.v) ? std::clamp(c.v, 0.0, 1.0) : 0.0;
+    const double chroma = v * s;
+    const double x = chroma * (1.0 - std::fabs(std::fmod(h / 60.0, 2.0) - 1.0));
+    const double m = v - chroma;
+    double r = 0, g = 0, b = 0;
+    switch (static_cast<int>(h / 60.0)) {
+        case 0: r = chroma; g = x; break;
+        case 1: r = x; g = chroma; break;
+        case 2: g = chroma; b = x; break;
+        case 3: g = x; b = chroma; break;
+        case 4: r = x; b = chroma; break;
+        default: r = chroma; b = x; break;
+    }
+    return Rgb{channel((r + m) * 255.0), channel((g + m) * 255.0), channel((b + m) * 255.0)};
 }
 
 Rgb mix(Rgb a, Rgb b, double t) {

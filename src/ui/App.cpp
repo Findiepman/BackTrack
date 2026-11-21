@@ -35,6 +35,7 @@ constexpr int kEditBoxId = 102;
 constexpr int kNotesBoxId = 103;
 constexpr int kTagBoxId = 104;
 constexpr int kSettingsSearchId = 105;
+constexpr int kHexBoxId = 106;
 
 constexpr auto kScanInterval = std::chrono::seconds(3);
 constexpr auto kCleanupInterval = std::chrono::hours(1);
@@ -218,6 +219,7 @@ void App::construct() {
     BT_CHECK_WIN32(window_ != nullptr);
     post_window_ = window_;
     graphics_ = std::make_unique<Graphics>(window_);
+    graphics_->set_zoom(static_cast<float>(settings_.ui_scale) / 100.0f);
     const float scale = graphics_->scale();
     const MONITORINFO monitor = [this] {
         MONITORINFO info{sizeof(MONITORINFO)};
@@ -254,10 +256,14 @@ void App::construct() {
                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kTagBoxId)), instance, nullptr);
     settings_search_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 10, 10, window_,
                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSettingsSearchId)), instance, nullptr);
+    hex_box_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 10, 10, window_,
+                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(kHexBoxId)), instance, nullptr);
     SetWindowSubclass(search_box_, edit_subclass, 1, 0);
     SetWindowSubclass(edit_box_, edit_subclass, 1, 0);
     SetWindowSubclass(tag_box_, edit_subclass, 1, 0);
     SetWindowSubclass(settings_search_, edit_subclass, 1, 0);
+    SetWindowSubclass(hex_box_, edit_subclass, 1, 0);
+    SendMessageW(hex_box_, EM_SETLIMITTEXT, 16, 0);  // "#rrggbb", with room for pasted spaces
     SendMessageW(tag_box_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Add tag"));
     SendMessageW(tag_box_, EM_SETLIMITTEXT, 40, 0);
     SendMessageW(notes_box_, EM_SETLIMITTEXT, 4000, 0);
@@ -270,6 +276,7 @@ void App::construct() {
 
     probe_ = std::make_unique<MediaProbe>(paths_.cache, [window = window_] { PostMessageW(window, kMsgProbe, 0, 0); });
     set_text_rules(TextRules{&fold_text, &compare_text});
+    load_background();
     load_library();
     scan_folder();
     request_missing_info();
@@ -311,21 +318,32 @@ App::~App() {
 }
 
 void App::apply_look() {
-    theme::apply_theme(settings_.theme);
+    // A colour being dragged in the Customise picker shows before it is saved.
+    if (customise_ && customise_->picking && customise_->colour_preview) {
+        theme::apply_theme(with_custom_colour(settings_, *customise_->picking, *customise_->colour_preview));
+    } else {
+        theme::apply_theme(settings_);
+    }
+    if (backdrop_) {
+        // The picture shows through the title bar, the sidebar and the cards (the mockup's has-img).
+        kSide = kSide.with_alpha(0.5f);
+        kCard = kCard.with_alpha(0.78f);
+    }
     // The edit boxes paint with GDI brushes in the theme's colours (WM_CTLCOLOREDIT).
     for (HBRUSH* brush : {&edit_brush_, &bg_brush_, &card_brush_, &field_brush_}) {
         if (*brush != nullptr) DeleteObject(*brush);
     }
     edit_brush_ = CreateSolidBrush(colorref(kRaise));
     bg_brush_ = CreateSolidBrush(colorref(kBg));
-    card_brush_ = CreateSolidBrush(colorref(kCard));
+    // GDI has no see-through: a translucent card is approximated over the background colour.
+    card_brush_ = CreateSolidBrush(colorref(kCard.with_alpha(1.0f).mix(kBg, kCard.a)));
     field_brush_ = CreateSolidBrush(colorref(kInk.mix(kBg, 0.05f)));
     // The frame Windows draws around our title bar: dark or light, with the theme's line colour.
     const BOOL dark = kLightTheme ? FALSE : TRUE;
     DwmSetWindowAttribute(window_, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
     const COLORREF border = colorref(kLine);
     DwmSetWindowAttribute(window_, DWMWA_BORDER_COLOR, &border, sizeof(border));
-    for (HWND box : {search_box_, edit_box_, notes_box_, tag_box_, settings_search_}) {
+    for (HWND box : {search_box_, edit_box_, notes_box_, tag_box_, settings_search_, hex_box_}) {
         if (box != nullptr) InvalidateRect(box, nullptr, TRUE);
     }
     invalidate();
@@ -477,8 +495,9 @@ void App::request_missing_info() {
     }
 }
 
-void App::show_notice(std::wstring text) {
+void App::show_notice(std::wstring text, bool calm) {
     notice_ = std::move(text);
+    notice_calm_ = calm;
     notice_until_ = std::chrono::steady_clock::now() + kNoticeTime;
     invalidate();
 }
@@ -609,7 +628,8 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
             break;
         case WM_GETMINMAXINFO: {
             auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
-            const float scale = static_cast<float>(GetDpiForWindow(window_)) / 96.0f;
+            // With the interface size: everything in the window is that much bigger, so is its minimum.
+            const float scale = graphics_ ? graphics_->scale() : static_cast<float>(GetDpiForWindow(window_)) / 96.0f;
             MONITORINFO monitor{sizeof(MONITORINFO)};
             GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor);
             const LONG work_w = monitor.rcWork.right - monitor.rcWork.left;
@@ -696,6 +716,8 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
                 capture_hotkey(wparam);
                 return 0;
             }
+            // A held Delete repeats; each repeat would delete the clip that opened after the last one.
+            if (wparam == VK_DELETE && (lparam & 0x40000000) != 0) return 0;
             if (on_key(wparam)) return 0;
             if (wparam == 'K' && GetKeyState(VK_CONTROL) < 0) {
                 SetFocus(search_box_);
@@ -755,6 +777,14 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
                 SetFocus(window_);
             } else if (id == kSettingsSearchId && code == IDOK) {
                 SetFocus(window_);
+            } else if (id == kHexBoxId && code == EN_CHANGE) {
+                on_hex_changed();
+            } else if (id == kHexBoxId && (code == EN_SETFOCUS || code == EN_KILLFOCUS)) {
+                invalidate();  // the box border shows focus
+            } else if (id == kHexBoxId && (code == IDOK || code == IDCANCEL)) {
+                // Enter and Escape both close the picker; a colour typed so far stays.
+                SetFocus(window_);
+                close_picker();
             }
             return 0;
         }
@@ -769,8 +799,11 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
                 back = kBg;
                 brush = bg_brush_;
             } else if (control == tag_box_) {
-                back = kCard;
+                back = kCard.with_alpha(1.0f).mix(kBg, kCard.a);  // as card_brush_
                 brush = card_brush_;
+            } else if (control == hex_box_) {
+                back = kRaise;
+                brush = edit_brush_;
             } else if (control == settings_search_) {
                 back = kInk.mix(kBg, 0.05f);
                 brush = field_brush_;
@@ -971,6 +1004,7 @@ LRESULT App::handle(UINT message, WPARAM wparam, LPARAM lparam) {
             notes_box_ = nullptr;
             tag_box_ = nullptr;
             settings_search_ = nullptr;
+            hex_box_ = nullptr;
             return DefWindowProcW(window, message, wparam, lparam);
         }
         default: break;
@@ -1020,7 +1054,7 @@ void App::update_edit_font() {
                                    CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     if (font != nullptr) {
         // The controls switch to the new font before the old one is deleted under them.
-        for (const HWND control : {search_box_, edit_box_, notes_box_, tag_box_, settings_search_}) {
+        for (const HWND control : {search_box_, edit_box_, notes_box_, tag_box_, settings_search_, hex_box_}) {
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         }
         if (edit_font_ != nullptr) DeleteObject(edit_font_);
@@ -1133,6 +1167,23 @@ void App::load_library() {
         keep_copy_of_library(L"newer");
     }
     library_ = Library::from_json(*parsed.value);
+    // There is no Trash any more (Delete sends a clip to the Recycle Bin at once): clips an earlier
+    // version left in it come back to the library as ordinary clips. Not with a fresh "restored"
+    // time: that would shield them from the storage limits for a day while their size still
+    // counts, so the limits would take the user's other, older clips instead.
+    std::vector<std::pair<std::string, std::int64_t>> trashed;
+    for (const ClipEntry& clip : library_.clips()) {
+        if (clip.trashed_at) trashed.emplace_back(clip.file, clip.restored_at);
+    }
+    if (!trashed.empty()) {
+        for (const auto& [name, restored_at] : trashed) library_.restore(name, restored_at);
+        log::info("{} clip(s) from the old Trash are back in the library", trashed.size());
+        show_notice(trashed.size() == 1 ? std::wstring(L"The clip that was in the Trash is back in your library.")
+                                        : std::format(L"The {} clips that were in the Trash are back in your library.",
+                                                      trashed.size()),
+                    true);
+        save_library();
+    }
 }
 
 void App::save_library() {
@@ -1532,7 +1583,7 @@ void App::on_shortcut(int id) {
         const HWND focus = GetFocus();
         const bool own_box = focus != nullptr && GetForegroundWindow() == window_ &&
                              (focus == search_box_ || focus == edit_box_ || focus == notes_box_ || focus == tag_box_ ||
-                              focus == settings_search_);
+                              focus == settings_search_ || focus == hex_box_);
         if (own_box) {
             const UINT scan = MapVirtualKeyW(key->virtual_key, MAPVK_VK_TO_VSC);
             const bool extended = key->virtual_key == VK_HOME || key->virtual_key == VK_END ||
@@ -1925,9 +1976,21 @@ void App::paint() {
     }
 
     g.clear(kBg);
+    if (backdrop_) {
+        // The background picture, with the background colour over it as much as Dim says.
+        if (!g.has_bitmap(kBackdropKey)) {
+            g.upload_bitmap(kBackdropKey, backdrop_->blurred.data(), static_cast<UINT>(backdrop_->width),
+                            static_cast<UINT>(backdrop_->height));
+        }
+        const Rect all{0, 0, w, h};
+        g.draw_bitmap(kBackdropKey, all, 0);
+        const int dim = customise_ && customise_->dim_preview ? *customise_->dim_preview : settings_.background_dim;
+        g.fill(all, kBg.with_alpha(static_cast<float>(std::clamp(dim, 0, 100)) / 100.0f));
+    }
     tracks_.clear();
     for (auto& [control, place] : controls_) place.second = false;  // pages say again which are shown
-    const Rect main{kSidebar, kTitleBar, w - kSidebar, h - kTitleBar};
+    const float side_w = sidebar_width();
+    const Rect main{side_w, kTitleBar, w - side_w, h - kTitleBar};
     switch (page_) {
         case Page::Library: paint_library(main); break;
         case Page::Clip: paint_clip_page(main); break;
@@ -1948,6 +2011,7 @@ void App::paint() {
         paint_share(w, h);
         // The page's text boxes are windows of their own and would show through the dialog.
         for (auto& [control, place] : controls_) place.second = false;
+        paint_customise(w, h);  // after: its own hex box is placed there
     }
     if (menu_) paint_menu(w, h);
     end_guard.done = true;
@@ -2049,17 +2113,24 @@ void App::paint_title_bar(float width) {
 
 void App::paint_sidebar(float height) {
     Graphics& g = *graphics_;
-    const Rect side{0, kTitleBar, kSidebar, height - kTitleBar};
+    const float side_w = sidebar_width();
+    const bool compact = settings_.sidebar_compact;
+    const Rect side{0, kTitleBar, side_w, height - kTitleBar};
     g.fill(side, kSide);
-    g.fill(Rect{kSidebar - 1, kTitleBar, 1, side.h}, kLine);
+    g.fill(Rect{side_w - 1, kTitleBar, 1, side.h}, kLine);
 
     const LibraryCounts counts = library_.counts(now_unix());
     const float x = 8;
-    const float w = kSidebar - 16;
+    const float w = side_w - 16;
     float y = kTitleBar + 10;
     const TextStyle label{12, Weight::Semibold};
     const auto section = [&](std::wstring_view text) {
-        g.text(text, Rect{x + 10, y, w - 20, 26}, label, kMute);
+        if (compact) {
+            // A thin rule instead of the heading: the narrow column has no room for words.
+            g.fill(Rect{x + 8, y + 12, w - 16, 1}, kLine);
+        } else {
+            g.text(text, Rect{x + 10, y, w - 20, 26}, label, kMute);
+        }
         y += 26;
     };
     const bool library_page = page_ == Page::Library;
@@ -2074,16 +2145,16 @@ void App::paint_sidebar(float height) {
     view_item(glyph::kFavorite, L"Favorites", counts.favorites, LibraryView::Favorites, "favorites");
     view_item(glyph::kRecent, L"Recent", counts.recent, LibraryView::Recent, "recent");
     view_item(glyph::kShare, L"Shared", counts.shared, LibraryView::Shared, "shared");
-    view_item(glyph::kTrash, L"Trash", counts.trash, LibraryView::Trash, "trash");
 
-    // The bottom cards claim their space first; collections get what is left.
-    const float cards_h = 66 + 8 + 70;
+    // The bottom cards claim their space first; collections get what is left. Compact, the two
+    // cards are one status dot.
+    const float cards_h = compact ? 34.0f : 66 + 8 + 70;
     const float more_h = 26 + 3 * (kNavHeight + 1);
     const float bottom_limit = height - 12 - cards_h - 10 - more_h;
 
     y += 14;
-    g.text(L"Collections", Rect{x + 10, y, w - 50, 26}, label, kMute);
-    const Rect add_rect{x + w - 30, y, 26, 26};
+    const Rect add_rect = compact ? Rect{x + (w - 26) / 2, y, 26, 26} : Rect{x + w - 30, y, 26, 26};
+    if (!compact) g.text(L"Collections", Rect{x + 10, y, w - 50, 26}, label, kMute);
     if (hovered(Action::NewCollection)) g.fill_round(add_rect, 6, kHover);
     g.icon(glyph::kAdd, add_rect, 12, kMute);
     add_hit(add_rect, Action::NewCollection);
@@ -2115,19 +2186,32 @@ void App::paint_sidebar(float height) {
         nav_item(r, 0, to_wide(c.name.empty() ? std::string("Untitled") : c.name), library_.collection_size(c.id),
                  library_page && view_ == LibraryView::Collection && view_collection_ == c.id, Action::View, c.id, dot);
         if (editing_ && editing_->kind == Editing::Kind::CollectionName && editing_->target == c.id) {
-            edit_rect_ = Rect{r.x + 32, r.y + 4, r.w - 40, r.h - 8};
+            if (compact) {
+                // No room for the name in the narrow column: the box floats beside it.
+                const Rect box{r.right() + 10, r.y, 220, r.h};
+                g.fill_round(box, kRadius, kRaise);
+                g.stroke_round(box, kRadius, kAccent);
+                edit_rect_ = Rect{box.x + 10, box.y + 6, box.w - 20, box.h - 12};
+            } else {
+                edit_rect_ = Rect{r.x + 32, r.y + 4, r.w - 40, r.h - 8};
+            }
         }
         y += kNavHeight + 1;
     }
     if (overflow) {
         const Rect more{x, y, w, kNavHeight};
         if (hovered(Action::MoreCollections)) g.fill_round(more, kRadius, kHover);
-        g.text(std::format(L"{} more", hidden_collections_.size()), Rect{x + 35, y, w - 40, kNavHeight}, TextStyle{12.5f},
-               kMute);
+        if (compact) {
+            g.text(std::format(L"+{}", hidden_collections_.size()), more, TextStyle{12.5f, Weight::Semibold}, kMute,
+                   Align::Center);
+        } else {
+            g.text(std::format(L"{} more", hidden_collections_.size()), Rect{x + 35, y, w - 40, kNavHeight},
+                   TextStyle{12.5f}, kMute);
+        }
         add_hit(more, Action::MoreCollections);
         y += kNavHeight + 1;
     }
-    if (collections.empty()) {
+    if (collections.empty() && !compact) {
         g.text(L"No collections yet", Rect{x + 10, y, w - 20, 22}, TextStyle{12}, kMute);
         y += 22;
     }
@@ -2144,9 +2228,37 @@ void App::paint_sidebar(float height) {
 
     // Instant Replay card.
     const float card_y = height - 12 - cards_h;
-    const Rect replay{x, card_y, w, 66};
     const bool paused = recorder_->paused();
     const bool normal = status_.starts_with("Recording") || status_.starts_with("Saving");
+    if (compact) {
+        // The state as a dot; the mouse on it says the rest and a click pauses or resumes, like the
+        // title bar's pill.
+        const Rect dot{x, card_y, w, cards_h};
+        const bool hot = hovered(Action::TogglePause, "side");
+        if (hot) g.fill_round(dot, kRadius, kHover);
+        // The full cards' warnings must not get lost here: they turn the dot amber and lead the tip.
+        const bool key_taken = !hotkey_ok_[0];
+        const bool no_folder = recorder_->output_dir_is_fallback();
+        const Color state = paused ? kOff : normal && !key_taken && !no_folder ? kAccent : kWarn;
+        g.fill_circle(dot.x + dot.w / 2, dot.y + dot.h / 2, 5, state);
+        add_hit(dot, Action::TogglePause, "side");
+        if (hot) {
+            const std::wstring tip =
+                key_taken ? std::format(L"{} is taken by another program", to_wide(settings_.save_hotkey))
+                : no_folder ? std::wstring(L"Clips folder missing: saving to Videos")
+                : paused    ? std::wstring(L"Instant Replay paused: click to resume")
+                : normal    ? std::format(L"Instant Replay on: {} saves the last {} s", to_wide(settings_.save_hotkey),
+                                          saved_seconds(settings_))
+                            : to_wide(status_);
+            const TextStyle style{12.5f, Weight::Semibold};
+            const Rect bubble{dot.right() + 10, dot.y + 2, g.text_width(tip, style) + 20, dot.h - 4};
+            g.fill_round(bubble, 7, kPop);
+            g.stroke_round(bubble, 7, kLine);
+            g.text(tip, bubble, style, kInk, Align::Center);
+        }
+        return;
+    }
+    const Rect replay{x, card_y, w, 66};
     g.fill_round(replay, 10, kCard);
     g.stroke_round(replay, 10, kLine);
     const Color state_color = paused ? kMute : normal ? kAccent : kWarn;
@@ -2172,7 +2284,7 @@ void App::paint_sidebar(float height) {
     const float used_w = g.text(used, Rect{storage.x + 12, storage.y + 10, storage.w - 24, 22},
                                 TextStyle{15, Weight::Bold, false, true}, kInk);
     g.text(L" used", Rect{storage.x + 12 + used_w, storage.y + 10, storage.w - 24 - used_w, 22}, TextStyle{12}, kMute);
-    const std::size_t total = counts.all + counts.trash;
+    const std::size_t total = counts.all;
     if (recorder_->output_dir_is_fallback()) {
         g.text(L"Clips folder missing: saving to Videos", Rect{storage.x + 12, storage.y + 38, storage.w - 24, 20},
                TextStyle{12}, kWarn);
@@ -2298,12 +2410,9 @@ void App::paint_library(const Rect& area) {
                                      : std::wstring();
     if (!problem.empty()) {
         const float title_w = g.text_width(view_title(), TextStyle{14, Weight::Semibold});
+        const bool calm = !notice_.empty() && notice_calm_;
         g.text(problem, Rect{head.x + 18 + title_w + 16, head.y, sort_rect.x - 140 - (head.x + 18 + title_w + 16), head.h},
-               TextStyle{12.5f, Weight::Semibold}, kDanger);
-    } else if (view_ == LibraryView::Trash) {
-        g.text(std::format(L"Clips here go to the Recycle Bin after {} days", kTrashDays),
-               Rect{head.x + 18 + g.text_width(view_title(), TextStyle{14, Weight::Semibold}) + 16, head.y, 360, head.h},
-               TextStyle{12.5f}, kMute);
+               TextStyle{12.5f, Weight::Semibold}, calm ? kMute : kDanger);
     }
 
     // Grid, above the Saved bar when it is showing.
@@ -2311,10 +2420,9 @@ void App::paint_library(const Rect& area) {
     grid_area_ = Rect{area.x, head.bottom(), area.w, area.bottom() - head.bottom() - bar_space};
     g.push_clip(grid_area_);
     if (shown.empty()) {
-        const wchar_t* title = !search_.empty()             ? L"No clips match your search"
-                               : view_ == LibraryView::Trash ? L"The Trash is empty"
-                               : view_ == LibraryView::All   ? L"No clips yet"
-                                                             : L"Nothing here yet";
+        const wchar_t* title = !search_.empty()           ? L"No clips match your search"
+                               : view_ == LibraryView::All ? L"No clips yet"
+                                                           : L"Nothing here yet";
         std::wstring text;
         switch (view_) {
             case LibraryView::All:
@@ -2323,8 +2431,8 @@ void App::paint_library(const Rect& area) {
                 break;
             case LibraryView::Favorites: text = L"Click the star on a clip to keep it here."; break;
             case LibraryView::Recent: text = std::format(L"Clips from the last {} days show up here.", kRecentDays); break;
-            case LibraryView::Trash: text = L"Clips you delete wait here before they go to the Recycle Bin."; break;
-            case LibraryView::Collection: text = L"Right-click a clip and choose Collections to add it here."; break;
+            case LibraryView::Trash: break;  // no longer shown (Delete goes to the Recycle Bin)
+            case LibraryView::Collection: text = L"Right-click a clip and choose Add to collection."; break;
             case LibraryView::Shared: text = L"Open a clip and press Share to get a link for Discord."; break;
         }
         g.icon(glyph::kVideo, Rect{grid_area_.x, grid_area_.y + 70, grid_area_.w, 40}, 28, kOff);
@@ -2332,6 +2440,9 @@ void App::paint_library(const Rect& area) {
                kInk, Align::Center);
         if (search_.empty()) {
             g.text(text, Rect{grid_area_.x, grid_area_.y + 144, grid_area_.w, 22}, TextStyle{13}, kMute, Align::Center);
+        } else {
+            g.text(L"Try another word, or press Escape in the search box to see all clips.",
+                   Rect{grid_area_.x, grid_area_.y + 144, grid_area_.w, 22}, TextStyle{13}, kMute, Align::Center);
         }
         max_scroll_ = 0;
         scroll_ = 0;
@@ -2463,7 +2574,7 @@ void App::paint_card(const ClipEntry& clip, const Rect& rect) {
     };
     add(format_resolution(clip.width, clip.height));
     add(format_size(clip.size_bytes));
-    add(clip.trashed_at ? "In Trash" : format_age(now_unix() - clip.created));
+    add(format_age(now_unix() - clip.created));
     g.text(meta, Rect{rect.x + 10, info_y + 21, rect.w - 20, 16}, TextStyle{12}, kMute);
 
     // The star is checked first: hits are searched from the end.
@@ -2477,7 +2588,7 @@ void App::paint_saved_bar(const Rect& area) {
     const Rect r{area.x + kPad, area.bottom() - 16 - kSavedBar, area.w - 2 * kPad, kSavedBar};
     // A soft shadow under the floating bar (--shadow), then the card.
     g.fill_round(Rect{r.x + 2, r.y + 8, r.w - 4, r.h}, 18, Color::hex(0x000000, 0.25f));
-    g.fill_round(r, 18, kCard);
+    g.fill_round(r, 18, kCard.with_alpha(1.0f));  // floats over the clips: never see-through
     g.stroke_round(r, 18, kLine);
     add_hit(r, Action::None);
 
@@ -2514,7 +2625,7 @@ void App::paint_saved_bar(const Rect& area) {
                                                                                           : Action::SavedFolder,
            "share");
     bx += 86 + 2;
-    if (exists && clip != nullptr && !clip->trashed_at) {
+    if (exists && clip != nullptr) {
         button(Rect{bx, by, 84, kControl}, L"Delete", glyph::kTrash, Action::SavedTrash, {}, false, true);
     }
     bx += 84 + 2;
@@ -2571,6 +2682,8 @@ void App::on_click(float x, float y, bool right) {
     if (dragging_) {
         const std::string id = *std::exchange(dragging_, std::nullopt);
         if (GetCapture() == window_) ReleaseCapture();
+        mouse_x_ = x;  // the colour picker's square reads the height from here
+        mouse_y_ = y;
         const auto track = tracks_.find(id);
         const float fraction = track != tracks_.end() && track->second.w > 0
                                    ? std::clamp((x - track->second.x) / track->second.w, 0.0f, 1.0f)
@@ -2628,8 +2741,18 @@ bool App::on_key(WPARAM key) {
     }
     if (dialog_open()) {
         if (key == VK_ESCAPE) {
-            close_export();
-            close_share();
+            // The colour picker first, then the window it is in.
+            if (customise_ && customise_->picking) {
+                close_picker();
+            } else {
+                close_export();
+                close_share();
+                close_customise();
+            }
+        } else if (key == VK_RETURN && customise_) {
+            // Enter: done with the picker, then with the window (as its Done button).
+            if (customise_->picking) close_picker();
+            else close_customise();
         }
         return true;  // the clip page under the Export window does not react
     }
@@ -2641,6 +2764,7 @@ bool App::on_key(WPARAM key) {
             case 'I': run_clip("set-in", Rect{}); return true;
             case 'O': run_clip("set-out", Rect{}); return true;
             case 'M': run_clip("mute", Rect{}); return true;
+            case VK_DELETE: run_clip("delete", Rect{}); return true;
             case VK_ESCAPE: run_clip("back", Rect{}); return true;
             default: break;
         }
@@ -2697,7 +2821,6 @@ void App::run(const Hit& hit, bool right, POINT screen) {
             else if (hit.arg == "favorites") set_view(LibraryView::Favorites);
             else if (hit.arg == "shared") set_view(LibraryView::Shared);
             else if (hit.arg == "recent") set_view(LibraryView::Recent);
-            else if (hit.arg == "trash") set_view(LibraryView::Trash);
             else set_view(LibraryView::Collection, hit.arg);
             break;
         case Action::NewCollection: {
@@ -2751,7 +2874,8 @@ void App::run(const Hit& hit, bool right, POINT screen) {
             break;
         case Action::SavedTrash:
             if (saved_bar_ && !saved_bar_->file.empty()) {
-                move_to_trash(saved_bar_->file);
+                const std::string file = saved_bar_->file;  // recycle_now may close the bar
+                recycle_now(file);
             }
             break;
         case Action::SavedClose:
@@ -2769,22 +2893,32 @@ void App::run(const Hit& hit, bool right, POINT screen) {
     }
 }
 
-void App::move_to_trash(const std::string& file) {
-    if (library_.find(file) == nullptr) return;
-    library_.move_to_trash(file, now_unix());
-    new_files_.erase(file);
-    if (saved_bar_ && saved_bar_->file == file) saved_bar_.reset();
-    save_library();
-    invalidate();
+bool App::may_recycle(const std::string& file) {
+    if (!clips_folder_available() || recycling_ || shell_busy_ || library_.find(file) == nullptr) return false;
+    if (repairing() && repair_->current == file) {
+        show_notice(L"This clip is being repaired. You can delete it when that's done.");
+        return false;
+    }
+    if (trimming_) {
+        // The trim reads its source on the worker: the file must stay where it is until then.
+        show_notice(L"A trimmed clip is being saved. Delete this clip when that's done.");
+        return false;
+    }
+    return true;
 }
 
 void App::recycle_now(const std::string& file) {
-    if (!clips_folder_available() || recycling_ || library_.find(file) == nullptr) return;
-    if (repairing() && repair_->current == file) {
-        show_notice(L"This clip is being repaired. Delete it when the repair is done.");
-        return;
+    if (!may_recycle(file)) return;
+    const std::wstring title = [&] {
+        std::wstring t = to_wide(display_title(*library_.find(file)));
+        if (t.size() > 32) t = t.substr(0, 31) + L"…";
+        return t;
+    }();
+    if (clip_view_ && clip_view_->file == file) {
+        // The player holds the file open; a clip page without its clip has nothing to show.
+        if (page_ == Page::Clip) set_page(Page::Library);
+        else close_clip();
     }
-    if (clip_view_ && clip_view_->file == file) close_clip();  // the player holds the file open
     recycling_ = true;
     const std::vector<fs::path> failed = shell::recycle({clip_path(file)});
     recycling_ = false;
@@ -2796,11 +2930,15 @@ void App::recycle_now(const std::string& file) {
     if (library_.find(file) == nullptr) return;  // gone meanwhile (a scan while waiting)
     if (failed.empty()) {
         library_.remove(file);
+        new_files_.erase(file);
         if (saved_bar_ && saved_bar_->file == file) saved_bar_.reset();
         save_library();
+        show_notice(std::format(L"“{}” is in the Recycle Bin. Restore it from there if you need it back.", title),
+                    true);
     } else {
-        show_notice(L"Could not move the clip to the Recycle Bin. It may be open in a player, or its drive has "
-                    L"no Recycle Bin.");
+        show_notice(std::format(L"Couldn't move “{}” to the Recycle Bin. Close any player using it and try "
+                                L"again (a USB stick or network drive has no Recycle Bin).",
+                                title));
     }
     invalidate();
 }
@@ -2869,44 +3007,35 @@ void App::clip_menu(const std::string& file, POINT) {
     if (const ClipEntry* c = library_.find(file); c != nullptr && share_link_live(*c, now_unix())) {
         const std::wstring url = to_wide(c->share_url);
         menu.items.push_back(MenuItem{L"Copy share link", [this, url] {
-                                          if (copy_text(url)) show_notice(L"Link copied. Paste it in Discord.");
+                                          if (copy_text(url)) show_notice(L"Link copied. Paste it in Discord.", true);
                                       }});
     }
     menu.items.push_back(MenuItem{L"Show in folder", [this, file] {
                                       if (clips_folder_available()) shell::show_in_folder(clip_path(file));
                                   }});
     menu.items.push_back(MenuItem{});
-    if (!clip->trashed_at) {
-        menu.items.push_back(MenuItem{clip->favorite ? L"Remove from favorites" : L"Add to favorites", [this, file] {
-                                          if (const ClipEntry* c = library_.find(file)) {
-                                              library_.set_favorite(file, !c->favorite);
-                                              save_library();
-                                          }
-                                      }});
-        menu.items.push_back(MenuItem{L"Rename", [this, file] {
-                                          if (const ClipEntry* c = library_.find(file)) {
-                                              begin_edit(Editing{Editing::Kind::ClipTitle, file}, to_wide(display_title(*c)));
-                                          }
-                                      }});
-        const Rect at{mouse_x_, mouse_y_, 0, 0};
-        menu.items.push_back(MenuItem{L"Add to collection...", [this, file, at] {
-                                          Rect anchor = at;
-                                          anchor.w = 1;
-                                          add_to_collection_menu(file, anchor);
-                                      }});
-        menu.items.push_back(MenuItem{});
-        MenuItem trash{L"Move to Trash", [this, file] { move_to_trash(file); }};
-        trash.danger = true;
-        menu.items.push_back(std::move(trash));
-    } else {
-        menu.items.push_back(MenuItem{L"Restore", [this, file] {
-                                          library_.restore(file, now_unix());
+    menu.items.push_back(MenuItem{clip->favorite ? L"Remove from favorites" : L"Add to favorites", [this, file] {
+                                      if (const ClipEntry* c = library_.find(file)) {
+                                          library_.set_favorite(file, !c->favorite);
                                           save_library();
-                                      }});
-        MenuItem recycle{L"Move to Recycle Bin now", [this, file] { recycle_now(file); }};
-        recycle.danger = true;
-        menu.items.push_back(std::move(recycle));
-    }
+                                      }
+                                  }});
+    menu.items.push_back(MenuItem{L"Rename", [this, file] {
+                                      if (const ClipEntry* c = library_.find(file)) {
+                                          begin_edit(Editing{Editing::Kind::ClipTitle, file}, to_wide(display_title(*c)));
+                                      }
+                                  }});
+    const Rect at{mouse_x_, mouse_y_, 0, 0};
+    menu.items.push_back(MenuItem{L"Add to collection...", [this, file, at] {
+                                      Rect anchor = at;
+                                      anchor.w = 1;
+                                      add_to_collection_menu(file, anchor);
+                                  }});
+    menu.items.push_back(MenuItem{});
+    // Straight to the Windows Recycle Bin: it can be put back from there.
+    MenuItem remove{L"Delete", [this, file] { recycle_now(file); }};
+    remove.danger = true;
+    menu.items.push_back(std::move(remove));
     open_menu(std::move(menu));
 }
 

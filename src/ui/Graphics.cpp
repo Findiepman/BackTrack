@@ -83,7 +83,7 @@ void Graphics::create_device() {
     BT_CHECK_HR(factory_->CreateDevice(dxgi_device.Get(), d2d_device_.ReleaseAndGetAddressOf()));
     BT_CHECK_HR(d2d_device_->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, target_.ReleaseAndGetAddressOf()));
     target_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-    target_->SetDpi(static_cast<float>(dpi_), static_cast<float>(dpi_));
+    target_->SetDpi(dpi_value(), dpi_value());
     BT_CHECK_HR(target_->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0), brush_.ReleaseAndGetAddressOf()));
 
     ComPtr<IDXGIAdapter> adapter;
@@ -121,8 +121,7 @@ void Graphics::create_target() {
     BT_CHECK_HR(swap_chain_->GetBuffer(0, IID_PPV_ARGS(&surface)));
     const D2D1_BITMAP_PROPERTIES1 properties = D2D1::BitmapProperties1(
         D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), static_cast<float>(dpi_),
-        static_cast<float>(dpi_));
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), dpi_value(), dpi_value());
     BT_CHECK_HR(target_->CreateBitmapFromDxgiSurface(surface.Get(), &properties, back_buffer_.ReleaseAndGetAddressOf()));
     target_->SetTarget(back_buffer_.Get());
 }
@@ -171,10 +170,15 @@ void Graphics::resize(UINT width_px, UINT height_px) {
     height_px_ = height_px;
 }
 
+void Graphics::set_zoom(float zoom) {
+    zoom_ = std::isfinite(zoom) ? std::clamp(zoom, 0.5f, 2.0f) : 1.0f;
+    set_dpi(dpi_);
+}
+
 void Graphics::set_dpi(UINT dpi) {
     dpi_ = dpi == 0 ? 96 : dpi;
     if (target_) {
-        target_->SetDpi(static_cast<float>(dpi_), static_cast<float>(dpi_));
+        target_->SetDpi(dpi_value(), dpi_value());
         // The target bitmap carries the DPI too: made again at the next begin().
         target_->SetTarget(nullptr);
         back_buffer_.Reset();
@@ -252,15 +256,30 @@ void Graphics::fill_circle(float cx, float cy, float radius, Color color) {
     target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), radius, radius), brush(color));
 }
 
-void Graphics::fill_gradient(const Rect& rect, float radius, Color top, Color bottom) {
+void Graphics::fill_gradient(const Rect& rect, float radius, Color top, Color bottom, bool horizontal) {
     const D2D1_GRADIENT_STOP stops[] = {{0.0f, d2d(top)}, {1.0f, d2d(bottom)}};
+    fill_stops(rect, radius, stops, 2, horizontal);
+}
+
+void Graphics::fill_hues(const Rect& rect, float radius) {
+    const D2D1_GRADIENT_STOP stops[] = {
+        {0.0f, D2D1::ColorF(1, 0, 0)},        {1.0f / 6, D2D1::ColorF(1, 1, 0)}, {2.0f / 6, D2D1::ColorF(0, 1, 0)},
+        {3.0f / 6, D2D1::ColorF(0, 1, 1)},    {4.0f / 6, D2D1::ColorF(0, 0, 1)}, {5.0f / 6, D2D1::ColorF(1, 0, 1)},
+        {1.0f, D2D1::ColorF(1, 0, 0)},
+    };
+    fill_stops(rect, radius, stops, static_cast<UINT>(std::size(stops)), true);
+}
+
+void Graphics::fill_stops(const Rect& rect, float radius, const D2D1_GRADIENT_STOP* stops, UINT count,
+                          bool horizontal) {
     ComPtr<ID2D1GradientStopCollection> collection;
     ComPtr<ID2D1LinearGradientBrush> gradient;
-    if (FAILED(target_->CreateGradientStopCollection(stops, 2, &collection)) ||
-        FAILED(target_->CreateLinearGradientBrush(
-            D2D1::LinearGradientBrushProperties(D2D1::Point2F(rect.x, rect.y), D2D1::Point2F(rect.x, rect.bottom())),
-            collection.Get(), &gradient))) {
-        fill_round(rect, radius, top);
+    const D2D1_POINT_2F end = horizontal ? D2D1::Point2F(rect.right(), rect.y) : D2D1::Point2F(rect.x, rect.bottom());
+    if (FAILED(target_->CreateGradientStopCollection(stops, count, &collection)) ||
+        FAILED(target_->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(D2D1::Point2F(rect.x, rect.y), end),
+                                                  collection.Get(), &gradient))) {
+        const D2D1_COLOR_F first = stops[0].color;
+        fill_round(rect, radius, Color{first.r, first.g, first.b, first.a});
         return;
     }
     target_->FillRoundedRectangle(D2D1::RoundedRect(rect.d2d(), radius, radius), gradient.Get());

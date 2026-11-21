@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <functional>
+#include <iterator>
 #include <optional>
 #include <thread>
 
@@ -185,6 +186,39 @@ std::optional<std::filesystem::path> pick_folder(HWND owner, const std::filesyst
         if (!start.empty() &&
             SUCCEEDED(SHCreateItemFromParsingName(start.c_str(), nullptr, IID_PPV_ARGS(&folder)))) {
             dialog->SetFolder(folder.Get());
+        }
+        if (dialog->Show(owner) != S_OK) return;  // cancelled
+        ComPtr<IShellItem> result;
+        PWSTR path = nullptr;
+        if (SUCCEEDED(dialog->GetResult(&result)) && SUCCEEDED(result->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+            chosen = std::filesystem::path(path);
+            CoTaskMemFree(path);
+        }
+    });
+    return chosen;
+}
+
+std::optional<std::filesystem::path> pick_picture(HWND owner, const wchar_t* title) {
+    std::optional<std::filesystem::path> chosen;
+    on_sta_thread_waiting([&] {
+        ComPtr<IFileOpenDialog> dialog;
+        if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) return;
+        FILEOPENDIALOGOPTIONS options = 0;
+        dialog->GetOptions(&options);
+        dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST);
+        dialog->SetTitle(title);
+        const COMDLG_FILTERSPEC types[] = {
+            {L"Pictures", L"*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.webp;*.tif;*.tiff;*.heic;*.jxr"},
+            {L"All files", L"*.*"},
+        };
+        dialog->SetFileTypes(static_cast<UINT>(std::size(types)), types);
+        ComPtr<IShellItem> pictures;
+        PWSTR known = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Pictures, 0, nullptr, &known))) {
+            if (SUCCEEDED(SHCreateItemFromParsingName(known, nullptr, IID_PPV_ARGS(&pictures)))) {
+                dialog->SetDefaultFolder(pictures.Get());
+            }
+            CoTaskMemFree(known);
         }
         if (dialog->Show(owner) != S_OK) return;  // cancelled
         ComPtr<IShellItem> result;

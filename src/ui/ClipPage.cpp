@@ -303,23 +303,23 @@ void App::run_clip(const std::string& what, const Rect& anchor) {
         std::string next;
         if (it != order.end() && it + 1 != order.end()) next = *(it + 1);
         else if (it != order.end() && it != order.begin()) next = *(it - 1);
-        close_clip();
-        move_to_trash(file);
-        if (!next.empty()) open_clip(next);
-        else set_page(Page::Library);
-    } else if (what == "delete-forever") {
+        // To the Recycle Bin. The player holds the file open, so the page closes first; the next
+        // clip opens once the clip is gone, or this one again when Windows could not move it.
+        // A refusal (a trim being saved, ...) is known before: the page then stays as it is.
+        if (!may_recycle(file)) return;
         set_page(Page::Library);
         recycle_now(file);
-    } else if (what == "restore") {
-        library_.restore(file, now_unix());
-        save_library();
+        if (quitting_ || quit_pending_ || window_ == nullptr) return;  // quit while Windows worked
+        if (page_ != Page::Library || dialog_open()) return;  // the user went elsewhere while Windows worked
+        if (library_.find(file) != nullptr) open_clip(file);
+        else if (!next.empty() && library_.find(next) != nullptr) open_clip(next);
     } else if (what == "fav") {
         library_.set_favorite(file, !clip->favorite);
         save_library();
     } else if (what == "add-collection") {
         add_to_collection_menu(file, anchor);
     } else if (what == "rename") {
-        if (!clip->trashed_at) begin_edit(Editing{Editing::Kind::ClipTitle, file}, to_wide(display_title(*clip)));
+        begin_edit(Editing{Editing::Kind::ClipTitle, file}, to_wide(display_title(*clip)));
     } else if (what.starts_with("tag-del:")) {
         const std::size_t index = static_cast<std::size_t>(std::stoul(what.substr(8)));
         if (index < clip->tags.size()) {
@@ -473,11 +473,14 @@ void App::paint_clip_page(const Rect& area) {
     float y = page.y + kPageTop;
 
     // .crumb: Library, "Clip 12 of 28", newer / older.
-    float bx = x0 + push_button(x0, y + 2, L"Library", glyph::kChevronLeft, ButtonStyle::Line, true, Action::Clip, "back");
-    if (clip->trashed_at) {
-        const Rect pill{bx + 10, y + 4, 78, 26};
-        g.fill_round(pill, 13, kInk.with_alpha(0.07f));
-        g.text(L"In Trash", pill, TextStyle{12, Weight::Semibold}, kMute, Align::Center);
+    const float back_w = push_button(x0, y + 2, L"Library", glyph::kChevronLeft, ButtonStyle::Line, true, Action::Clip,
+                                     "back");
+    // Notices (the last clip went to the Recycle Bin, a Delete that has to wait) show here too:
+    // the library header is not on screen.
+    if (!notice_.empty()) {
+        const float nx = x0 + back_w + 14;
+        g.text(notice_, Rect{nx, y, std::max(0.0f, x0 + cw - 34 - 10 - 34 - 220 - nx), 34},
+               TextStyle{12.5f, Weight::Semibold}, notice_calm_ ? kMute : kDanger);
     }
     const std::vector<std::string> order = clip_order();
     const auto it = std::find(order.begin(), order.end(), view.file);
@@ -675,23 +678,12 @@ void App::paint_trim(const ClipEntry& clip, const Rect& rect) {
     // .vtools.
     float tx = x;
     tx += 8 + push_button(tx, y, trimming_ ? L"Saving..." : L"Save as new clip", glyph::kCut, ButtonStyle::Primary, false,
-                          Action::Clip, "save-trim", !can_trim || !trimmed || trimming_ || clip.trashed_at.has_value());
-    if (!clip.trashed_at) {  // in the Trash, Restore and Delete forever need the room
-        tx += 8 + push_button(tx, y, L"Export...", glyph::kDownload, ButtonStyle::Line, false, Action::Clip, "export",
-                              !clip.size_bytes && clip.duration_s <= 0);
-    }
+                          Action::Clip, "save-trim", !can_trim || !trimmed || trimming_);
+    tx += 8 + push_button(tx, y, L"Export...", glyph::kDownload, ButtonStyle::Line, false, Action::Clip, "export",
+                          !clip.size_bytes && clip.duration_s <= 0);
     push_button(tx, y, L"Share...", glyph::kShare, ButtonStyle::Line, false, Action::Clip, "share");
-    if (clip.trashed_at) {
-        const float dw = button_width(L"Delete forever", glyph::kTrash, false);
-        const float rw = button_width(L"Restore", glyph::kRestoreDefaults, false);
-        push_button(x + w - dw, y, L"Delete forever", glyph::kTrash, ButtonStyle::Danger, false, Action::Clip,
-                    "delete-forever");
-        push_button(x + w - dw - 8 - rw, y, L"Restore", glyph::kRestoreDefaults, ButtonStyle::Line, false, Action::Clip,
-                    "restore");
-    } else {
-        const float dw = button_width(L"Delete", glyph::kTrash, false);
-        push_button(x + w - dw, y, L"Delete", glyph::kTrash, ButtonStyle::Danger, false, Action::Clip, "delete");
-    }
+    const float dw = button_width(L"Delete", glyph::kTrash, false);
+    push_button(x + w - dw, y, L"Delete", glyph::kTrash, ButtonStyle::Danger, false, Action::Clip, "delete");
 }
 
 float App::paint_clip_side(const ClipEntry& clip, const Rect& column) {

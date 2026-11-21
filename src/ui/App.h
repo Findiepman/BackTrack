@@ -25,6 +25,7 @@
 #include "platform/MicCapture.h"
 #include "platform/Recorder.h"
 #include "core/ExportPlan.h"
+#include "core/ThemeColors.h"
 #include "platform/Updater.h"
 #include "platform/Uploader.h"
 #include "platform/VideoPlayer.h"
@@ -128,7 +129,7 @@ private:
     enum class Action {
         None,
         Minimize, Maximize, Close,
-        View,  // arg: "all", "favorites", "recent", "trash" or a collection id
+        View,  // arg: "all", "favorites", "recent", "shared" or a collection id
         NewCollection,
         Page,  // arg: "record", "uploads", "settings"
         SaveNow, TogglePause,
@@ -257,6 +258,30 @@ private:
         std::vector<std::pair<std::string, std::string>> failed;  // file, why
     };
 
+    // Settings > Appearance > Customise (CustomiseDialog.cpp, backtrack.html stPanModal): the four
+    // theme colours with a colour picker, and the background picture.
+    struct CustomiseView {
+        std::optional<int> picking;  // the colour whose picker is open: 0 accent, 1 background, 2 surface, 3 text
+        Hsv hsv;  // the picker's colour; kept apart from the RGB so a grey keeps its hue while dragging
+        Rect chip;  // where the chip of `picking` is drawn, for the picker below it
+        std::optional<std::uint32_t> colour_preview;  // the picked colour while dragging, saved on release
+        std::optional<int> dim_preview;  // Dim while its slider is dragged
+        std::optional<int> blur_preview;  // Blur while its slider is dragged (the picture is blurred on release)
+        std::wstring problem;  // why the last picture could not be used
+    };
+
+    // The background picture, read and blurred on the worker. `original` is kept so a new blur
+    // does not read the file again.
+    struct Backdrop {
+        std::string file;  // settings_.background_image it belongs to
+        int blur = 0;
+        int width = 0;
+        int height = 0;
+        std::shared_ptr<const std::vector<std::uint8_t>> original;  // BGRA, unblurred
+        std::vector<std::uint8_t> blurred;  // BGRA, what is drawn
+    };
+    static constexpr wchar_t kBackdropKey[] = L"backdrop";
+
     // Values a Settings page row can show and change; built in SettingsPage.cpp.
     struct SettingRow;
 
@@ -264,7 +289,7 @@ private:
     void release();  // everything the window owns; also when construct() failed halfway
     void invalidate();
     void apply_look();  // the colour theme from settings_, into the drawing tokens and the GDI brushes
-    void show_notice(std::wstring text);
+    void show_notice(std::wstring text, bool calm = false);
     void request_missing_info();
     void keep_copy_of_library(const wchar_t* why);
     // False (with a notice) while clips go to the Videos fallback: the library's files are elsewhere.
@@ -366,8 +391,8 @@ private:
     void collection_menu(const std::string& id, POINT screen);
     void add_to_collection_menu(const std::string& file, const Rect& anchor);
     void sort_menu(const Rect& anchor);
-    void move_to_trash(const std::string& file);
-    void recycle_now(const std::string& file);
+    void recycle_now(const std::string& file);  // Delete: to the Windows Recycle Bin
+    bool may_recycle(const std::string& file);  // false (with a notice when it helps) while it cannot go now
     // Shows the inline text box over the collection name or clip title being renamed.
     void begin_edit(Editing editing, const std::wstring& text);
     void end_edit(bool commit);
@@ -397,7 +422,25 @@ private:
     void run_share(const std::string& what, const Rect& anchor);
     void paint_share(float width, float height);
     bool copy_text(const std::wstring& text);  // to the clipboard
-    bool dialog_open() const { return export_ || share_; }
+    bool dialog_open() const { return export_ || share_ || customise_; }
+    // Customise (CustomiseDialog.cpp).
+    void open_customise();
+    void close_customise();
+    void run_customise(const std::string& what);
+    void drag_customise(const std::string& id, float fraction, bool done);
+    void paint_customise(float width, float height);
+    void on_hex_changed();
+    void open_picker(int index);
+    void close_picker();  // a colour still being dragged is kept
+    // Sets one of the four theme colours (index as CustomiseView::picking). The theme becomes Custom,
+    // starting from the colours on screen. `save`: false only previews it (while dragging).
+    void set_custom_colour(int index, std::uint32_t rgb, bool save);
+    static Settings with_custom_colour(Settings s, int index, std::uint32_t rgb);
+    void choose_background();
+    void load_background();  // reads and blurs settings_.background_image when it changed
+    std::filesystem::path background_path(const std::string& setting) const;  // a bare name is next to library.json
+    void apply_ui_scale();
+    float sidebar_width() const;  // narrower with "Compact sidebar" on
     bool clip_in_use(const std::string& file) const;  // open on the clip page, exported or shared
     void start_repair_scan(bool quiet);  // quiet: after a folder change, only a notice when some need it
     void start_repair();
@@ -530,6 +573,7 @@ private:
     std::vector<std::size_t> hidden_collections_;  // collection indices behind "N more"
     std::set<std::string> urgent_;  // "file|size" asked for with priority, result not back yet
     std::wstring notice_;  // a short problem report in the header bar (failed recycle)
+    bool notice_calm_ = false;  // not a problem (a clip went to the Recycle Bin): muted, not red
     std::chrono::steady_clock::time_point notice_until_{};
     bool library_writable_ = true;  // false when library.json exists but could not be read
     bool library_rebuilt_ = false;  // library.json was damaged, or missing with clips: no automatic removal this run
@@ -546,6 +590,13 @@ private:
     std::shared_ptr<ExportView> export_;  // the Export window, while it is open
     std::shared_ptr<ShareView> share_;  // the Share window, while it is open
     std::shared_ptr<RepairView> repair_;  // a repair check or run, and its result until checked again
+    std::optional<CustomiseView> customise_;  // the Customise window, while it is open
+    std::optional<Backdrop> backdrop_;  // the background picture, when there is one and it could be read
+    std::uint64_t backdrop_request_ = 0;  // the newest read of the picture; older results are dropped
+    bool background_loading_ = false;  // a chosen picture is being read and copied (one at a time)
+    std::wstring backdrop_problem_;  // the saved picture could not be read (moved, damaged)
+    HWND hex_box_ = nullptr;  // the colour picker's "#rrggbb" box
+    bool setting_hex_ = false;  // the program is writing hex_box_: its EN_CHANGE is not the user's
     std::string clip_title_drawn_;  // the title the side panel shows, to notice a rename elsewhere
     bool trimming_ = false;
     LPARAM next_player_tag_ = 1;

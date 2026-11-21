@@ -17,7 +17,7 @@ namespace {
 // The words of each choice in the ini, in the enum's order.
 constexpr std::array<std::string_view, 3> kQualityNames = {"performance", "balanced", "quality"};
 constexpr std::array<std::string_view, 4> kCornerNames = {"top_left", "top_right", "bottom_left", "bottom_right"};
-constexpr std::array<std::string_view, 5> kThemeNames = {"night", "harbor", "plum", "moss", "daylight"};
+constexpr std::array<std::string_view, 6> kThemeNames = {"night", "harbor", "plum", "moss", "daylight", "custom"};
 constexpr std::array<std::string_view, 2> kDensityNames = {"comfortable", "compact"};
 constexpr std::array<std::string_view, 3> kThumbnailNames = {"small", "medium", "large"};
 constexpr std::array<std::string_view, 2> kShareHostNames = {"catbox", "litterbox"};
@@ -34,6 +34,10 @@ constexpr std::array<int, 3> kAllowedResolutions = {720, 1080, 1440};
 
 constexpr long long kMinOverlayOpacity = 20;
 constexpr long long kMaxOverlayOpacity = 100;
+
+constexpr long long kMaxBackgroundDim = 90;
+constexpr long long kMaxBackgroundBlur = 24;
+constexpr std::array<int, 4> kAllowedUiScales = {90, 100, 110, 125};
 
 // The Microsoft AAC encoder accepts exactly these bitrates (12000, 16000, 20000 and 24000 bytes
 // per second) and rejects the media type for anything else.
@@ -254,6 +258,27 @@ public:
             choice(s_.thumbnail_size, kThumbnailNames);
         } else if (id == "appearance.reduce_motion") {
             boolean(s_.reduce_motion);
+        } else if (id == "appearance.custom_accent") {
+            colour(s_.custom_accent);
+        } else if (id == "appearance.custom_background") {
+            colour(s_.custom_background);
+        } else if (id == "appearance.custom_surface") {
+            colour(s_.custom_surface);
+        } else if (id == "appearance.custom_text") {
+            colour(s_.custom_text);
+        } else if (id == "appearance.background_image") {
+            warn_if_comment_cut();
+            s_.background_image = e_.value;  // empty is allowed: no picture
+        } else if (id == "appearance.background_dim") {
+            clamped_int(s_.background_dim, 0, kMaxBackgroundDim);
+        } else if (id == "appearance.background_blur") {
+            clamped_int(s_.background_blur, 0, kMaxBackgroundBlur);
+        } else if (id == "appearance.ui_scale") {
+            snapped_int(s_.ui_scale, kAllowedUiScales);
+        } else if (id == "appearance.sidebar_counts") {
+            boolean(s_.sidebar_counts);
+        } else if (id == "appearance.sidebar_compact") {
+            boolean(s_.sidebar_compact);
         } else if (id == "logging.level") {
             log_level();
         } else {
@@ -400,6 +425,17 @@ private:
         target = hotkey_to_string(*parsed.hotkey);
     }
 
+    // Six hex digits, "ffb547". A leading '#' is accepted too, but only survives inside quotes:
+    // unquoted, '#' starts a comment.
+    void colour(std::uint32_t& target) {
+        if (const auto value = parse_colour(e_.value)) {
+            target = *value;
+        } else {
+            warn(std::format("{} = '{}' should be a colour as six hex digits (like ffb547), keeping {}", e_.key,
+                             e_.value, colour_text(target)));
+        }
+    }
+
     // One of a fixed list of words, by the enum's order.
     template <typename Enum, std::size_t N>
     void choice(Enum& target, const std::array<std::string_view, N>& names) {
@@ -462,6 +498,26 @@ private:
 };
 
 }  // namespace
+
+std::optional<std::uint32_t> parse_colour(std::string_view text) {
+    text = trim(text);
+    if (text.starts_with('#')) {
+        text.remove_prefix(1);
+    }
+    if (text.size() != 6) {
+        return std::nullopt;
+    }
+    std::uint32_t value = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value, 16);
+    if (error != std::errc{} || end != text.data() + text.size()) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+std::string colour_text(std::uint32_t rgb) {
+    return std::format("{:06x}", rgb & 0xFFFFFF);
+}
 
 IniDocument parse_ini(std::string_view text) {
     IniDocument doc;
@@ -650,7 +706,7 @@ position = top_right
 opacity = 85
 
 [appearance]
-; night, harbor, plum, moss or daylight
+; night, harbor, plum, moss, daylight or custom
 theme = night
 ; comfortable or compact
 density = comfortable
@@ -658,6 +714,24 @@ density = comfortable
 thumbnail_size = medium
 ; Turn off animations.
 reduce_motion = false
+; The custom theme's colours, six hex digits each (without '#').
+custom_accent = ffb547
+custom_background = 0e1014
+custom_surface = 171a21
+custom_text = e9ecf2
+; A picture behind the window. Settings > Appearance > Customise copies the one you pick next to
+; library.json and puts its file name here (a full path works too). Empty: no picture.
+background_image =
+; How much the background colour covers the picture, in percent, 0 to 90.
+background_dim = 45
+; How blurred the picture is, 0 (sharp) to 24.
+background_blur = 4
+; The size of everything in the window, in percent of the Windows scaling: 90, 100, 110 or 125.
+ui_scale = 100
+; Show how many clips each view and collection has in the sidebar.
+sidebar_counts = true
+; A narrow sidebar with only icons.
+sidebar_compact = false
 
 [logging]
 ; error, warning, info or debug
@@ -721,7 +795,7 @@ struct KnownKey {
 };
 
 // In the order of the default file, so appended keys and sections follow it.
-constexpr std::array<KnownKey, 43> kKnownKeys = {{
+constexpr std::array<KnownKey, 53> kKnownKeys = {{
     {"general", "start_minimized", [](const Settings& s) { return bool_text(s.start_minimized); }},
     {"general", "auto_update", [](const Settings& s) { return bool_text(s.auto_update); }},
     {"clip", "seconds", [](const Settings& s) { return std::to_string(s.clip_seconds); }},
@@ -765,6 +839,16 @@ constexpr std::array<KnownKey, 43> kKnownKeys = {{
     {"appearance", "density", [](const Settings& s) { return name_of(s.density, kDensityNames); }},
     {"appearance", "thumbnail_size", [](const Settings& s) { return name_of(s.thumbnail_size, kThumbnailNames); }},
     {"appearance", "reduce_motion", [](const Settings& s) { return bool_text(s.reduce_motion); }},
+    {"appearance", "custom_accent", [](const Settings& s) { return colour_text(s.custom_accent); }},
+    {"appearance", "custom_background", [](const Settings& s) { return colour_text(s.custom_background); }},
+    {"appearance", "custom_surface", [](const Settings& s) { return colour_text(s.custom_surface); }},
+    {"appearance", "custom_text", [](const Settings& s) { return colour_text(s.custom_text); }},
+    {"appearance", "background_image", [](const Settings& s) { return encode_string(s.background_image); }},
+    {"appearance", "background_dim", [](const Settings& s) { return std::to_string(s.background_dim); }},
+    {"appearance", "background_blur", [](const Settings& s) { return std::to_string(s.background_blur); }},
+    {"appearance", "ui_scale", [](const Settings& s) { return std::to_string(s.ui_scale); }},
+    {"appearance", "sidebar_counts", [](const Settings& s) { return bool_text(s.sidebar_counts); }},
+    {"appearance", "sidebar_compact", [](const Settings& s) { return bool_text(s.sidebar_compact); }},
     {"logging", "level", [](const Settings& s) { return std::string(log_level_name(s.log_level)); }},
 }};
 
